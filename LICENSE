@@ -1,0 +1,107 @@
+photovault Community License
+Version 1.0
+
+Copyright (c) 2026 The photovault Authors
+
+Permission is hereby granted, free of charge, to any person or organization
+obtaining a copy of this software and associated documentation files (the
+"Software"), to use, copy, modify, and distribute the Software, subject to
+the following terms and conditions.
+
+---------------------------------------------------------------------------
+1. DEFINITIONS
+---------------------------------------------------------------------------
+
+"Software" means the photovault source code, binaries, documentation, and
+any derivative works thereof.
+
+"Internal Use" means use of the Software solely for the internal purposes
+of the user or organization, including internal workflows, internal tools,
+and internal services, where access to the Software or its functionality
+is not sold, sublicensed, or provided to third parties as a service.
+
+"Service Offering" means making the Software or its functionality available
+to third parties as a hosted service, managed service, subscription service,
+software-as-a-service (SaaS), platform-as-a-service (PaaS), or any similar
+commercial or non-commercial offering where third parties interact with
+the Software remotely.
+
+"Resale" means selling, licensing, sublicensing, or charging fees for
+access to the Software or its functionality as a product or service.
+
+---------------------------------------------------------------------------
+2. GRANT OF RIGHTS
+---------------------------------------------------------------------------
+
+Subject to the restrictions below, you are permitted to:
+
+a) Use the Software for non-commercial purposes.
+b) Use the Software for Internal Use, including internal commercial use.
+c) Modify the Software for Internal Use.
+d) Distribute unmodified copies of the Software, provided that this License
+   is included in full with the distribution.
+
+---------------------------------------------------------------------------
+3. RESTRICTIONS
+---------------------------------------------------------------------------
+
+The following uses are explicitly prohibited:
+
+a) Offering the Software, or any modified version of it, as a Service Offering.
+b) Reselling access to the Software or its functionality.
+c) Providing hosted, managed, or subscription-based access to the Software
+   for third parties.
+d) Using the Software as part of a product or service whose primary purpose
+   is to provide third parties with access to the Software’s functionality.
+
+For clarity:
+- Running the Software internally for your own business operations is allowed.
+- Allowing clients, customers, or external users to access the Software or
+  its functionality as a service is not allowed.
+
+---------------------------------------------------------------------------
+4. DERIVATIVE WORKS
+---------------------------------------------------------------------------
+
+You may create and use modified versions of the Software for Internal Use.
+
+You may not distribute modified versions of the Software as part of a
+Service Offering or Resale.
+
+This License does not grant permission to remove or alter licensing notices.
+
+---------------------------------------------------------------------------
+5. NO WARRANTY
+---------------------------------------------------------------------------
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE, AND NON-INFRINGEMENT.
+
+---------------------------------------------------------------------------
+6. LIMITATION OF LIABILITY
+---------------------------------------------------------------------------
+
+IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+DAMAGES, OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT, OR
+OTHERWISE, ARISING FROM, OUT OF, OR IN CONNECTION WITH THE SOFTWARE OR THE
+USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+---------------------------------------------------------------------------
+7. TERMINATION
+---------------------------------------------------------------------------
+
+Any violation of this License automatically terminates the rights granted
+herein. Upon termination, you must cease all use and distribution of the
+Software.
+
+---------------------------------------------------------------------------
+8. GOVERNING LAW
+---------------------------------------------------------------------------
+
+This License shall be governed by and construed in accordance with the laws
+of the jurisdiction in which the primary copyright holder resides, without
+regard to conflict of law provisions.
+
+---------------------------------------------------------------------------
+END OF TERMS AND CONDITIONS

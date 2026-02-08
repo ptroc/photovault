@@ -1,0 +1,94 @@
+# =========================
+# Python
+# =========================
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Packaging / build
+build/
+dist/
+*.egg-info/
+
+# Test artifacts
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# =========================
+# Runtime / local state
+# =========================
+# SQLite databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Local state / queues / staging
+data/
+staging/
+uploads/
+tmp/
+
+# Logs
+*.log
+logs/
+
+# =========================
+# OS / editor noise
+# =========================
+.DS_Store
+Thumbs.db
+
+# Editors / IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# =========================
+# Ansible
+# =========================
+*.retry
+ansible/*.retry
+
+# Secrets (never commit)
+.env
+.env.*
+secrets/
+*.key
+*.pem
+
+# =========================
+# systemd / deployment
+# =========================
+# Generated or local override units
+*.service.local
+*.override.conf
+
+# =========================
+# Frontend (if any later)
+# =========================
+node_modules/
+npm-debug.log*
+yarn-error.log*
+
+# =========================
+# Documentation build output
+# =========================
+site/
+
+# =========================
+# IDEA inteljij
+# =========================
+.idea
+*.iml
