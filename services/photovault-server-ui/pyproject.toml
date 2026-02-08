@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "photovault-server-ui"
+version = "0.1.0"
+description = "photovault server SSR UI"
+requires-python = ">=3.11"
+dependencies = [
+  "flask>=3.0,<4"
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

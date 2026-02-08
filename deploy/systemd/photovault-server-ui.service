@@ -1,0 +1,13 @@
+[Unit]
+Description=photovault server UI
+After=photovault-api.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/photovault/services/photovault-server-ui
+ExecStart=/usr/bin/python -m photovault_server_ui.main
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

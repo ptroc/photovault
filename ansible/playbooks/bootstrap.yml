@@ -1,0 +1,21 @@
+---
+- name: Bootstrap photovault host
+  hosts: all
+  become: true
+  tasks:
+    - name: Ensure baseline packages are present
+      ansible.builtin.package:
+        name:
+          - python3
+          - python3-venv
+          - python3-pip
+          - sqlite3
+        state: present
+
+    - name: Ensure photovault root exists
+      ansible.builtin.file:
+        path: /opt/photovault
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"

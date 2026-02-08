@@ -1,0 +1,4 @@
+-e services/photovault-clientd
+-e services/photovault-client-ui
+-e services/photovault-api
+-e services/photovault-server-ui

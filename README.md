@@ -6,7 +6,7 @@ It focuses on:
 - safe ingestion from SD cards
 - strong integrity guarantees (SHA256-based)
 - deduplication (client-side and server-side)
-- resumable, retry-safe uploads
+- non-resumable, retry-safe uploads (v1)
 - long-term reliability over convenience
 
 photovault is designed to run on small, autonomous devices (e.g. Raspberry Pi clients) that upload to a central server when connectivity is available.
@@ -50,6 +50,37 @@ Canonical project documents (see `docs/`):
   Client state machine and transitions
 
 These documents are treated as sources of truth.
+
+---
+
+## Repository Skeleton
+
+The repository now includes a minimal implementation skeleton for all core components:
+
+- `services/photovault-clientd` (client daemon, local state + control API)
+- `services/photovault-client-ui` (client control-plane SSR UI)
+- `services/photovault-api` (server API)
+- `services/photovault-server-ui` (server SSR monitoring UI)
+- `deploy/systemd` (service unit skeletons)
+- `ansible/playbooks` (bootstrap playbook skeleton)
+- `scripts/dev` (local developer helper scripts)
+
+This is intentionally a scaffold: explicit entrypoints, placeholder endpoints, and basic tests.
+Business logic for ingest, hashing, deduplication, and upload state transitions should be implemented
+incrementally against the v1 state machine and roadmap docs.
+
+---
+
+## Dev Workflow (Root Makefile)
+
+Use root-level commands for consistent local setup and checks:
+
+- `make venv`
+- `make install` (uses `requirements.txt`)
+- `make install-dev`
+- `make lint`
+- `make test`
+- `make check`
 
 ---
 
@@ -99,4 +130,3 @@ See the `LICENSE` file for full terms.
 
 At this stage, the project is design-driven.
 Contributions, discussions, and feedback are welcome, but major changes should be aligned with the existing documentation and goals.
-

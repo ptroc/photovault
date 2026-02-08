@@ -1,0 +1,13 @@
+[Unit]
+Description=photovault client UI
+After=photovault-clientd.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/photovault/services/photovault-client-ui
+ExecStart=/usr/bin/python -m photovault_client_ui.main
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

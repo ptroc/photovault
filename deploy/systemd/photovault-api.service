@@ -1,0 +1,14 @@
+[Unit]
+Description=photovault server API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/photovault/services/photovault-api
+ExecStart=/usr/bin/python -m photovault_api.main
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
