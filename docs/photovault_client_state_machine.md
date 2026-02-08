@@ -11,7 +11,7 @@ It is **offline-first**, **SQLite-persisted**, **reboot-safe**, and reflects **v
 ## Core principles
 
 - Single long-running daemon: `photovault-clientd`
-- UI is control-plane only (start ingest, show status, network setup)
+- Client UI is required and control-plane only (start ingest, show status, network setup)
 - All job + file state persisted locally (SQLite)
 - Ingest, copy, hashing, dedup work **without Internet**
 - Network-dependent states explicitly gated by `WAIT_NETWORK`

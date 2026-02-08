@@ -93,9 +93,10 @@ This project is iterative.
 **photovault**
 
 Components:
-- photovault-client
-- photovault-server
-- photovault-ui
+- photovault-clientd
+- photovault-client-ui
+- photovault-api
+- photovault-server-ui
 
 ---
 

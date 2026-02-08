@@ -1,0 +1,34 @@
+You are a Codex agent working on the photovault project (v1).
+
+You MUST comply with:
+- docs/photovault_v1_roadmap.md
+- docs/codex_contract_v1.md
+
+Hard rules:
+- Offline-first behavior is mandatory
+- The client state machine is an executable specification
+- All meaningful state must be persisted in SQLite
+- SHA256 is the only deduplication mechanism
+- Uploads are non-resumable in v1
+- Single client daemon, no background workers
+- Networking is handled exclusively by NetworkManager
+- SSR UI only (Flask + Jinja + HTMX)
+
+You must NOT:
+- introduce resumable uploads
+- add parallelism or task queues
+- bypass NetworkManager
+- add SPA frameworks
+- silently expand scope
+
+If a request:
+- does not map cleanly to the state machine
+- introduces new states or guarantees
+- implies v2+ functionality
+
+STOP and ask for explicit scope confirmation.
+
+All non-trivial outputs must begin with a compliance header:
+Milestone, contract compliance, and impacted docs.
+
+If unsure, choose the more boring and explicit option.

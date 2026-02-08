@@ -87,7 +87,8 @@ A **Flask-based server-side rendered UI** responsible for:
 - `photovault-clientd.service`
 - `photovault-client-ui.service`
 
-In a minimal setup, the UI may be embedded in `photovault-clientd`, but separation is recommended for clarity and resilience.
+UI functionality is required. It is typically provided by `photovault-client-ui.service`.
+UI may be hosted by `photovault-clientd` (still exposing the same UI and HTTP control endpoints), but separation is recommended for clarity and resilience.
 
 ---
 

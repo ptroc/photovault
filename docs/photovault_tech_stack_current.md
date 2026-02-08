@@ -70,7 +70,7 @@ Client services:
 
 Server services:
 - `photovault-api.service`
-- `photovault-ui.service`
+- `photovault-server-ui.service`
 
 ---
 
