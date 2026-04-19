@@ -1123,8 +1123,8 @@ def run_server_verify_tick(conn, *, server_base_url: str = DEFAULT_SERVER_BASE_U
 
     if verify_status == "VERIFY_FAILED":
         mark_uploaded_for_reupload(conn, file_id, "server verification failed", now)
-        set_job_status(conn, job_id, ClientState.WAIT_NETWORK.value, now)
-        next_state = ClientState.WAIT_NETWORK
+        set_job_status(conn, job_id, ClientState.REUPLOAD_OR_QUARANTINE.value, now)
+        next_state = ClientState.REUPLOAD_OR_QUARANTINE
     elif verify_status == "ALREADY_EXISTS":
         mark_file_duplicate_global(conn, file_id, now)
         set_job_status(conn, job_id, ClientState.POST_UPLOAD_VERIFY.value, now)
@@ -1158,6 +1158,53 @@ def run_server_verify_tick(conn, *, server_base_url: str = DEFAULT_SERVER_BASE_U
         "file_id": file_id,
         "verify_status": verify_status,
         "next_state": next_state.value,
+    }
+
+
+def run_reupload_or_quarantine_tick(conn) -> dict[str, object]:
+    """Apply v1 reupload policy after server verify failure."""
+    now = datetime.now(UTC).isoformat()
+    candidate = fetch_next_ready_to_upload_file(conn)
+    if candidate is None:
+        transition_daemon_state(
+            conn,
+            ClientState.WAIT_NETWORK,
+            now,
+            reason="reupload tick found no ready files",
+        )
+        return {
+            "handled": True,
+            "progressed": False,
+            "errored": False,
+            "next_state": ClientState.WAIT_NETWORK.value,
+        }
+
+    file_id = int(candidate["file_id"])
+    job_id = int(candidate["job_id"])
+    set_job_status(conn, job_id, ClientState.WAIT_NETWORK.value, now)
+    transition_daemon_state(
+        conn,
+        ClientState.WAIT_NETWORK,
+        now,
+        reason=f"reupload scheduled for file_id={file_id}",
+        commit=False,
+    )
+    append_daemon_event(
+        conn,
+        level=EventLevel.INFO,
+        category=EventCategory.SERVER_VERIFY_RETRY_SCHEDULED,
+        message=f"reupload scheduled for file_id={file_id}",
+        created_at_utc=now,
+        from_state=ClientState.REUPLOAD_OR_QUARANTINE,
+        to_state=ClientState.WAIT_NETWORK,
+    )
+    conn.commit()
+    return {
+        "handled": True,
+        "progressed": True,
+        "errored": False,
+        "file_id": file_id,
+        "next_state": ClientState.WAIT_NETWORK.value,
     }
 
 
@@ -1356,6 +1403,8 @@ def run_daemon_tick(
         return run_upload_file_tick(conn, server_base_url=server_base_url)
     if state == ClientState.SERVER_VERIFY:
         return run_server_verify_tick(conn, server_base_url=server_base_url)
+    if state == ClientState.REUPLOAD_OR_QUARANTINE:
+        return run_reupload_or_quarantine_tick(conn)
     if state == ClientState.POST_UPLOAD_VERIFY:
         return run_post_upload_verify_tick(conn)
     if state == ClientState.CLEANUP_STAGING:

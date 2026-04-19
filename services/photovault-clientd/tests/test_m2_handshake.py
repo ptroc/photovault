@@ -381,7 +381,11 @@ def test_server_verify_failure_moves_file_back_to_ready_to_upload(tmp_path: Path
         verify_tick = client.post("/daemon/tick")
         assert verify_tick.status_code == 200
         assert verify_tick.json()["verify_status"] == "VERIFY_FAILED"
-        assert verify_tick.json()["next_state"] == "WAIT_NETWORK"
+        assert verify_tick.json()["next_state"] == "REUPLOAD_OR_QUARANTINE"
+
+        reupload_tick = client.post("/daemon/tick")
+        assert reupload_tick.status_code == 200
+        assert reupload_tick.json()["next_state"] == "WAIT_NETWORK"
 
         detail_response = client.get(f"/ingest/jobs/{job_id}")
         file_row = detail_response.json()["files"][0]
