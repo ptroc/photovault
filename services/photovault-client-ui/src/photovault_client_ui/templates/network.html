@@ -1,0 +1,121 @@
+{% extends "_base.html" %}
+
+{% block content %}
+  <section class="grid section">
+    <article class="card">
+      <h2>Network</h2>
+      {% if network_error %}
+        <div class="banner banner-error">
+          <strong>Network action failed.</strong>
+          <span>{{ network_error }}</span>
+        </div>
+      {% endif %}
+
+      {% if network_snapshot %}
+        <div class="kpi {% if network_snapshot.general.connectivity == 'full' %}status-ok{% else %}status-warn{% endif %}">
+          {{ network_snapshot.general.connectivity }}
+        </div>
+        <p class="muted">
+          State: {{ network_snapshot.general.state }}<br>
+          Wi-Fi: {{ network_snapshot.general.wifi }}
+        </p>
+      {% else %}
+        <p class="status-error">NetworkManager data unavailable.</p>
+      {% endif %}
+
+      <div class="button-row">
+        <form method="post" action="/network/scan">
+          <button type="submit" class="secondary">Scan networks</button>
+        </form>
+      </div>
+
+      <form class="form-grid section" method="post" action="/network/connect">
+        <div>
+          <label for="ssid">SSID</label>
+          <input id="ssid" name="ssid" value="{{ network_form.ssid }}" required>
+        </div>
+        <div>
+          <label for="password">Password</label>
+          <input id="password" name="password" type="password" value="{{ network_form.password }}">
+        </div>
+        <div class="button-row">
+          <button type="submit">Connect Wi-Fi</button>
+        </div>
+      </form>
+    </article>
+
+    <article class="card">
+      <h2>Daemon State</h2>
+      {% if state %}
+        <div class="kpi status-active">{{ state.current_state }}</div>
+        <p class="muted">Updated: {{ state.updated_at_utc }}</p>
+      {% else %}
+        <p class="status-error">Unavailable</p>
+      {% endif %}
+    </article>
+  </section>
+
+  <section class="section">
+    <article class="card">
+      <h2>Network Devices</h2>
+      {% if network_snapshot and network_snapshot.devices %}
+        <table>
+          <thead>
+            <tr>
+              <th>Device</th>
+              <th>Type</th>
+              <th>State</th>
+              <th>Connection</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for device in network_snapshot.devices %}
+              <tr>
+                <td><code>{{ device.device }}</code></td>
+                <td>{{ device.type }}</td>
+                <td>{{ device.state }}</td>
+                <td>{{ device.connection }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% else %}
+        <p class="muted">No NetworkManager device data is available.</p>
+      {% endif %}
+    </article>
+  </section>
+
+  <section class="section">
+    <article class="card">
+      <h2>Visible Wi-Fi Networks</h2>
+      {% if network_snapshot and network_snapshot.wifi_networks %}
+        <table>
+          <thead>
+            <tr>
+              <th>In use</th>
+              <th>SSID</th>
+              <th>Signal</th>
+              <th>Security</th>
+              <th>Channel</th>
+              <th>Rate</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for network in network_snapshot.wifi_networks %}
+              <tr>
+                <td>{{ network.in_use or "" }}</td>
+                <td>{{ network.ssid }}</td>
+                <td>{{ network.signal }}</td>
+                <td>{{ network.security }}</td>
+                <td>{{ network.channel }}</td>
+                <td>{{ network.rate }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% else %}
+        <p class="muted">No visible Wi-Fi networks are currently reported.</p>
+      {% endif %}
+    </article>
+  </section>
+{% endblock %}

@@ -1,0 +1,230 @@
+<section id="overview-shell">
+  <section class="grid section">
+    <article class="card">
+      <h2>Start Ingest</h2>
+      {% if ingest_error %}
+        <div class="banner banner-error">
+          <strong>Ingest request failed.</strong>
+          <span>{{ ingest_error }}</span>
+        </div>
+      {% endif %}
+      {% if ingest_notice %}
+        <div class="banner banner-success">
+          <strong>Ingest queued.</strong>
+          <span>{{ ingest_notice }}</span>
+        </div>
+      {% endif %}
+      <form class="form-grid" method="post" action="/ingest/jobs" data-ajax-target="#overview-shell">
+        <div>
+          <label for="media_label">Media label</label>
+          <input id="media_label" name="media_label" value="{{ ingest_form.media_label }}" required>
+        </div>
+        <div>
+          <label for="source_paths">Source paths</label>
+          <textarea id="source_paths" name="source_paths" required>{{ ingest_form.source_paths }}</textarea>
+          <p class="muted">Enter one absolute path per line.</p>
+        </div>
+        <div class="button-row">
+          <button type="submit">Create ingest job</button>
+        </div>
+      </form>
+    </article>
+
+    <article class="card">
+      <h2>Daemon State</h2>
+      {% if state %}
+        <div class="kpi status-active">{{ state.current_state }}</div>
+        <p class="muted">Updated: {{ state.updated_at_utc }}</p>
+      {% else %}
+        <p class="status-error">Unavailable</p>
+      {% endif %}
+    </article>
+
+    <article class="card">
+      <h2>M0 Diagnostics</h2>
+      {% if diagnostics %}
+        <div class="kpi {% if diagnostics.ok %}status-ok{% else %}status-error{% endif %}">
+          {% if diagnostics.ok %}PASS{% else %}FAIL{% endif %}
+        </div>
+        <p class="muted">Invariant issues: {{ diagnostics.invariant_issue_count }}</p>
+        <p class="muted">Pending bootstrap entries: {{ diagnostics.pending_bootstrap_entries }}</p>
+      {% else %}
+        <p class="status-error">Unavailable</p>
+      {% endif %}
+    </article>
+
+    <article class="card">
+      <h2>Operator Actions</h2>
+      {% if operator_notice %}
+        <div class="banner banner-success">
+          <strong>Action complete.</strong>
+          <span>{{ operator_notice }}</span>
+        </div>
+      {% endif %}
+      <div class="button-row">
+        <form method="post" action="/actions/daemon/tick" data-ajax-target="#overview-shell">
+          {% if selected_job_id %}
+            <input type="hidden" name="selected_job_id" value="{{ selected_job_id }}">
+          {% endif %}
+          <button type="submit">Run daemon tick</button>
+        </form>
+        <a
+          href="{% if selected_job_id %}/jobs/{{ selected_job_id }}{% else %}/{% endif %}"
+          class="button-link secondary"
+          data-ajax-target="#overview-shell"
+        >Refresh status</a>
+      </div>
+      <p class="muted">These actions refresh the dashboard in place and keep state changes inside the daemon.</p>
+    </article>
+  </section>
+
+  <section class="section">
+    <article class="card">
+      <div class="section-head">
+        <h2>Ingest Jobs</h2>
+        {% if selected_job %}
+          <a href="/" data-ajax-target="#overview-shell">Back to overview</a>
+        {% endif %}
+      </div>
+      {% if jobs %}
+        <table>
+          <thead>
+            <tr>
+              <th>Job</th>
+              <th>Status</th>
+              <th>Local ingest</th>
+              <th>Upload pending</th>
+              <th>Status counts</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for job in jobs %}
+              <tr>
+                <td>
+                  <a href="/jobs/{{ job.job_id }}" data-ajax-target="#overview-shell"><strong>#{{ job.job_id }}</strong></a><br>
+                  <span class="muted">{{ job.media_label }}</span>
+                </td>
+                <td>{{ job.status }}</td>
+                <td>
+                  {% if job.local_ingest_complete %}
+                    <span class="status-ok">complete</span>
+                  {% else %}
+                    <span class="status-warn">in progress</span>
+                  {% endif %}
+                </td>
+                <td>
+                  {% if job.upload_pending %}
+                    <span class="status-warn">yes</span>
+                  {% else %}
+                    <span class="status-ok">no</span>
+                  {% endif %}
+                </td>
+                <td>
+                  {% for status, count in job.status_counts.items() %}
+                    <div><code>{{ status }}</code>: {{ count }}</div>
+                  {% endfor %}
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% else %}
+        <p class="muted">No ingest jobs are currently tracked.</p>
+      {% endif %}
+    </article>
+  </section>
+
+  {% if selected_job %}
+    <section class="section">
+      <article class="card">
+        <div class="section-head">
+          <h2>Job #{{ selected_job.job_id }} Detail</h2>
+          <span class="muted">{{ selected_job.media_label }}</span>
+        </div>
+
+        <div class="grid">
+          <div>
+            <div class="kpi status-active">{{ selected_job.status }}</div>
+            <p class="muted">Updated: {{ selected_job.updated_at_utc }}</p>
+          </div>
+          <div>
+            <div class="kpi {% if selected_job.local_ingest_complete %}status-ok{% else %}status-warn{% endif %}">
+              {% if selected_job.local_ingest_complete %}Local Complete{% else %}Local Active{% endif %}
+            </div>
+            <p class="muted">
+              Upload pending:
+              {% if selected_job.upload_pending %}yes{% else %}no{% endif %}
+            </p>
+          </div>
+        </div>
+
+        <div class="section">
+          <h3>Status Counts</h3>
+          {% for status, count in selected_job.status_counts.items() %}
+            <div><code>{{ status }}</code>: {{ count }}</div>
+          {% endfor %}
+        </div>
+
+        <div class="section">
+          <h3>Files</h3>
+          <table>
+            <thead>
+              <tr>
+                <th>File</th>
+                <th>Status</th>
+                <th>SHA</th>
+                <th>Retries</th>
+                <th>Last error</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for file in selected_job.files %}
+                <tr>
+                  <td>
+                    <strong>#{{ file.file_id }}</strong><br>
+                    <span class="muted">{{ file.source_path }}</span>
+                  </td>
+                  <td><code>{{ file.status }}</code></td>
+                  <td>
+                    {% if file.sha256_hex %}
+                      <code>{{ file.sha256_hex }}</code>
+                    {% else %}
+                      <span class="muted">pending</span>
+                    {% endif %}
+                  </td>
+                  <td>{{ file.retry_count }}</td>
+                  <td>
+                    {% if file.last_error %}
+                      <span class="status-error">{{ file.last_error }}</span>
+                    {% else %}
+                      <span class="muted">none</span>
+                    {% endif %}
+                  </td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </article>
+    </section>
+  {% endif %}
+
+  <section class="section">
+    <article class="card">
+      <h2>Recent Events</h2>
+      {% if events %}
+        <ul class="list-inline">
+          {% for event in events %}
+            <li>
+              <strong>{{ event.category }}</strong>
+              <span class="muted">({{ event.created_at_utc }})</span><br>
+              <span>{{ event.message }}</span>
+            </li>
+          {% endfor %}
+        </ul>
+      {% else %}
+        <p class="muted">No daemon events are available.</p>
+      {% endif %}
+    </article>
+  </section>
+</section>

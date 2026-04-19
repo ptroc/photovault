@@ -2,13 +2,27 @@
 Description=photovault server API
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=120
+StartLimitBurst=20
 
 [Service]
 Type=simple
+User=photovault
+Group=photovault
 WorkingDirectory=/opt/photovault/services/photovault-api
-ExecStart=/usr/bin/python -m photovault_api.main
-Restart=on-failure
-RestartSec=5
+EnvironmentFile=-/etc/photovault/photovault-api.env
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/photovault/.venv/bin/python -m photovault_api.main
+Restart=always
+RestartSec=2
+TimeoutStartSec=30
+TimeoutStopSec=30
+LogsDirectory=photovault
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
 
 [Install]
 WantedBy=multi-user.target

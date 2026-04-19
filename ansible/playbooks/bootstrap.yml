@@ -2,6 +2,14 @@
 - name: Bootstrap photovault host
   hosts: all
   become: true
+  vars:
+    photovault_user: photovault
+    photovault_group: photovault
+    photovault_root: /opt/photovault
+    photovault_env_dir: /etc/photovault
+    photovault_log_dir: /var/log/photovault
+    clientd_state_dir: /var/lib/photovault-clientd
+    systemd_unit_dir: /etc/systemd/system
   tasks:
     - name: Ensure baseline packages are present
       ansible.builtin.package:
@@ -12,10 +20,72 @@
           - sqlite3
         state: present
 
-    - name: Ensure photovault root exists
+    - name: Ensure photovault group exists
+      ansible.builtin.group:
+        name: "{{ photovault_group }}"
+        system: true
+
+    - name: Ensure photovault user exists
+      ansible.builtin.user:
+        name: "{{ photovault_user }}"
+        group: "{{ photovault_group }}"
+        shell: /usr/sbin/nologin
+        system: true
+        create_home: false
+
+    - name: Ensure photovault base directories exist
       ansible.builtin.file:
-        path: /opt/photovault
+        path: "{{ item.path }}"
         state: directory
+        owner: "{{ item.owner }}"
+        group: "{{ item.group }}"
+        mode: "{{ item.mode }}"
+      loop:
+        - { path: "{{ photovault_root }}", owner: "root", group: "root", mode: "0755" }
+        - { path: "{{ photovault_env_dir }}", owner: "root", group: "{{ photovault_group }}", mode: "0750" }
+        - { path: "{{ photovault_log_dir }}", owner: "{{ photovault_user }}", group: "{{ photovault_group }}", mode: "0750" }
+        - { path: "{{ clientd_state_dir }}", owner: "{{ photovault_user }}", group: "{{ photovault_group }}", mode: "0750" }
+
+    - name: Ensure service environment files exist
+      ansible.builtin.copy:
+        dest: "{{ photovault_env_dir }}/{{ item }}.env"
+        content: |
+          # Managed by Ansible (bootstrap playbook)
+        owner: root
+        group: "{{ photovault_group }}"
+        mode: "0640"
+        force: false
+      loop:
+        - photovault-clientd
+        - photovault-client-ui
+        - photovault-api
+        - photovault-server-ui
+
+    - name: Install systemd unit files
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../../deploy/systemd/{{ item }}"
+        dest: "{{ systemd_unit_dir }}/{{ item }}"
         owner: root
         group: root
-        mode: "0755"
+        mode: "0644"
+      loop:
+        - photovault-clientd.service
+        - photovault-client-ui.service
+        - photovault-api.service
+        - photovault-server-ui.service
+      notify: Reload systemd
+
+    - name: Enable photovault services
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        enabled: true
+      loop:
+        - photovault-clientd.service
+        - photovault-client-ui.service
+        - photovault-api.service
+        - photovault-server-ui.service
+
+  handlers:
+    - name: Reload systemd
+      ansible.builtin.systemd:
+        daemon_reload: true

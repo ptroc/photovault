@@ -38,15 +38,15 @@ Only non-terminal files are resumed after reboot.
 
 | Current state | Trigger / event | Guard / condition | Actions (idempotent) | Next state | Failure / retry |
 |---|---|---|---|---|---|
-| **BOOTSTRAP** | daemon start / reboot | always | Open SQLite; run recovery scan; re-enqueue unfinished file states | **IDLE** | DB fatal → **ERROR_DAEMON** |
+| **BOOTSTRAP** | daemon start / reboot | always | Open SQLite; run recovery scan; re-enqueue unfinished file states; select highest-priority resume phase from queued work | **IDLE** if no queued work, otherwise first queued phase (STAGING_COPY > HASHING > DEDUP_SESSION_SHA > DEDUP_LOCAL_SHA > QUEUE_UPLOAD > WAIT_NETWORK > SERVER_VERIFY > VERIFY_HASH) | DB fatal → **ERROR_DAEMON** |
 | **IDLE** | SD inserted / ingest requested | SD mounted | Create Job; enumerate SD files; persist file records (DISCOVERED) | **DISCOVERING** | SD missing → **WAIT_MEDIA** |
 | **WAIT_MEDIA** | media detected | SD mounted | Same as above | **DISCOVERING** | Remain with backoff |
 | **DISCOVERING** | enumeration finished | files found | Persist snapshot; mark job DISCOVERED | **STAGING_COPY** | I/O error → retry → **ERROR_JOB** |
 | **STAGING_COPY** | next file | status=DISCOVERED or NEEDS_RETRY_COPY | Copy file to staging; fsync; mark STAGED | **HASHING** | Copy fail → retry; SD removed → **WAIT_MEDIA** |
 | **HASHING** | staged file ready | status=STAGED or NEEDS_RETRY_HASH | Compute SHA256; persist; mark HASHED | **DEDUP_SESSION_SHA** | Hash fail → retry / **ERROR_FILE** |
 | **DEDUP_SESSION_SHA** | SHA available | same job | Deduplicate by SHA within current job; mark duplicates DUPLICATE_SESSION_SHA | **DEDUP_LOCAL_SHA** | DB error → **ERROR_JOB** |
-| **DEDUP_LOCAL_SHA** | SHA available | history enabled | Check local SHA registry; mark DUPLICATE_SHA_LOCAL if known | **QUEUE_UPLOAD** | DB error → **ERROR_JOB** |
-| **QUEUE_UPLOAD** | unique file | status=HASHED | Mark READY_TO_UPLOAD; enqueue | **WAIT_NETWORK** or **QUEUE_UPLOAD** | DB error → **ERROR_JOB** |
+| **DEDUP_LOCAL_SHA** | SHA available | history enabled | Check local SHA registry; mark DUPLICATE_SHA_LOCAL if known | **QUEUE_UPLOAD** or **JOB_COMPLETE_LOCAL** if no unique files remain | DB error → **ERROR_JOB** |
+| **QUEUE_UPLOAD** | unique file | status=HASHED | Mark READY_TO_UPLOAD; enqueue and persist in local SHA registry | **WAIT_NETWORK**, **JOB_COMPLETE_LOCAL**, or **QUEUE_UPLOAD** | DB error → **ERROR_JOB** |
 | **WAIT_NETWORK** | connectivity change / tick | online? | If offline do nothing; if online continue | **UPLOAD_PREPARE** | None |
 | **UPLOAD_PREPARE** | upload cycle start | online | Ensure remote job exists; send metadata+SHA | **UPLOAD_FILE** or **SERVER_VERIFY** | Network fail → **WAIT_NETWORK** |
 | **UPLOAD_FILE** | server requests upload | online | Upload full file to temp (non-resumable); mark UPLOADED | **SERVER_VERIFY** | Upload fail → retry → **WAIT_NETWORK** |
@@ -80,13 +80,32 @@ All online-required states fall back to **WAIT_NETWORK** on connectivity loss.
 ## Reboot recovery rules
 
 On BOOTSTRAP:
+- DISCOVERED → STAGING_COPY
+- NEEDS_RETRY_COPY → STAGING_COPY
 - STAGED → HASHING
 - HASHED → DEDUP_SESSION_SHA
+- persisted job phase DEDUP_LOCAL_SHA → DEDUP_LOCAL_SHA
+- persisted job phase QUEUE_UPLOAD → QUEUE_UPLOAD
 - READY_TO_UPLOAD → WAIT_NETWORK
 - UPLOADED → SERVER_VERIFY
 - VERIFY_RUNNING → VERIFY_HASH
 
 No terminal file is reprocessed.
+
+After selecting the highest-priority resume phase, the daemon immediately runs the corresponding
+single-threaded phase handler for implemented phases (currently STAGING_COPY, HASHING,
+DEDUP_SESSION_SHA, DEDUP_LOCAL_SHA, QUEUE_UPLOAD, and JOB_COMPLETE_LOCAL) until a boundary state
+is reached or a visible failure is recorded.
+
+---
+
+## Worklist Counters (Copy/Hash Phases)
+
+For deterministic operator visibility and transition decisions:
+
+- pending_copy = count(status in {DISCOVERED, NEEDS_RETRY_COPY})
+- staged = count(status == STAGED)
+- hash_pending = count(status in {STAGED, NEEDS_RETRY_HASH})
 
 ---
 

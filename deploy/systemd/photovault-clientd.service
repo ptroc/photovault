@@ -2,13 +2,29 @@
 Description=photovault client daemon
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=120
+StartLimitBurst=20
 
 [Service]
 Type=simple
+User=photovault
+Group=photovault
 WorkingDirectory=/opt/photovault/services/photovault-clientd
-ExecStart=/usr/bin/python -m photovault_clientd.main
-Restart=on-failure
-RestartSec=5
+EnvironmentFile=-/etc/photovault/photovault-clientd.env
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/photovault/.venv/bin/python -m photovault_clientd.main
+Restart=always
+RestartSec=2
+TimeoutStartSec=30
+TimeoutStopSec=30
+StateDirectory=photovault-clientd
+LogsDirectory=photovault
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ReadWritePaths=/var/lib/photovault-clientd /var/log/photovault
 
 [Install]
 WantedBy=multi-user.target

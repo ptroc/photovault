@@ -1,0 +1,370 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>photovault client UI</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --bg: #f3efe7;
+        --surface: #fffaf2;
+        --surface-strong: #f5ead8;
+        --ink: #1f2a2e;
+        --muted: #5f6b71;
+        --accent: #1d6b57;
+        --warn: #9f4d1c;
+        --danger: #a12626;
+        --border: #d7ccb9;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        font-family: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", serif;
+        background:
+          radial-gradient(circle at top left, rgba(29, 107, 87, 0.12), transparent 32%),
+          linear-gradient(180deg, #f8f4ec 0%, var(--bg) 100%);
+        color: var(--ink);
+      }
+
+      main {
+        max-width: 1100px;
+        margin: 0 auto;
+        padding: 32px 20px 48px;
+      }
+
+      h1,
+      h2,
+      h3,
+      p,
+      ul {
+        margin-top: 0;
+      }
+
+      h1,
+      h2,
+      h3 {
+        font-family: Georgia, "Times New Roman", serif;
+      }
+
+      .hero {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 20px;
+        padding: 28px;
+        box-shadow: 0 10px 30px rgba(31, 42, 46, 0.08);
+      }
+
+      .hero p:last-child {
+        margin-bottom: 0;
+      }
+
+      .nav {
+        display: flex;
+        gap: 10px;
+        margin-top: 18px;
+        flex-wrap: wrap;
+      }
+
+      .nav a {
+        text-decoration: none;
+        border: 1px solid var(--border);
+        border-radius: 999px;
+        padding: 8px 12px;
+        color: var(--ink);
+        background: white;
+      }
+
+      .nav a.active {
+        background: var(--accent);
+        color: white;
+        border-color: var(--accent);
+      }
+
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+        gap: 16px;
+        margin-top: 18px;
+      }
+
+      .card {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 16px;
+        padding: 18px;
+      }
+
+      .card h2 {
+        font-size: 1.1rem;
+        margin-bottom: 10px;
+      }
+
+      .kpi {
+        font-size: 1.7rem;
+        font-weight: 700;
+        margin-bottom: 6px;
+      }
+
+      .muted {
+        color: var(--muted);
+      }
+
+      .status-ok,
+      .status-active {
+        color: var(--accent);
+      }
+
+      .status-warn {
+        color: var(--warn);
+      }
+
+      .status-error {
+        color: var(--danger);
+      }
+
+      .section {
+        margin-top: 24px;
+      }
+
+      .section-head {
+        display: flex;
+        justify-content: space-between;
+        align-items: baseline;
+        gap: 12px;
+      }
+
+      table {
+        width: 100%;
+        border-collapse: collapse;
+      }
+
+      th,
+      td {
+        text-align: left;
+        padding: 10px 12px;
+        border-bottom: 1px solid var(--border);
+        vertical-align: top;
+      }
+
+      th {
+        font-size: 0.92rem;
+      }
+
+      code {
+        font-family: "SFMono-Regular", "Menlo", monospace;
+        font-size: 0.92rem;
+        background: var(--surface-strong);
+        border-radius: 6px;
+        padding: 2px 6px;
+      }
+
+      a {
+        color: var(--accent);
+      }
+
+      .banner {
+        border-radius: 14px;
+        padding: 14px 16px;
+        border: 1px solid var(--border);
+        margin-top: 18px;
+      }
+
+      .banner-error {
+        background: #fff0ed;
+        border-color: #e6b7ad;
+        color: var(--danger);
+      }
+
+      .banner-success {
+        background: #edf8f1;
+        border-color: #b8d8c0;
+        color: var(--accent);
+      }
+
+      .form-grid {
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 12px;
+      }
+
+      label {
+        display: block;
+        font-weight: 700;
+        margin-bottom: 6px;
+      }
+
+      input,
+      textarea,
+      button {
+        width: 100%;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 10px 12px;
+        font: inherit;
+        color: inherit;
+        background: white;
+      }
+
+      textarea {
+        min-height: 140px;
+        resize: vertical;
+      }
+
+      .button-row {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+      }
+
+      button {
+        width: auto;
+        background: var(--accent);
+        color: white;
+        cursor: pointer;
+      }
+
+      button.secondary {
+        background: white;
+        color: var(--ink);
+      }
+
+      .button-link {
+        display: inline-flex;
+        align-items: center;
+        text-decoration: none;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 10px 12px;
+        background: var(--accent);
+        color: white;
+      }
+
+      .button-link.secondary {
+        background: white;
+        color: var(--ink);
+      }
+
+      .list-inline {
+        list-style: none;
+        padding: 0;
+        margin: 0;
+      }
+
+      .list-inline li + li {
+        margin-top: 8px;
+      }
+
+      @media (max-width: 700px) {
+        main {
+          padding: 20px 14px 32px;
+        }
+
+        .hero,
+        .card {
+          padding: 16px;
+        }
+
+        table,
+        thead,
+        tbody,
+        tr,
+        th,
+        td {
+          display: block;
+        }
+
+        thead {
+          display: none;
+        }
+
+        td {
+          padding: 8px 0;
+          border-bottom: none;
+        }
+
+        tr {
+          border-bottom: 1px solid var(--border);
+          padding: 8px 0;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <section class="hero">
+        <h1>photovault client UI</h1>
+        <p>Control-plane visibility for the local appliance.</p>
+        <p class="muted">Daemon API: <code>{{ daemon_base_url }}</code></p>
+
+        {% if daemon_error %}
+          <div class="banner banner-error">
+            <strong>Daemon unreachable.</strong>
+            <span>{{ daemon_error }}</span>
+          </div>
+        {% endif %}
+
+        <nav class="nav">
+          <a href="/" class="{% if active_page == 'overview' %}active{% endif %}">Overview</a>
+          <a href="/network" class="{% if active_page == 'network' %}active{% endif %}">Network</a>
+        </nav>
+      </section>
+
+      {% block content %}{% endblock %}
+    </main>
+    <script>
+      (() => {
+        const ajaxHeader = {"X-Requested-With": "XMLHttpRequest"};
+
+        async function replaceTarget(targetSelector, response) {
+          const target = document.querySelector(targetSelector);
+          if (!target) {
+            window.location.assign(response.url);
+            return;
+          }
+          target.outerHTML = await response.text();
+          const locationHeader = response.headers.get("X-Client-Location");
+          if (locationHeader) {
+            window.history.pushState({}, "", locationHeader);
+          }
+        }
+
+        document.addEventListener("submit", async (event) => {
+          const form = event.target;
+          if (!(form instanceof HTMLFormElement)) {
+            return;
+          }
+          const targetSelector = form.dataset.ajaxTarget;
+          if (!targetSelector) {
+            return;
+          }
+          event.preventDefault();
+          const response = await fetch(form.action, {
+            method: form.method || "POST",
+            headers: ajaxHeader,
+            body: new FormData(form),
+          });
+          await replaceTarget(targetSelector, response);
+        });
+
+        document.addEventListener("click", async (event) => {
+          const link = event.target.closest("a[data-ajax-target]");
+          if (!(link instanceof HTMLAnchorElement)) {
+            return;
+          }
+          event.preventDefault();
+          const response = await fetch(link.href, {headers: ajaxHeader});
+          await replaceTarget(link.dataset.ajaxTarget, response);
+        });
+
+        window.addEventListener("popstate", () => {
+          window.location.reload();
+        });
+      })();
+    </script>
+  </body>
+</html>

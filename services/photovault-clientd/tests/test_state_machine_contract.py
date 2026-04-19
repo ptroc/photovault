@@ -1,4 +1,4 @@
-from photovault_clientd.state_machine import ClientState
+from photovault_clientd.state_machine import ClientState, FileStatus
 
 EXPECTED_V1_STATES = {
     "BOOTSTRAP",
@@ -30,3 +30,15 @@ EXPECTED_V1_STATES = {
 
 def test_state_enum_matches_v1_doc() -> None:
     assert {state.value for state in ClientState} == EXPECTED_V1_STATES
+
+
+def test_terminal_file_statuses_match_v1_doc() -> None:
+    expected_terminal = {
+        "VERIFIED_REMOTE",
+        "DUPLICATE_SHA_GLOBAL",
+        "DUPLICATE_SHA_LOCAL",
+        "DUPLICATE_SESSION_SHA",
+        "ERROR_FILE",
+        "QUARANTINED_LOCAL",
+    }
+    assert expected_terminal.issubset({status.value for status in FileStatus})
