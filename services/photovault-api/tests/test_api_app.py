@@ -1,3 +1,4 @@
+import photovault_api.app as app_module
 from fastapi.testclient import TestClient
 from photovault_api.app import create_app
 from photovault_api.state_store import InMemoryUploadStateStore
@@ -117,3 +118,37 @@ def test_known_sha_and_temp_upload_persist_across_app_restart_with_shared_store(
     )
     assert handshake_response.status_code == 200
     assert handshake_response.json()["results"][0]["decision"] == "ALREADY_EXISTS"
+
+
+def test_create_app_uses_postgres_store_when_database_url_env_set(monkeypatch) -> None:
+    class _FakePostgresStore:
+        def __init__(self, *, database_url: str) -> None:
+            self.database_url = database_url
+            self.initialized = False
+
+        def initialize(self) -> None:
+            self.initialized = True
+
+        def has_sha(self, sha256_hex: str) -> bool:
+            return False
+
+        def get_temp_upload(self, sha256_hex: str) -> tuple[int, bytes] | None:
+            return None
+
+        def upsert_temp_upload(self, sha256_hex: str, size_bytes: int, content: bytes) -> None:
+            return None
+
+        def mark_sha_verified(self, sha256_hex: str) -> None:
+            return None
+
+        def remove_temp_upload(self, sha256_hex: str) -> None:
+            return None
+
+    monkeypatch.setenv("PHOTOVAULT_API_DATABASE_URL", "postgresql://photovault:pw@db/photovault")
+    monkeypatch.setattr(app_module, "PostgresUploadStateStore", _FakePostgresStore)
+
+    app = create_app()
+    store = app.state.upload_state_store
+    assert isinstance(store, _FakePostgresStore)
+    assert store.database_url == "postgresql://photovault:pw@db/photovault"
+    assert store.initialized is True
