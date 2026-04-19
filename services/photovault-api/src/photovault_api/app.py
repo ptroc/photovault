@@ -1,10 +1,17 @@
 """Server-side API skeleton for photovault."""
 
 import hashlib
+import os
 from enum import StrEnum
 
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
+
+from photovault_api.state_store import (
+    InMemoryUploadStateStore,
+    PostgresUploadStateStore,
+    UploadStateStore,
+)
 
 
 class HandshakeDecision(StrEnum):
@@ -44,10 +51,23 @@ class VerifyResponse(BaseModel):
     status: str
 
 
-def create_app(initial_known_sha256: set[str] | None = None) -> FastAPI:
+def create_app(
+    initial_known_sha256: set[str] | None = None,
+    *,
+    state_store: UploadStateStore | None = None,
+    database_url: str | None = None,
+) -> FastAPI:
     app = FastAPI(title="photovault-api", version="0.1.0")
-    app.state.known_sha256 = set(initial_known_sha256 or set())
-    app.state.upload_temp: dict[str, bytes] = {}
+    if state_store is not None:
+        store = state_store
+    else:
+        resolved_url = database_url or os.getenv("PHOTOVAULT_API_DATABASE_URL")
+        if resolved_url:
+            store = PostgresUploadStateStore(database_url=resolved_url)
+        else:
+            store = InMemoryUploadStateStore(known_sha256=set(initial_known_sha256 or set()))
+    store.initialize()
+    app.state.upload_state_store = store
 
     @app.get("/healthz")
     def healthz() -> dict[str, str]:
@@ -56,12 +76,12 @@ def create_app(initial_known_sha256: set[str] | None = None) -> FastAPI:
     @app.post("/v1/upload/metadata-handshake", response_model=MetadataHandshakeResponse)
     def metadata_handshake(payload: MetadataHandshakeRequest) -> MetadataHandshakeResponse:
         results: list[HandshakeFileResult] = []
-        known_sha256: set[str] = app.state.known_sha256
+        store: UploadStateStore = app.state.upload_state_store
 
         for file_item in payload.files:
             decision = (
                 HandshakeDecision.ALREADY_EXISTS
-                if file_item.sha256_hex in known_sha256
+                if store.has_sha(file_item.sha256_hex)
                 else HandshakeDecision.UPLOAD_REQUIRED
             )
             results.append(
@@ -78,8 +98,8 @@ def create_app(initial_known_sha256: set[str] | None = None) -> FastAPI:
         if len(sha256_hex) != 64:
             raise HTTPException(status_code=400, detail="sha256_hex must be 64 hex characters")
 
-        known_sha256: set[str] = app.state.known_sha256
-        if sha256_hex in known_sha256:
+        store: UploadStateStore = app.state.upload_state_store
+        if store.has_sha(sha256_hex):
             return UploadContentResponse(status="ALREADY_EXISTS")
 
         raw_size = request.headers.get("x-size-bytes")
@@ -100,27 +120,27 @@ def create_app(initial_known_sha256: set[str] | None = None) -> FastAPI:
         if observed_sha != sha256_hex:
             raise HTTPException(status_code=400, detail="payload sha256 mismatch")
 
-        app.state.upload_temp[sha256_hex] = content
+        store.upsert_temp_upload(sha256_hex, expected_size, content)
         return UploadContentResponse(status="STORED_TEMP")
 
     @app.post("/v1/upload/verify", response_model=VerifyResponse)
     def verify_upload(payload: VerifyRequest) -> VerifyResponse:
-        known_sha256: set[str] = app.state.known_sha256
-        upload_temp: dict[str, bytes] = app.state.upload_temp
+        store: UploadStateStore = app.state.upload_state_store
 
-        if payload.sha256_hex in known_sha256:
+        if store.has_sha(payload.sha256_hex):
             return VerifyResponse(status="ALREADY_EXISTS")
 
-        content = upload_temp.get(payload.sha256_hex)
-        if content is None:
+        upload_row = store.get_temp_upload(payload.sha256_hex)
+        if upload_row is None:
             return VerifyResponse(status="VERIFY_FAILED")
-        if len(content) != payload.size_bytes:
+        stored_size, content = upload_row
+        if stored_size != payload.size_bytes:
             return VerifyResponse(status="VERIFY_FAILED")
         if hashlib.sha256(content).hexdigest() != payload.sha256_hex:
             return VerifyResponse(status="VERIFY_FAILED")
 
-        known_sha256.add(payload.sha256_hex)
-        upload_temp.pop(payload.sha256_hex, None)
+        store.mark_sha_verified(payload.sha256_hex)
+        store.remove_temp_upload(payload.sha256_hex)
         return VerifyResponse(status="VERIFIED")
 
     return app

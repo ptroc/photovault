@@ -38,6 +38,17 @@ def _advance_to_upload_file(client: TestClient) -> None:
     assert state_response.json()["current_state"] == "UPLOAD_FILE"
 
 
+def _drain_ticks_until_state(client: TestClient, target_state: str, max_steps: int = 20) -> None:
+    for _ in range(max_steps):
+        state_response = client.get("/state")
+        assert state_response.status_code == 200
+        if state_response.json()["current_state"] == target_state:
+            return
+        tick_response = client.post("/daemon/tick")
+        assert tick_response.status_code == 200
+    raise AssertionError(f"daemon did not reach state {target_state} within {max_steps} ticks")
+
+
 def test_wait_network_handshake_marks_server_existing_file_as_duplicate_global(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -255,9 +266,13 @@ def test_upload_file_and_server_verify_mark_file_verified_remote(tmp_path: Path,
         verify_tick = client.post("/daemon/tick")
         assert verify_tick.status_code == 200
         assert verify_tick.json()["verify_status"] == "VERIFIED"
+        assert verify_tick.json()["next_state"] == "POST_UPLOAD_VERIFY"
+
+        _drain_ticks_until_state(client, "IDLE")
 
         detail_response = client.get(f"/ingest/jobs/{job_id}")
         assert detail_response.status_code == 200
+        assert detail_response.json()["status"] == "JOB_COMPLETE_LOCAL"
         file_row = detail_response.json()["files"][0]
         assert file_row["status"] == "VERIFIED_REMOTE"
         assert file_row["retry_count"] == 0
@@ -321,6 +336,7 @@ def test_upload_file_failure_retries_from_ready_to_upload(tmp_path: Path, monkey
         verify_tick = client.post("/daemon/tick")
         assert verify_tick.status_code == 200
         assert verify_tick.json()["verify_status"] == "VERIFIED"
+        _drain_ticks_until_state(client, "IDLE")
 
 
 def test_server_verify_failure_moves_file_back_to_ready_to_upload(tmp_path: Path, monkeypatch) -> None:
@@ -420,7 +436,57 @@ def test_restart_safety_with_uploaded_file_resumes_server_verify(tmp_path: Path,
         verify_tick = client.post("/daemon/tick")
         assert verify_tick.status_code == 200
         assert verify_tick.json()["verify_status"] == "VERIFIED"
+        assert verify_tick.json()["next_state"] == "POST_UPLOAD_VERIFY"
+
+        _drain_ticks_until_state(client, "IDLE")
 
         detail_response = client.get(f"/ingest/jobs/{job_id}")
         file_row = detail_response.json()["files"][0]
         assert file_row["status"] == "VERIFIED_REMOTE"
+
+
+def test_verify_success_transitions_through_post_and_cleanup_states(tmp_path: Path, monkeypatch) -> None:
+    db_path = tmp_path / "state.sqlite3"
+    staging_root = tmp_path / "staging"
+    source = tmp_path / "media" / "sd" / "post-cleanup.jpg"
+    _write_source_file(source, b"post-cleanup")
+
+    monkeypatch.setattr(
+        engine,
+        "_post_metadata_handshake",
+        lambda *, server_base_url, files, timeout_seconds=5.0: {
+            int(item["file_id"]): "UPLOAD_REQUIRED" for item in files
+        },
+    )
+    monkeypatch.setattr(
+        engine,
+        "_upload_file_content",
+        lambda *, server_base_url, sha256_hex, size_bytes, content, timeout_seconds=5.0: "STORED_TEMP",
+    )
+    monkeypatch.setattr(
+        engine,
+        "_post_server_verify",
+        lambda *, server_base_url, sha256_hex, size_bytes, timeout_seconds=5.0: "VERIFIED",
+    )
+
+    app = create_app(db_path=db_path, staging_root=staging_root, server_base_url="http://fake")
+    with TestClient(app) as client:
+        create_response = client.post(
+            "/ingest/jobs",
+            json={"media_label": "sd-m2-post-cleanup", "source_paths": [str(source)]},
+        )
+        assert create_response.status_code == 200
+        job_id = int(create_response.json()["job_id"])
+        _tick_until_state(client, "WAIT_NETWORK")
+
+        _advance_to_upload_file(client)
+        assert client.post("/daemon/tick").json()["next_state"] == "SERVER_VERIFY"
+        assert client.post("/daemon/tick").json()["next_state"] == "POST_UPLOAD_VERIFY"
+        assert client.post("/daemon/tick").json()["next_state"] == "CLEANUP_STAGING"
+        assert client.post("/daemon/tick").json()["next_state"] == "JOB_COMPLETE_REMOTE"
+        assert client.post("/daemon/tick").json()["next_state"] == "JOB_COMPLETE_LOCAL"
+        assert client.post("/daemon/tick").json()["next_state"] == "IDLE"
+
+        detail_response = client.get(f"/ingest/jobs/{job_id}")
+        assert detail_response.status_code == 200
+        assert detail_response.json()["status"] == "JOB_COMPLETE_LOCAL"

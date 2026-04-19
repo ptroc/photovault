@@ -13,6 +13,8 @@ from photovault_clientd.db import (
     count_hash_pending_files_global,
     count_hashed_files,
     count_hashed_files_global,
+    count_job_files_by_statuses,
+    count_non_terminal_files_for_job,
     count_pending_copy_files_global,
     count_ready_to_upload_files,
     count_ready_to_upload_files_global,
@@ -49,11 +51,12 @@ from photovault_clientd.db import (
 )
 from photovault_clientd.events import EventCategory, EventLevel, classify_copy_error, classify_hash_error
 from photovault_clientd.hashing import compute_sha256
-from photovault_clientd.state_machine import ClientState
+from photovault_clientd.state_machine import ClientState, FileStatus
 from photovault_clientd.storage import build_staged_path, copy_with_fsync
 
 DEFAULT_SERVER_BASE_URL = "http://127.0.0.1:9301"
 DEFAULT_HANDSHAKE_TIMEOUT_SECONDS = 5.0
+DEFAULT_RETAIN_STAGED_FILES = True
 
 
 def _copy_phase_next_state(pending_copy: int, hash_pending: int) -> ClientState:
@@ -79,6 +82,22 @@ def _hashed_groups(rows: list[dict[str, object]]) -> dict[str, list[int]]:
     for row in rows:
         grouped[str(row["sha256_hex"])].append(int(row["file_id"]))
     return grouped
+
+
+def _next_online_state(conn) -> ClientState:
+    if count_uploaded_files_global(conn) > 0:
+        return ClientState.SERVER_VERIFY
+    if fetch_next_job_with_status(conn, ClientState.POST_UPLOAD_VERIFY) is not None:
+        return ClientState.POST_UPLOAD_VERIFY
+    if fetch_next_job_with_status(conn, ClientState.CLEANUP_STAGING) is not None:
+        return ClientState.CLEANUP_STAGING
+    if fetch_next_job_with_status(conn, ClientState.JOB_COMPLETE_REMOTE) is not None:
+        return ClientState.JOB_COMPLETE_REMOTE
+    if count_ready_to_upload_files_global(conn) > 0:
+        return ClientState.UPLOAD_PREPARE
+    if fetch_next_job_with_status(conn, ClientState.JOB_COMPLETE_LOCAL) is not None:
+        return ClientState.JOB_COMPLETE_LOCAL
+    return ClientState.WAIT_NETWORK
 
 
 def _post_metadata_handshake(
@@ -629,24 +648,8 @@ def run_job_complete_local_tick(conn) -> dict[str, object]:
 
 
 def run_wait_network_tick(conn) -> dict[str, object]:
-    """Advance from WAIT_NETWORK to online phases when upload work is pending."""
+    """Advance from WAIT_NETWORK to UPLOAD_PREPARE when ready files exist."""
     now = datetime.now(UTC).isoformat()
-    uploaded_count = count_uploaded_files_global(conn)
-    if uploaded_count > 0:
-        transition_daemon_state(
-            conn,
-            ClientState.SERVER_VERIFY,
-            now,
-            reason=f"wait network gate opened for {uploaded_count} uploaded files",
-        )
-        return {
-            "handled": True,
-            "progressed": True,
-            "errored": False,
-            "uploaded": uploaded_count,
-            "next_state": ClientState.SERVER_VERIFY.value,
-        }
-
     ready_rows = fetch_ready_to_upload_files_global(conn)
     if not ready_rows:
         transition_daemon_state(
@@ -684,9 +687,14 @@ def run_upload_prepare_tick(conn, *, server_base_url: str = DEFAULT_SERVER_BASE_
     now = datetime.now(UTC).isoformat()
     ready_rows = fetch_ready_to_upload_files_global(conn)
     if not ready_rows:
+        next_state = (
+            ClientState.SERVER_VERIFY
+            if count_uploaded_files_global(conn) > 0
+            else ClientState.WAIT_NETWORK
+        )
         transition_daemon_state(
             conn,
-            ClientState.WAIT_NETWORK,
+            next_state,
             now,
             reason="upload prepare tick found no ready uploads",
         )
@@ -695,7 +703,7 @@ def run_upload_prepare_tick(conn, *, server_base_url: str = DEFAULT_SERVER_BASE_
             "progressed": False,
             "errored": False,
             "ready_to_upload": 0,
-            "next_state": ClientState.WAIT_NETWORK.value,
+            "next_state": next_state.value,
         }
 
     invalid_rows = [
@@ -713,6 +721,8 @@ def run_upload_prepare_tick(conn, *, server_base_url: str = DEFAULT_SERVER_BASE_
             "metadata handshake blocked: missing sha256_hex or size_bytes",
             now,
         )
+        for row in invalid_rows:
+            set_job_status(conn, int(row["job_id"]), ClientState.WAIT_NETWORK.value, now)
         transition_daemon_state(
             conn,
             ClientState.WAIT_NETWORK,
@@ -743,6 +753,8 @@ def run_upload_prepare_tick(conn, *, server_base_url: str = DEFAULT_SERVER_BASE_
         decisions = _post_metadata_handshake(server_base_url=server_base_url, files=ready_rows)
     except (HTTPError, URLError, TimeoutError, ValueError, OSError, json.JSONDecodeError) as exc:
         retried = mark_files_upload_retry(conn, file_ids, str(exc), now)
+        for row in ready_rows:
+            set_job_status(conn, int(row["job_id"]), ClientState.WAIT_NETWORK.value, now)
         transition_daemon_state(
             conn,
             ClientState.WAIT_NETWORK,
@@ -776,6 +788,8 @@ def run_upload_prepare_tick(conn, *, server_base_url: str = DEFAULT_SERVER_BASE_
             f"metadata handshake missing decisions for file_ids={missing_ids}",
             now,
         )
+        for row in ready_rows:
+            set_job_status(conn, int(row["job_id"]), ClientState.WAIT_NETWORK.value, now)
         transition_daemon_state(
             conn,
             ClientState.WAIT_NETWORK,
@@ -803,17 +817,33 @@ def run_upload_prepare_tick(conn, *, server_base_url: str = DEFAULT_SERVER_BASE_
 
     already_exists_count = 0
     upload_required_count = 0
+    already_exists_jobs: set[int] = set()
+    upload_required_jobs: set[int] = set()
     for row in ready_rows:
         file_id = int(row["file_id"])
+        job_id = int(row["job_id"])
         decision = decisions[file_id]
         if decision == "ALREADY_EXISTS":
             mark_file_duplicate_global(conn, file_id, now)
             already_exists_count += 1
+            already_exists_jobs.add(job_id)
             continue
         clear_ready_to_upload_error(conn, file_id, now)
         upload_required_count += 1
+        upload_required_jobs.add(job_id)
 
-    next_state = ClientState.UPLOAD_FILE if upload_required_count > 0 else ClientState.WAIT_NETWORK
+    for job_id in upload_required_jobs:
+        set_job_status(conn, job_id, ClientState.UPLOAD_FILE.value, now)
+    for job_id in already_exists_jobs:
+        if job_id not in upload_required_jobs:
+            set_job_status(conn, job_id, ClientState.POST_UPLOAD_VERIFY.value, now)
+
+    if upload_required_count > 0:
+        next_state = ClientState.UPLOAD_FILE
+    elif already_exists_count > 0 or count_uploaded_files_global(conn) > 0:
+        next_state = ClientState.SERVER_VERIFY
+    else:
+        next_state = ClientState.WAIT_NETWORK
     transition_daemon_state(
         conn,
         next_state,
@@ -852,9 +882,14 @@ def run_upload_file_tick(conn, *, server_base_url: str = DEFAULT_SERVER_BASE_URL
     now = datetime.now(UTC).isoformat()
     candidate = fetch_next_ready_to_upload_file(conn)
     if candidate is None:
+        next_state = (
+            ClientState.SERVER_VERIFY
+            if count_uploaded_files_global(conn) > 0
+            else ClientState.WAIT_NETWORK
+        )
         transition_daemon_state(
             conn,
-            ClientState.WAIT_NETWORK,
+            next_state,
             now,
             reason="upload file tick found no ready files",
         )
@@ -862,15 +897,17 @@ def run_upload_file_tick(conn, *, server_base_url: str = DEFAULT_SERVER_BASE_URL
             "handled": True,
             "progressed": False,
             "errored": False,
-            "next_state": ClientState.WAIT_NETWORK.value,
+            "next_state": next_state.value,
         }
 
     file_id = int(candidate["file_id"])
+    job_id = int(candidate["job_id"])
     staged_path = candidate.get("staged_path")
     sha256_hex = candidate.get("sha256_hex")
     size_bytes = candidate.get("size_bytes")
     if not isinstance(staged_path, str) or not staged_path:
         mark_ready_to_upload_retry(conn, file_id, "missing staged_path for upload", now)
+        set_job_status(conn, job_id, ClientState.WAIT_NETWORK.value, now)
         transition_daemon_state(
             conn,
             ClientState.WAIT_NETWORK,
@@ -897,6 +934,7 @@ def run_upload_file_tick(conn, *, server_base_url: str = DEFAULT_SERVER_BASE_URL
         }
     if not isinstance(sha256_hex, str) or len(sha256_hex) != 64 or not isinstance(size_bytes, int):
         mark_ready_to_upload_retry(conn, file_id, "invalid upload metadata for file", now)
+        set_job_status(conn, job_id, ClientState.WAIT_NETWORK.value, now)
         transition_daemon_state(
             conn,
             ClientState.WAIT_NETWORK,
@@ -932,6 +970,7 @@ def run_upload_file_tick(conn, *, server_base_url: str = DEFAULT_SERVER_BASE_URL
         )
     except (HTTPError, URLError, TimeoutError, ValueError, OSError, json.JSONDecodeError) as exc:
         mark_ready_to_upload_retry(conn, file_id, str(exc), now)
+        set_job_status(conn, job_id, ClientState.WAIT_NETWORK.value, now)
         transition_daemon_state(
             conn,
             ClientState.WAIT_NETWORK,
@@ -959,14 +998,12 @@ def run_upload_file_tick(conn, *, server_base_url: str = DEFAULT_SERVER_BASE_URL
 
     if status == "ALREADY_EXISTS":
         mark_file_duplicate_global(conn, file_id, now)
-        next_state = (
-            ClientState.UPLOAD_FILE
-            if fetch_next_ready_to_upload_file(conn) is not None
-            else ClientState.WAIT_NETWORK
-        )
+        set_job_status(conn, job_id, ClientState.POST_UPLOAD_VERIFY.value, now)
     else:
         mark_file_uploaded(conn, file_id, now)
-        next_state = ClientState.SERVER_VERIFY
+        set_job_status(conn, job_id, ClientState.SERVER_VERIFY.value, now)
+
+    next_state = ClientState.SERVER_VERIFY
 
     transition_daemon_state(
         conn,
@@ -1000,9 +1037,14 @@ def run_server_verify_tick(conn, *, server_base_url: str = DEFAULT_SERVER_BASE_U
     now = datetime.now(UTC).isoformat()
     candidate = fetch_next_uploaded_file(conn)
     if candidate is None:
+        next_state = (
+            ClientState.POST_UPLOAD_VERIFY
+            if fetch_next_job_with_status(conn, ClientState.POST_UPLOAD_VERIFY) is not None
+            else ClientState.WAIT_NETWORK
+        )
         transition_daemon_state(
             conn,
-            ClientState.WAIT_NETWORK,
+            next_state,
             now,
             reason="server verify tick found no uploaded files",
         )
@@ -1010,14 +1052,16 @@ def run_server_verify_tick(conn, *, server_base_url: str = DEFAULT_SERVER_BASE_U
             "handled": True,
             "progressed": False,
             "errored": False,
-            "next_state": ClientState.WAIT_NETWORK.value,
+            "next_state": next_state.value,
         }
 
     file_id = int(candidate["file_id"])
+    job_id = int(candidate["job_id"])
     sha256_hex = candidate.get("sha256_hex")
     size_bytes = candidate.get("size_bytes")
     if not isinstance(sha256_hex, str) or len(sha256_hex) != 64 or not isinstance(size_bytes, int):
         mark_uploaded_for_reupload(conn, file_id, "invalid verify metadata for uploaded file", now)
+        set_job_status(conn, job_id, ClientState.WAIT_NETWORK.value, now)
         transition_daemon_state(
             conn,
             ClientState.WAIT_NETWORK,
@@ -1051,6 +1095,7 @@ def run_server_verify_tick(conn, *, server_base_url: str = DEFAULT_SERVER_BASE_U
         )
     except (HTTPError, URLError, TimeoutError, ValueError, OSError, json.JSONDecodeError) as exc:
         mark_uploaded_retry(conn, file_id, str(exc), now)
+        set_job_status(conn, job_id, ClientState.WAIT_NETWORK.value, now)
         transition_daemon_state(
             conn,
             ClientState.WAIT_NETWORK,
@@ -1078,21 +1123,16 @@ def run_server_verify_tick(conn, *, server_base_url: str = DEFAULT_SERVER_BASE_U
 
     if verify_status == "VERIFY_FAILED":
         mark_uploaded_for_reupload(conn, file_id, "server verification failed", now)
+        set_job_status(conn, job_id, ClientState.WAIT_NETWORK.value, now)
         next_state = ClientState.WAIT_NETWORK
     elif verify_status == "ALREADY_EXISTS":
         mark_file_duplicate_global(conn, file_id, now)
-        next_state = (
-            ClientState.SERVER_VERIFY
-            if fetch_next_uploaded_file(conn) is not None
-            else ClientState.WAIT_NETWORK
-        )
+        set_job_status(conn, job_id, ClientState.POST_UPLOAD_VERIFY.value, now)
+        next_state = ClientState.POST_UPLOAD_VERIFY
     else:
         mark_file_verified_remote(conn, file_id, now)
-        next_state = (
-            ClientState.SERVER_VERIFY
-            if fetch_next_uploaded_file(conn) is not None
-            else ClientState.WAIT_NETWORK
-        )
+        set_job_status(conn, job_id, ClientState.POST_UPLOAD_VERIFY.value, now)
+        next_state = ClientState.POST_UPLOAD_VERIFY
 
     transition_daemon_state(
         conn,
@@ -1121,11 +1161,180 @@ def run_server_verify_tick(conn, *, server_base_url: str = DEFAULT_SERVER_BASE_U
     }
 
 
+def run_post_upload_verify_tick(conn) -> dict[str, object]:
+    """Apply v1 post-upload policy and advance to cleanup staging."""
+    now = datetime.now(UTC).isoformat()
+    job_id = fetch_next_job_with_status(conn, ClientState.POST_UPLOAD_VERIFY)
+    if job_id is None:
+        next_state = ClientState.WAIT_NETWORK
+        transition_daemon_state(
+            conn,
+            next_state,
+            now,
+            reason="post upload verify tick found no jobs",
+        )
+        return {
+            "handled": True,
+            "progressed": False,
+            "errored": False,
+            "job_id": None,
+            "next_state": next_state.value,
+        }
+
+    set_job_status(conn, job_id, ClientState.CLEANUP_STAGING.value, now)
+    transition_daemon_state(
+        conn,
+        ClientState.CLEANUP_STAGING,
+        now,
+        reason=f"post upload verify completed for job_id={job_id}",
+        commit=False,
+    )
+    append_daemon_event(
+        conn,
+        level=EventLevel.INFO,
+        category=EventCategory.POST_UPLOAD_VERIFY_COMPLETED,
+        message=f"job_id={job_id}, policy=pass_through_v1",
+        created_at_utc=now,
+        from_state=ClientState.POST_UPLOAD_VERIFY,
+        to_state=ClientState.CLEANUP_STAGING,
+    )
+    conn.commit()
+    return {
+        "handled": True,
+        "progressed": True,
+        "errored": False,
+        "job_id": job_id,
+        "next_state": ClientState.CLEANUP_STAGING.value,
+    }
+
+
+def run_cleanup_staging_tick(
+    conn, *, retain_staged_files: bool = DEFAULT_RETAIN_STAGED_FILES
+) -> dict[str, object]:
+    """Apply v1 cleanup policy for terminal remote files and advance job status."""
+    now = datetime.now(UTC).isoformat()
+    job_id = fetch_next_job_with_status(conn, ClientState.CLEANUP_STAGING)
+    if job_id is None:
+        next_state = ClientState.WAIT_NETWORK
+        transition_daemon_state(
+            conn,
+            next_state,
+            now,
+            reason="cleanup staging tick found no jobs",
+        )
+        return {
+            "handled": True,
+            "progressed": False,
+            "errored": False,
+            "job_id": None,
+            "next_state": next_state.value,
+        }
+
+    remote_terminal_count = count_job_files_by_statuses(
+        conn,
+        job_id,
+        (FileStatus.VERIFIED_REMOTE.value, FileStatus.DUPLICATE_SHA_GLOBAL.value),
+    )
+    pending_upload_count = count_job_files_by_statuses(
+        conn,
+        job_id,
+        (FileStatus.READY_TO_UPLOAD.value, FileStatus.UPLOADED.value),
+    )
+    non_terminal_count = count_non_terminal_files_for_job(conn, job_id)
+
+    if pending_upload_count > 0:
+        set_job_status(conn, job_id, ClientState.UPLOAD_PREPARE.value, now)
+        next_state = ClientState.UPLOAD_PREPARE
+    elif non_terminal_count == 0:
+        set_job_status(conn, job_id, ClientState.JOB_COMPLETE_REMOTE.value, now)
+        next_state = ClientState.JOB_COMPLETE_REMOTE
+    else:
+        set_job_status(conn, job_id, ClientState.UPLOAD_PREPARE.value, now)
+        next_state = ClientState.UPLOAD_PREPARE
+
+    transition_daemon_state(
+        conn,
+        next_state,
+        now,
+        reason=f"cleanup staging completed for job_id={job_id}",
+        commit=False,
+    )
+    append_daemon_event(
+        conn,
+        level=EventLevel.INFO,
+        category=EventCategory.CLEANUP_STAGING_APPLIED,
+        message=(
+            f"job_id={job_id}, retain_staged_files={retain_staged_files}, "
+            f"remote_terminal={remote_terminal_count}, pending_upload={pending_upload_count}"
+        ),
+        created_at_utc=now,
+        from_state=ClientState.CLEANUP_STAGING,
+        to_state=next_state,
+    )
+    conn.commit()
+    return {
+        "handled": True,
+        "progressed": True,
+        "errored": False,
+        "job_id": job_id,
+        "remote_terminal_count": remote_terminal_count,
+        "next_state": next_state.value,
+    }
+
+
+def run_job_complete_remote_tick(conn) -> dict[str, object]:
+    """Finalize a remotely-completed job into local completion flow."""
+    now = datetime.now(UTC).isoformat()
+    job_id = fetch_next_job_with_status(conn, ClientState.JOB_COMPLETE_REMOTE)
+    if job_id is None:
+        next_state = ClientState.WAIT_NETWORK
+        transition_daemon_state(
+            conn,
+            next_state,
+            now,
+            reason="job complete remote tick found no jobs",
+        )
+        return {
+            "handled": True,
+            "progressed": False,
+            "errored": False,
+            "job_id": None,
+            "next_state": next_state.value,
+        }
+
+    set_job_status(conn, job_id, ClientState.JOB_COMPLETE_LOCAL.value, now)
+    transition_daemon_state(
+        conn,
+        ClientState.JOB_COMPLETE_LOCAL,
+        now,
+        reason=f"remote completion finalized for job_id={job_id}",
+        commit=False,
+    )
+    append_daemon_event(
+        conn,
+        level=EventLevel.INFO,
+        category=EventCategory.JOB_REMOTE_COMPLETED,
+        message=f"job_id={job_id} transitioned to JOB_COMPLETE_LOCAL",
+        created_at_utc=now,
+        from_state=ClientState.JOB_COMPLETE_REMOTE,
+        to_state=ClientState.JOB_COMPLETE_LOCAL,
+    )
+    conn.commit()
+    return {
+        "handled": True,
+        "progressed": True,
+        "errored": False,
+        "job_id": job_id,
+        "next_state": ClientState.JOB_COMPLETE_LOCAL.value,
+    }
+
+
 def run_daemon_tick(
     conn,
     staging_root: Path,
     *,
     server_base_url: str = DEFAULT_SERVER_BASE_URL,
+    retain_staged_files: bool = DEFAULT_RETAIN_STAGED_FILES,
 ) -> dict[str, object]:
     """Run one daemon tick for the current state."""
     state = get_daemon_state(conn)
@@ -1147,6 +1356,12 @@ def run_daemon_tick(
         return run_upload_file_tick(conn, server_base_url=server_base_url)
     if state == ClientState.SERVER_VERIFY:
         return run_server_verify_tick(conn, server_base_url=server_base_url)
+    if state == ClientState.POST_UPLOAD_VERIFY:
+        return run_post_upload_verify_tick(conn)
+    if state == ClientState.CLEANUP_STAGING:
+        return run_cleanup_staging_tick(conn, retain_staged_files=retain_staged_files)
+    if state == ClientState.JOB_COMPLETE_REMOTE:
+        return run_job_complete_remote_tick(conn)
     if state == ClientState.JOB_COMPLETE_LOCAL:
         return run_job_complete_local_tick(conn)
 
@@ -1174,6 +1389,7 @@ def run_recovery_dispatch(
     staging_root: Path,
     *,
     server_base_url: str = DEFAULT_SERVER_BASE_URL,
+    retain_staged_files: bool = DEFAULT_RETAIN_STAGED_FILES,
     max_steps: int = 1000,
 ) -> dict[str, object]:
     """Drain implemented recovery phase work after bootstrap selection."""
@@ -1205,7 +1421,12 @@ def run_recovery_dispatch(
             conn.commit()
             break
 
-        outcome = run_daemon_tick(conn, staging_root, server_base_url=server_base_url)
+        outcome = run_daemon_tick(
+            conn,
+            staging_root,
+            server_base_url=server_base_url,
+            retain_staged_files=retain_staged_files,
+        )
         steps += 1
         if outcome.get("progressed"):
             progressed_steps += 1

@@ -744,6 +744,34 @@ def fetch_next_uploaded_file(conn: sqlite3.Connection) -> dict[str, object] | No
     }
 
 
+def count_job_files_by_statuses(conn: sqlite3.Connection, job_id: int, statuses: Sequence[str]) -> int:
+    if not statuses:
+        return 0
+    placeholders = ",".join("?" for _ in statuses)
+    row = conn.execute(
+        f"""
+        SELECT COUNT(1)
+        FROM ingest_files
+        WHERE job_id = ? AND status IN ({placeholders});
+        """,
+        (job_id, *statuses),
+    ).fetchone()
+    return int(row[0]) if row else 0
+
+
+def count_non_terminal_files_for_job(conn: sqlite3.Connection, job_id: int) -> int:
+    placeholders = ",".join("?" for _ in TERMINAL_FILE_STATUSES)
+    row = conn.execute(
+        f"""
+        SELECT COUNT(1)
+        FROM ingest_files
+        WHERE job_id = ? AND status NOT IN ({placeholders});
+        """,
+        (job_id, *tuple(TERMINAL_FILE_STATUSES)),
+    ).fetchone()
+    return int(row[0]) if row else 0
+
+
 def count_uploaded_files_global(conn: sqlite3.Connection) -> int:
     row = conn.execute(
         "SELECT COUNT(1) FROM ingest_files WHERE status = ?;",

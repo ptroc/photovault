@@ -35,6 +35,7 @@ from photovault_clientd.db import (
     transition_daemon_state,
 )
 from photovault_clientd.engine import (
+    DEFAULT_RETAIN_STAGED_FILES,
     DEFAULT_SERVER_BASE_URL,
     run_daemon_tick,
     run_recovery_dispatch,
@@ -70,6 +71,7 @@ def create_app(
     db_path: Path = DEFAULT_DB_PATH,
     staging_root: Path = DEFAULT_STAGING_ROOT,
     server_base_url: str = DEFAULT_SERVER_BASE_URL,
+    retain_staged_files: bool = DEFAULT_RETAIN_STAGED_FILES,
 ) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -100,7 +102,12 @@ def create_app(
                 now,
                 reason="bootstrap recovery complete",
             )
-            run_recovery_dispatch(conn, staging_root, server_base_url=server_base_url)
+            run_recovery_dispatch(
+                conn,
+                staging_root,
+                server_base_url=server_base_url,
+                retain_staged_files=retain_staged_files,
+            )
         except Exception:
             append_daemon_event(
                 conn,
@@ -206,7 +213,12 @@ def create_app(
     @app.post("/daemon/tick")
     def daemon_tick() -> dict[str, object]:
         conn = open_db(db_path)
-        outcome = run_daemon_tick(conn, staging_root, server_base_url=server_base_url)
+        outcome = run_daemon_tick(
+            conn,
+            staging_root,
+            server_base_url=server_base_url,
+            retain_staged_files=retain_staged_files,
+        )
         conn.close()
         return outcome
 

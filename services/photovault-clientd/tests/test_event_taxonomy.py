@@ -16,6 +16,9 @@ def test_m2_handshake_event_categories_exist() -> None:
     assert EventCategory.UPLOAD_RETRY_SCHEDULED == "UPLOAD_RETRY_SCHEDULED"
     assert EventCategory.SERVER_VERIFY_COMPLETED == "SERVER_VERIFY_COMPLETED"
     assert EventCategory.SERVER_VERIFY_RETRY_SCHEDULED == "SERVER_VERIFY_RETRY_SCHEDULED"
+    assert EventCategory.POST_UPLOAD_VERIFY_COMPLETED == "POST_UPLOAD_VERIFY_COMPLETED"
+    assert EventCategory.CLEANUP_STAGING_APPLIED == "CLEANUP_STAGING_APPLIED"
+    assert EventCategory.JOB_REMOTE_COMPLETED == "JOB_REMOTE_COMPLETED"
 
 
 def test_classify_copy_error_for_missing_source() -> None:

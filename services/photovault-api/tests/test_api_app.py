@@ -1,5 +1,6 @@
 from fastapi.testclient import TestClient
 from photovault_api.app import create_app
+from photovault_api.state_store import InMemoryUploadStateStore
 
 
 def test_healthz() -> None:
@@ -52,7 +53,7 @@ def test_upload_content_and_verify_promotes_sha_to_known_registry() -> None:
 
     upload_response = client.put(
         f"/v1/upload/content/{sha256_hex}",
-        data=content,
+        content=content,
         headers={"x-size-bytes": str(len(content))},
     )
     assert upload_response.status_code == 200
@@ -85,3 +86,34 @@ def test_verify_returns_verify_failed_when_content_not_uploaded() -> None:
     )
     assert response.status_code == 200
     assert response.json()["status"] == "VERIFY_FAILED"
+
+
+def test_known_sha_and_temp_upload_persist_across_app_restart_with_shared_store() -> None:
+    store = InMemoryUploadStateStore()
+    content = b"restart-persist"
+    sha256_hex = "7829033a1d930735112bd3343bfca98908306b3add85360c790c8f62b15dfe35"
+
+    first_client = TestClient(create_app(state_store=store))
+    upload_response = first_client.put(
+        f"/v1/upload/content/{sha256_hex}",
+        content=content,
+        headers={"x-size-bytes": str(len(content))},
+    )
+    assert upload_response.status_code == 200
+    assert upload_response.json()["status"] == "STORED_TEMP"
+
+    second_client = TestClient(create_app(state_store=store))
+    verify_response = second_client.post(
+        "/v1/upload/verify",
+        json={"sha256_hex": sha256_hex, "size_bytes": len(content)},
+    )
+    assert verify_response.status_code == 200
+    assert verify_response.json()["status"] == "VERIFIED"
+
+    third_client = TestClient(create_app(state_store=store))
+    handshake_response = third_client.post(
+        "/v1/upload/metadata-handshake",
+        json={"files": [{"client_file_id": 9, "sha256_hex": sha256_hex, "size_bytes": len(content)}]},
+    )
+    assert handshake_response.status_code == 200
+    assert handshake_response.json()["results"][0]["decision"] == "ALREADY_EXISTS"
