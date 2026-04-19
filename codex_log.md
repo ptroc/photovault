@@ -208,3 +208,8 @@ Append-only log of substantive Codex actions in this repository.
 - Summary: Hardened M2 deployment path by adding explicit `PHOTOVAULT_API_DATABASE_URL` bootstrap wiring in Ansible and added API coverage to verify env-driven Postgres state-store selection without changing endpoint contracts; re-ran full repository checks.
 - Files changed: `ansible/playbooks/bootstrap.yml`, `services/photovault-api/tests/test_api_app.py`, `codex_log.md`
 - Verification: `source .venv/bin/activate && pytest services/photovault-api/tests/test_api_app.py`, `source .venv/bin/activate && pytest services/photovault-clientd/tests/test_m2_handshake.py`, `source .venv/bin/activate && make check` (84 passed)
+
+- Timestamp (UTC): 2026-04-19T22:05:01Z
+- Summary: Applied the updated bootstrap playbook to Raspberry Pi `10.100.1.95` so `/etc/photovault/photovault-api.env` now explicitly contains `PHOTOVAULT_API_DATABASE_URL=`, then re-verified daemon/API/UI service health and local API/client state endpoints.
+- Files changed: `codex_log.md`
+- Verification: `/bin/zsh -lc "ANISBLE_HOST_KEY_CHECKING=False ANSIBLE_HOST_KEY_CHECKING=False .venv/bin/ansible-playbook -i '10.100.1.95,' -u root --private-key ~/.ssh/id_rsa_theworlt_bitbucket_key ansible/playbooks/bootstrap.yml"`, `ssh -o BatchMode=yes -i ~/.ssh/id_rsa_theworlt_bitbucket_key root@10.100.1.95 "grep -n '^PHOTOVAULT_API_DATABASE_URL=' /etc/photovault/photovault-api.env"`, `ssh -o BatchMode=yes -i ~/.ssh/id_rsa_theworlt_bitbucket_key root@10.100.1.95 "systemctl is-active photovault-api photovault-clientd photovault-client-ui && curl -fsS http://127.0.0.1:9301/healthz && echo && curl -fsS http://127.0.0.1:9101/state"`
