@@ -335,3 +335,23 @@ Append-only log of substantive Codex actions in this repository.
 - Verification: `rsync -az --delete --exclude='.git' --exclude='.venv' --exclude='.pytest_cache' --exclude='.ruff_cache' /Users/ptroc/IdeaProjects/photovault/ root@10.100.1.95:/opt/photovault/`, `ssh -i ~/.ssh/id_rsa_theworlt_bitbucket_key root@10.100.1.95 'systemctl restart photovault-clientd.service photovault-client-ui.service && systemctl is-active photovault-clientd.service photovault-client-ui.service'` (both active), `ssh -i ~/.ssh/id_rsa_theworlt_bitbucket_key root@10.100.1.95 'for path in / /jobs /jobs/1 /events /network; do code=$(curl -o /dev/null -s -w "%{http_code}" http://127.0.0.1:9201${path}); echo "$path $code"; done'` (all 200), plus content checks via curl+grep for dashboard/filters/diagnostics/network headings and navigation links.
 2026-04-20T16:17:27Z | Added Raspberry Pi rsync deploy helper script plus docs | files: scripts/deploy_rpi.sh, scripts/README.md, README.md | verification: none
 2026-04-20T16:22:10Z | Added AGENTS guidance to prefer scripts/deploy_rpi.sh for Raspberry Pi deployment in future Codex prompts | files: AGENTS.md | verification: none
+- Timestamp (UTC): 2026-04-20T16:36:33Z
+- Summary: Made manual daemon tick safe alongside daemon-side auto progression by serializing progression cycles with a shared in-process lock in clientd and returning an explicit non-error no-op () when a manual tick arrives while another progression cycle is active. Updated client UI to clearly indicate auto progression, disable/de-emphasize manual tick in auto-progress states, and guide operators to wait/refresh.
+- Files changed: services/photovault-clientd/src/photovault_clientd/app.py, services/photovault-clientd/tests/test_auto_progress_loop.py, services/photovault-client-ui/src/photovault_client_ui/app.py, services/photovault-client-ui/src/photovault_client_ui/templates/_overview_content.html, services/photovault-client-ui/src/photovault_client_ui/templates/job_detail.html, services/photovault-client-ui/tests/test_client_ui_app.py, codex_log.md
+- Verification: source .venv/bin/activate && pytest services/photovault-clientd/tests/test_auto_progress_loop.py services/photovault-client-ui/tests/test_client_ui_app.py (20 passed); source .venv/bin/activate && pytest services/photovault-clientd/tests/test_transitions_and_events.py (6 passed)
+
+- Timestamp (UTC): ${timestamp}
+- Summary: Log correction for previous entry at 2026-04-20T16:36:33Z: manual tick busy no-op response field is `already_progressing=true`.
+- Files changed: codex_log.md
+- Verification: none
+
+- Timestamp (UTC): 2026-04-20T16:36:53Z
+- Summary: Log correction for previous correction entry: timestamp variable was written literally in prior line due shell quoting; this entry records the actual correction time.
+- Files changed: codex_log.md
+- Verification: none
+
+- Timestamp (UTC): 2026-04-20T16:42:41Z
+- Summary: Deployed manual-tick safety/UI busy-state changes to Raspberry Pi 10.100.1.95 using scripts/deploy_rpi.sh (deploy completed; initial health check raced service startup, then passed on retry). Performed on-device validation with seeded WAIT_NETWORK batch job while repeatedly triggering manual /daemon/tick during active auto-progress states; observed no transition violations and busy no-op events emitted when lock contention occurred. Verified UI shows auto-progression indicator and disabled manual tick treatment.
+- Files changed: codex_log.md
+- Verification: source .venv/bin/activate && scripts/deploy_rpi.sh (sync/restart succeeded; initial remote health probe failed due startup timing); ssh -i ~/.ssh/id_rsa_theworlt_bitbucket_key root@10.100.1.95 'systemctl is-active ... && curl -fsS http://127.0.0.1:9101/healthz && curl -fsS http://127.0.0.1:9101/state' (passed); remote Python validation script seeding WAIT_NETWORK job + repeated POST /daemon/tick (already_progressing=1, busy_tick_noop_events_since_seed=2, transition_violations_since_seed=0); ssh journalctl grep for disallowed transition (none); curl UI checks confirm 'Auto progression active' and 'Run daemon tick (auto progression active)' rendering on Pi.
+

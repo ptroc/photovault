@@ -14,8 +14,8 @@
       </div>
     {% endif %}
     {% if action_notice %}
-      <div class="banner banner-success">
-        <strong>Action complete</strong>
+      <div class="banner {% if action_notice_pending %}banner-warning{% else %}banner-success{% endif %}">
+        <strong>{% if action_notice_pending %}Action deferred{% else %}Action complete{% endif %}</strong>
         <span>{{ action_notice }}</span>
       </div>
     {% endif %}
@@ -48,10 +48,23 @@
     <div class="action-row">
       <form method="post" action="/actions/daemon/tick">
         <input type="hidden" name="return_to" value="/jobs/{{ selected_job.job_id }}">
-        <button type="submit">Run daemon tick</button>
+        <button
+          type="submit"
+          {% if daemon_progress.is_auto_progressing %}
+            disabled
+            aria-disabled="true"
+          {% endif %}
+        >
+          {% if daemon_progress.is_auto_progressing %}
+            Run daemon tick (auto progression active)
+          {% else %}
+            Run daemon tick
+          {% endif %}
+        </button>
       </form>
       <a class="button-link" href="/jobs?filter=active">Back to jobs</a>
     </div>
+    <p class="muted">{{ daemon_progress.message }}</p>
   </section>
 
   <section class="section card stack">

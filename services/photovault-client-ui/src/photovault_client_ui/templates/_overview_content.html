@@ -46,6 +46,10 @@
       {% if state %}
         <p class="muted">Last state update: {{ state.updated_at_utc }}</p>
       {% endif %}
+      <div class="banner {% if daemon_progress.is_auto_progressing %}banner-warning{% else %}banner-success{% endif %}">
+        <strong>{{ daemon_progress.badge_label }}</strong>
+        <span>{{ daemon_progress.message }}</span>
+      </div>
     </article>
 
     <article class="card stack">
@@ -61,9 +65,19 @@
           <input type="hidden" name="return_to" value="/">
           <button
             type="submit"
+            {% if daemon_progress.is_auto_progressing %}
+              disabled
+              aria-disabled="true"
+            {% endif %}
             data-idle-label="Run daemon tick"
             data-busy-label="Running daemon tick..."
-          >Run daemon tick</button>
+          >
+            {% if daemon_progress.is_auto_progressing %}
+              Run daemon tick (auto progression active)
+            {% else %}
+              Run daemon tick
+            {% endif %}
+          </button>
         </form>
         <a class="button-link" href="/jobs">Open jobs</a>
         <a class="button-link" href="/network">Open network</a>

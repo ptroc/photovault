@@ -45,6 +45,18 @@ _ACTIVE_DAEMON_STATES = {
     "VERIFY_HASH",
 }
 
+_AUTO_PROGRESS_DAEMON_STATES = {
+    "WAIT_NETWORK",
+    "UPLOAD_PREPARE",
+    "UPLOAD_FILE",
+    "SERVER_VERIFY",
+    "REUPLOAD_OR_QUARANTINE",
+    "POST_UPLOAD_VERIFY",
+    "CLEANUP_STAGING",
+    "JOB_COMPLETE_REMOTE",
+    "JOB_COMPLETE_LOCAL",
+}
+
 _M2_PHASE_LABELS = {
     "READY_TO_UPLOAD": "queued for upload",
     "UPLOADED": "uploaded; waiting for server verify",
@@ -90,7 +102,7 @@ _INGEST_BLOCKED_GUIDANCE = {
     "WAIT_NETWORK": {
         "summary": "The daemon is waiting for network before continuing queued upload work.",
         "operator_action": (
-            "Do not start a new ingest yet. Keep upload work moving until the daemon returns to IDLE."
+            "Do not start a new ingest yet. Wait for automatic daemon progression and refresh status."
         ),
     },
     "ERROR_JOB": {
@@ -281,7 +293,33 @@ def _build_ingest_gate(state: dict[str, Any] | None) -> dict[str, Any]:
         "current_state": current_state,
         "summary": state_guidance["summary"],
         "operator_action": state_guidance["operator_action"],
-        "show_tick_action": current_state in _TICK_ACTION_STATES,
+        "show_tick_action": current_state in _TICK_ACTION_STATES
+        and current_state not in _AUTO_PROGRESS_DAEMON_STATES,
+    }
+
+
+def _derive_daemon_progress_view(state: dict[str, Any] | None) -> dict[str, Any]:
+    if not state:
+        return {
+            "is_auto_progressing": False,
+            "badge_label": "Progress unknown",
+            "message": "Daemon activity is unavailable; refresh status.",
+        }
+
+    current_state = str(state.get("current_state", "UNKNOWN"))
+    is_auto_progressing = current_state in _AUTO_PROGRESS_DAEMON_STATES
+    if is_auto_progressing:
+        return {
+            "is_auto_progressing": True,
+            "badge_label": "Auto progression active",
+            "message": (
+                "Upload/completion progression runs automatically. Wait and refresh instead of forcing ticks."
+            ),
+        }
+    return {
+        "is_auto_progressing": False,
+        "badge_label": "Manual tick available",
+        "message": "Use manual tick only for debugging or explicit recovery steps.",
     }
 
 
@@ -408,6 +446,8 @@ def _build_overview_metrics(
         next_action = "Address alerts first, then run one daemon tick to confirm recovery."
     elif current_state == "IDLE":
         next_action = "Create the next ingest job when new media is ready."
+    elif current_state in _AUTO_PROGRESS_DAEMON_STATES:
+        next_action = "Daemon is auto-progressing upload/completion work; wait and refresh status."
     elif current_state in _TICK_ACTION_STATES:
         next_action = "Run one daemon tick to advance current state-machine work."
     else:
@@ -724,6 +764,7 @@ def create_app(
             {
                 "dependencies": dependencies,
                 "overview_metrics": overview_metrics,
+                "daemon_progress": _derive_daemon_progress_view(context["state"]),
                 "daemon_base_url": daemon_base_url,
                 "ingest_error": ingest_error,
                 "ingest_error_detail": ingest_error_detail,
@@ -763,7 +804,13 @@ def create_app(
         )
         return render_template("jobs.html", **context)
 
-    def _render_job_detail(job_id: int, *, action_error: str | None = None, action_notice: str | None = None) -> str:
+    def _render_job_detail(
+        job_id: int,
+        *,
+        action_error: str | None = None,
+        action_notice: str | None = None,
+        action_notice_pending: bool = False,
+    ) -> str:
         context = _load_daemon_context()
         selected_job, selected_job_error = _load_selected_job(job_id)
         if selected_job is None:
@@ -777,10 +824,12 @@ def create_app(
         context.update(
             {
                 "daemon_base_url": daemon_base_url,
+                "daemon_progress": _derive_daemon_progress_view(context["state"]),
                 "selected_job": selected_job,
                 "active_page": "jobs",
                 "action_error": action_error,
                 "action_notice": action_notice,
+                "action_notice_pending": action_notice_pending,
             }
         )
         return render_template("job_detail.html", **context)
@@ -954,8 +1003,15 @@ def create_app(
             )
 
         if outcome.get("handled"):
-            next_state = outcome.get("next_state", outcome.get("state", "UNKNOWN"))
-            message = f"Daemon tick completed in state {next_state}."
+            if outcome.get("already_progressing"):
+                next_state = outcome.get("next_state", outcome.get("state", "UNKNOWN"))
+                message = (
+                    "Daemon is already progressing in state "
+                    f"{next_state}; wait and refresh instead of running manual ticks."
+                )
+            else:
+                next_state = outcome.get("next_state", outcome.get("state", "UNKNOWN"))
+                message = f"Daemon tick completed in state {next_state}."
         else:
             message = f"Daemon tick was a no-op in state {outcome.get('state', 'UNKNOWN')}."
 
@@ -964,8 +1020,17 @@ def create_app(
                 job_id = int(return_to.rsplit("/", 1)[-1])
             except ValueError:
                 return _render_overview(operator_notice=message)
-            return make_response(_render_job_detail(job_id, action_notice=message))
-        return _render_overview(operator_notice=message)
+            return make_response(
+                _render_job_detail(
+                    job_id,
+                    action_notice=message,
+                    action_notice_pending=bool(outcome.get("already_progressing")),
+                )
+            )
+        return _render_overview(
+            operator_notice=message,
+            operator_notice_pending=bool(outcome.get("already_progressing")),
+        )
 
     @app.post("/actions/retry-upload")
     def retry_error_upload() -> Response:

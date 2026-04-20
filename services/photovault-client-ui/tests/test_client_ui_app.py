@@ -249,7 +249,9 @@ def test_index_route_renders_dashboard_not_raw_tables() -> None:
     assert "Active job summary" in body
     assert "Ingest blocked" in body
     assert "Current daemon state: <code>WAIT_NETWORK</code>" in body
-    assert "Run daemon tick" in body
+    assert "Auto progression active" in body
+    assert "Run daemon tick (auto progression active)" in body
+    assert "disabled" in body
     assert "Ingest Jobs" not in body
     assert "Recent Events" not in body
     assert "Visible Wi-Fi Networks" not in body
@@ -358,6 +360,61 @@ def test_daemon_tick_returns_partial_notice_for_ajax_requests() -> None:
     assert response.headers["X-Client-Location"].endswith("/")
     assert "Action complete" in body
     assert "Daemon tick completed in state HASHING." in body
+
+
+def test_daemon_tick_busy_response_is_rendered_as_wait_notice() -> None:
+    payloads = _overview_payloads()
+
+    def fake_daemon_get(_: str, path: str) -> object:
+        return payloads[path]
+
+    def fake_daemon_post(
+        _: str,
+        path: str,
+        payload: dict[str, object],
+        *,
+        timeout_seconds: float = 2.0,
+    ) -> object:
+        assert path == "/daemon/tick"
+        assert payload == {}
+        assert timeout_seconds == 2.0
+        return {
+            "handled": True,
+            "progressed": False,
+            "already_progressing": True,
+            "next_state": "WAIT_NETWORK",
+            "state": "WAIT_NETWORK",
+        }
+
+    app = create_app(
+        daemon_get=fake_daemon_get,
+        daemon_post=fake_daemon_post,
+        network_snapshot_get=_network_snapshot,
+        dependency_snapshot_get=_dependency_snapshot,
+    )
+    response = app.test_client().post("/actions/daemon/tick", data={"return_to": "/"})
+    body = response.get_data(as_text=True)
+
+    assert response.status_code == 200
+    assert "Action in progress" in body
+    assert "Daemon is already progressing in state WAIT_NETWORK; wait and refresh instead" in body
+
+
+def test_job_detail_disables_manual_tick_while_auto_progress_active() -> None:
+    payloads = _overview_payloads()
+
+    def fake_daemon_get(_: str, path: str) -> object:
+        return payloads[path]
+
+    app = create_app(
+        daemon_get=fake_daemon_get,
+        network_snapshot_get=_network_snapshot,
+        dependency_snapshot_get=_dependency_snapshot,
+    )
+    body = app.test_client().get("/jobs/1").get_data(as_text=True)
+
+    assert "Run daemon tick (auto progression active)" in body
+    assert "Upload/completion progression runs automatically." in body
 
 
 def test_retry_upload_action_renders_notice_on_job_detail() -> None:

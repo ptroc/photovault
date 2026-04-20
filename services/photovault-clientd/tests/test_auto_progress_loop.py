@@ -1,4 +1,5 @@
 import time
+from threading import Event, Thread
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -158,6 +159,82 @@ def test_auto_progress_stops_at_wait_network_boundary(tmp_path: Path) -> None:
     conn.close()
     assert auto_events is not None
     assert auto_events[0] == 0
+
+
+def test_manual_tick_is_safe_noop_when_another_tick_cycle_is_in_flight(
+    tmp_path: Path, monkeypatch
+) -> None:
+    db_path = tmp_path / "state.sqlite3"
+    _seed_job(
+        db_path,
+        job_status=ClientState.HASHING.value,
+        daemon_state=ClientState.HASHING,
+        file_status="STAGED",
+    )
+
+    tick_started = Event()
+    release_tick = Event()
+
+    def _slow_run_daemon_tick(*args, **kwargs) -> dict[str, object]:
+        tick_started.set()
+        release_tick.wait()
+        return {
+            "handled": True,
+            "progressed": True,
+            "errored": False,
+            "next_state": "DEDUP_SESSION_SHA",
+        }
+
+    monkeypatch.setattr("photovault_clientd.app.run_daemon_tick", _slow_run_daemon_tick)
+
+    app = create_app(db_path=db_path, auto_progress_interval_seconds=10.0)
+    with TestClient(app) as client:
+        first_response: dict[str, object] = {}
+
+        def _first_tick() -> None:
+            response = client.post("/daemon/tick")
+            first_response["status_code"] = response.status_code
+            first_response["payload"] = response.json()
+
+        first_thread = Thread(target=_first_tick)
+        first_thread.start()
+        try:
+            assert tick_started.wait(timeout=1.5)
+
+            response = client.post("/daemon/tick")
+            assert response.status_code == 200
+            payload = response.json()
+            assert payload["handled"] is True
+            assert payload["progressed"] is False
+            assert payload["already_progressing"] is True
+            assert payload["no_op"] is True
+            assert payload["next_state"] == "HASHING"
+        finally:
+            release_tick.set()
+            first_thread.join(timeout=2.0)
+
+    assert first_response["status_code"] == 200
+    assert first_response["payload"]["handled"] is True
+    assert first_response["payload"]["next_state"] == "DEDUP_SESSION_SHA"
+
+    conn = open_db(db_path)
+    transition_violations = conn.execute(
+        "SELECT COUNT(1) FROM daemon_events WHERE category = 'TRANSITION_VIOLATION';"
+    ).fetchone()
+    busy_noops = conn.execute(
+        """
+        SELECT COUNT(1)
+        FROM daemon_events
+        WHERE category = 'TICK_NOOP'
+          AND message LIKE 'manual daemon tick skipped because another progression cycle is active%';
+        """
+    ).fetchone()
+    conn.close()
+
+    assert transition_violations is not None
+    assert transition_violations[0] == 0
+    assert busy_noops is not None
+    assert busy_noops[0] >= 1
 
 
 def test_auto_progress_does_not_busy_loop_when_idle(tmp_path: Path) -> None:

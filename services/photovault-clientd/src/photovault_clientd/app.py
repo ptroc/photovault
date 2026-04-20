@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+import threading
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -168,6 +169,38 @@ def create_app(
     auto_progress_interval_seconds: float = DEFAULT_AUTO_PROGRESS_INTERVAL_SECONDS,
     auto_progress_max_steps: int = DEFAULT_AUTO_PROGRESS_MAX_STEPS,
 ) -> FastAPI:
+    progression_lock = threading.Lock()
+
+    def _manual_tick_busy_noop_response() -> dict[str, object]:
+        now = datetime.now(UTC).isoformat()
+        conn_busy = open_db(db_path)
+        try:
+            current_state = get_daemon_state_safe(conn_busy)
+            append_daemon_event(
+                conn_busy,
+                level=EventLevel.INFO,
+                category=EventCategory.TICK_NOOP,
+                message=(
+                    "manual daemon tick skipped because another progression cycle is active; "
+                    "wait for auto progression and refresh status"
+                ),
+                created_at_utc=now,
+                from_state=current_state,
+                to_state=current_state,
+            )
+            conn_busy.commit()
+            return {
+                "handled": True,
+                "progressed": False,
+                "errored": False,
+                "already_progressing": True,
+                "no_op": True,
+                "state": current_state.value,
+                "next_state": current_state.value,
+            }
+        finally:
+            conn_busy.close()
+
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         conn = open_db(db_path)
@@ -223,6 +256,8 @@ def create_app(
         async def _run_auto_progress_loop() -> None:
             while not stop_event.is_set():
                 await asyncio.sleep(max(auto_progress_interval_seconds, 0.1))
+                if not progression_lock.acquire(blocking=False):
+                    continue
                 conn_loop = open_db(db_path)
                 cycle_now = datetime.now(UTC).isoformat()
                 try:
@@ -262,6 +297,7 @@ def create_app(
                     conn_loop.commit()
                 finally:
                     conn_loop.close()
+                    progression_lock.release()
 
         auto_progress_task = asyncio.create_task(_run_auto_progress_loop())
         try:
@@ -362,15 +398,21 @@ def create_app(
 
     @app.post("/daemon/tick")
     def daemon_tick() -> dict[str, object]:
+        if not progression_lock.acquire(blocking=False):
+            return _manual_tick_busy_noop_response()
+
         conn = open_db(db_path)
-        outcome = run_daemon_tick(
-            conn,
-            staging_root,
-            server_base_url=server_base_url,
-            retain_staged_files=retain_staged_files,
-        )
-        conn.close()
-        return outcome
+        try:
+            outcome = run_daemon_tick(
+                conn,
+                staging_root,
+                server_base_url=server_base_url,
+                retain_staged_files=retain_staged_files,
+            )
+            return outcome
+        finally:
+            conn.close()
+            progression_lock.release()
 
     @app.post("/ingest/jobs")
     def create_ingest(request: IngestJobCreateRequest) -> dict[str, object]:
