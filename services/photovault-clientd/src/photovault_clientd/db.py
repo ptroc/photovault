@@ -460,6 +460,28 @@ def insert_discovered_files(
     return inserted
 
 
+def replace_copy_candidate_with_discovered_files(
+    conn: sqlite3.Connection,
+    *,
+    job_id: int,
+    file_id: int,
+    source_paths: Sequence[str],
+    now_utc: str,
+) -> tuple[bool, int]:
+    conn.execute("DELETE FROM bootstrap_queue WHERE file_id = ?;", (file_id,))
+    cursor = conn.execute(
+        """
+        DELETE FROM ingest_files
+        WHERE id = ? AND job_id = ? AND status IN (?, ?);
+        """,
+        (file_id, job_id, FileStatus.DISCOVERED.value, FileStatus.NEEDS_RETRY_COPY.value),
+    )
+    if cursor.rowcount != 1:
+        return False, 0
+    inserted = insert_discovered_files(conn, job_id, source_paths, now_utc)
+    return True, inserted
+
+
 def set_job_status(conn: sqlite3.Connection, job_id: int, status: str, now_utc: str) -> None:
     conn.execute(
         """

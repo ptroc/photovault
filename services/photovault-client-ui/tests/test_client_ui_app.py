@@ -199,6 +199,57 @@ def _overview_payloads(daemon_state: str = "WAIT_NETWORK") -> dict[str, object]:
     }
 
 
+def _staging_retry_payloads() -> dict[str, object]:
+    return {
+        "/state": {
+            "current_state": "STAGING_COPY",
+            "updated_at_utc": "2026-04-20T10:10:00+00:00",
+        },
+        "/diagnostics/m0": {
+            "ok": True,
+            "invariant_issue_count": 0,
+            "pending_bootstrap_entries": 0,
+        },
+        "/ingest/jobs": {
+            "jobs": [
+                {
+                    "job_id": 9,
+                    "media_label": "usb-ingest",
+                    "status": "STAGING_COPY",
+                    "local_ingest_complete": False,
+                    "upload_pending": False,
+                    "status_counts": {
+                        "NEEDS_RETRY_COPY": 1,
+                        "DISCOVERED": 2,
+                    },
+                }
+            ]
+        },
+        "/events?limit=10": {
+            "events": [
+                {
+                    "category": "COPY_RETRY_SCHEDULED",
+                    "created_at_utc": "2026-04-20T10:09:00+00:00",
+                    "message": "COPY_SOURCE_MISSING: file_id=2, error=[Errno 2] No such file",
+                }
+            ]
+        },
+        "/ingest/jobs/9": {
+            "job_id": 9,
+            "media_label": "usb-ingest",
+            "status": "STAGING_COPY",
+            "updated_at_utc": "2026-04-20T10:10:00+00:00",
+            "local_ingest_complete": False,
+            "upload_pending": False,
+            "status_counts": {
+                "NEEDS_RETRY_COPY": 1,
+                "DISCOVERED": 2,
+            },
+            "files": [],
+        },
+    }
+
+
 def test_index_route_renders_overview_sections() -> None:
     payloads = _overview_payloads()
 
@@ -366,6 +417,54 @@ def test_create_ingest_job_shows_validation_error() -> None:
     assert "Media label is required." in body
 
 
+def test_create_ingest_job_shows_friendly_source_path_validation_error() -> None:
+    payloads = _overview_payloads(daemon_state="IDLE")
+
+    def fake_daemon_get(_: str, path: str) -> object:
+        return payloads[path]
+
+    def failing_daemon_post(_: str, path: str, payload: dict[str, object]) -> object:
+        assert path == "/ingest/jobs"
+        assert payload["media_label"] == "usb-root"
+        req = httpx.Request("POST", "http://127.0.0.1:9101/ingest/jobs")
+        resp = httpx.Response(
+            422,
+            request=req,
+            json={
+                "detail": {
+                    "code": "INGEST_SOURCE_PATH_INVALID",
+                    "message": "One or more source paths could not be used for ingest discovery.",
+                    "invalid_sources": [
+                        {
+                            "source_path": "/mnt/usb/missing.jpg",
+                            "reason": "Path does not exist.",
+                        }
+                    ],
+                    "suggestion": "Fix the listed paths, then retry ingest creation.",
+                }
+            },
+        )
+        raise httpx.HTTPStatusError("unprocessable", request=req, response=resp)
+
+    app = create_app(
+        daemon_get=fake_daemon_get,
+        daemon_post=failing_daemon_post,
+        network_snapshot_get=_network_snapshot,
+        dependency_snapshot_get=_dependency_snapshot,
+    )
+    client = app.test_client()
+    response = client.post(
+        "/ingest/jobs",
+        data={"media_label": "usb-root", "source_paths": "/mnt/usb\n/mnt/usb/missing.jpg"},
+    )
+    body = response.get_data(as_text=True)
+
+    assert response.status_code == 200
+    assert "One or more source paths could not be used for ingest discovery." in body
+    assert "Fix the listed paths, then retry ingest creation." in body
+    assert "/mnt/usb/missing.jpg: Path does not exist." in body
+
+
 def test_create_ingest_job_is_blocked_when_daemon_not_idle() -> None:
     payloads = _overview_payloads(daemon_state="WAIT_NETWORK")
     observed: dict[str, object] = {"called": False}
@@ -397,6 +496,37 @@ def test_create_ingest_job_is_blocked_when_daemon_not_idle() -> None:
     assert "Run daemon tick now" in body
 
 
+def test_create_ingest_job_is_blocked_with_staging_copy_recovery_guidance() -> None:
+    payloads = _staging_retry_payloads()
+    observed: dict[str, object] = {"called": False}
+
+    def fake_daemon_get(_: str, path: str) -> object:
+        return payloads[path]
+
+    def fake_daemon_post(_: str, __: str, ___: dict[str, object]) -> object:
+        observed["called"] = True
+        return {"job_id": 99}
+
+    app = create_app(
+        daemon_get=fake_daemon_get,
+        daemon_post=fake_daemon_post,
+        network_snapshot_get=_network_snapshot,
+        dependency_snapshot_get=_dependency_snapshot,
+    )
+    client = app.test_client()
+    response = client.post(
+        "/ingest/jobs",
+        data={"media_label": "sd-new", "source_paths": "/media/sd/001.jpg"},
+    )
+    body = response.get_data(as_text=True)
+
+    assert response.status_code == 200
+    assert observed["called"] is False
+    assert "Cannot start ingest while daemon state is STAGING_COPY." in body
+    assert "run one daemon tick to retry the next file copy" in body.lower()
+    assert "Run daemon tick now" in body
+
+
 def test_create_ingest_job_409_shows_job_complete_local_guidance() -> None:
     payloads = _overview_payloads(daemon_state="IDLE")
     state_calls: dict[str, int] = {"count": 0}
@@ -415,7 +545,11 @@ def test_create_ingest_job_409_shows_job_complete_local_guidance() -> None:
         assert path == "/ingest/jobs"
         assert payload["media_label"] == "sd-new"
         req = httpx.Request("POST", "http://127.0.0.1:9101/ingest/jobs")
-        resp = httpx.Response(409, request=req, json={"detail": "daemon must be IDLE, got JOB_COMPLETE_LOCAL"})
+        resp = httpx.Response(
+            409,
+            request=req,
+            json={"detail": "daemon must be IDLE, got JOB_COMPLETE_LOCAL"},
+        )
         raise httpx.HTTPStatusError("conflict", request=req, response=resp)
 
     app = create_app(

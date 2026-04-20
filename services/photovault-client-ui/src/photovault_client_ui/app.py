@@ -38,14 +38,62 @@ _M2_PHASE_LABELS = {
     "QUARANTINED_LOCAL": "quarantined after local verify mismatch",
 }
 
+_TICK_ACTION_STATES = {
+    "STAGING_COPY",
+    "HASHING",
+    "DEDUP_SESSION_SHA",
+    "DEDUP_LOCAL_SHA",
+    "QUEUE_UPLOAD",
+    "WAIT_NETWORK",
+    "UPLOAD_PREPARE",
+    "UPLOAD_FILE",
+    "SERVER_VERIFY",
+    "REUPLOAD_OR_QUARANTINE",
+    "POST_UPLOAD_VERIFY",
+    "CLEANUP_STAGING",
+    "JOB_COMPLETE_REMOTE",
+    "JOB_COMPLETE_LOCAL",
+}
+
 _INGEST_BLOCKED_GUIDANCE = {
+    "STAGING_COPY": {
+        "summary": "A prior ingest job is still in copy/staging.",
+        "operator_action": (
+            "If source media/path issues were corrected, run one daemon tick to retry the next file copy."
+        ),
+    },
+    "HASHING": {
+        "summary": "A prior ingest job is still hashing staged files.",
+        "operator_action": "Run one daemon tick to continue hashing or retry failed hash work.",
+    },
     "JOB_COMPLETE_LOCAL": {
         "summary": "Local ingest finalization is still in progress.",
         "operator_action": "Run one daemon tick to return to IDLE, then start the next ingest.",
     },
     "WAIT_NETWORK": {
         "summary": "The daemon is waiting for network before continuing queued upload work.",
-        "operator_action": "Do not start a new ingest yet. Keep upload work moving until the daemon returns to IDLE.",
+        "operator_action": (
+            "Do not start a new ingest yet. Keep upload work moving until the daemon returns to IDLE."
+        ),
+    },
+    "ERROR_JOB": {
+        "summary": "A prior ingest job failed and daemon recovery is required.",
+        "operator_action": (
+            "Inspect job errors first; once corrected, return daemon to IDLE "
+            "using the operator recovery procedure."
+        ),
+    },
+    "PAUSED_STORAGE": {
+        "summary": "Ingest is paused because local storage is unhealthy.",
+        "operator_action": (
+            "Restore storage health, then resume daemon processing before starting a new ingest."
+        ),
+    },
+    "ERROR_DAEMON": {
+        "summary": "Daemon is in a fatal error state.",
+        "operator_action": (
+            "Resolve daemon startup/runtime errors, then restore daemon to IDLE before ingesting."
+        ),
     },
 }
 
@@ -77,8 +125,12 @@ def _derive_job_m2_view(job: dict[str, Any]) -> dict[str, Any]:
     remote_already_exists_count = int(
         sum(status_counts.get(file_status, 0) for file_status in _REMOTE_ALREADY_EXISTS_STATUSES)
     )
-    upload_required_count = int(sum(status_counts.get(file_status, 0) for file_status in _UPLOAD_REQUIRED_STATUSES))
-    remote_terminal_count = int(sum(status_counts.get(file_status, 0) for file_status in _REMOTE_TERMINAL_STATUSES))
+    upload_required_count = int(
+        sum(status_counts.get(file_status, 0) for file_status in _UPLOAD_REQUIRED_STATUSES)
+    )
+    remote_terminal_count = int(
+        sum(status_counts.get(file_status, 0) for file_status in _REMOTE_TERMINAL_STATUSES)
+    )
     paused_on_error = status in _PAUSED_ERROR_JOB_STATUSES or int(status_counts.get("ERROR_FILE", 0)) > 0
     cleanup_complete = status in _REMOTE_COMPLETE_JOB_STATUSES
     remote_complete = cleanup_complete and remote_terminal_count > 0
@@ -140,13 +192,53 @@ def _describe_http_error(exc: httpx.HTTPError) -> str:
     return exc.__class__.__name__
 
 
+def _format_ingest_source_validation_error(exc: httpx.HTTPStatusError) -> tuple[str | None, str | None]:
+    try:
+        payload = exc.response.json()
+    except ValueError:
+        return None, None
+
+    if not isinstance(payload, dict):
+        return None, None
+
+    detail = payload.get("detail")
+    if not isinstance(detail, dict):
+        return None, None
+    if str(detail.get("code", "")).strip() != "INGEST_SOURCE_PATH_INVALID":
+        return None, None
+
+    message = str(detail.get("message", "")).strip() or "One or more source paths are invalid."
+    suggestion = str(detail.get("suggestion", "")).strip()
+    invalid_sources = detail.get("invalid_sources")
+
+    source_lines: list[str] = []
+    if isinstance(invalid_sources, list):
+        for item in invalid_sources:
+            if not isinstance(item, dict):
+                continue
+            source_path = str(item.get("source_path", "")).strip()
+            reason = str(item.get("reason", "")).strip()
+            if source_path and reason:
+                source_lines.append(f"{source_path}: {reason}")
+
+    operator_message = (
+        f"{message} {suggestion}".strip() if suggestion else message
+    )
+    technical_detail = _describe_http_error(exc)
+    if source_lines:
+        technical_detail = "\n".join([technical_detail, *source_lines])
+    return operator_message, technical_detail
+
+
 def _build_ingest_gate(state: dict[str, Any] | None) -> dict[str, Any]:
     if not state:
         return {
             "can_start": False,
             "current_state": "UNKNOWN",
             "summary": "Daemon state is unavailable.",
-            "operator_action": "Refresh status and confirm the daemon is reachable before creating ingest jobs.",
+            "operator_action": (
+                "Refresh status and confirm the daemon is reachable before creating ingest jobs."
+            ),
             "show_tick_action": False,
         }
 
@@ -172,7 +264,7 @@ def _build_ingest_gate(state: dict[str, Any] | None) -> dict[str, Any]:
         "current_state": current_state,
         "summary": state_guidance["summary"],
         "operator_action": state_guidance["operator_action"],
-        "show_tick_action": current_state in {"JOB_COMPLETE_LOCAL", "WAIT_NETWORK"},
+        "show_tick_action": current_state in _TICK_ACTION_STATES,
     }
 
 
@@ -565,6 +657,13 @@ def create_app(
                 {"media_label": media_label, "source_paths": source_paths},
             )
         except httpx.HTTPStatusError as exc:
+            validation_error, validation_detail = _format_ingest_source_validation_error(exc)
+            if validation_error:
+                return _render_overview(
+                    ingest_error=validation_error,
+                    ingest_error_detail=validation_detail,
+                    form_data=form_data,
+                )
             if exc.response.status_code == 409:
                 conflict_state: dict[str, Any] | None = None
                 try:
@@ -612,7 +711,8 @@ def create_app(
         except httpx.HTTPError as exc:
             return _render_overview(
                 selected_job_id=selected_job_id,
-                ingest_error=f"Failed to run daemon tick: {exc}",
+                ingest_error="Failed to run daemon tick.",
+                ingest_error_detail=_describe_http_error(exc),
             )
 
         if outcome.get("handled"):
@@ -639,7 +739,8 @@ def create_app(
         except httpx.HTTPError as exc:
             return _render_overview(
                 selected_job_id=selected_job_id,
-                ingest_error=f"Failed to requeue file #{file_id} for upload: {exc}",
+                ingest_error=f"Failed to requeue file #{file_id} for upload.",
+                ingest_error_detail=_describe_http_error(exc),
             )
 
         next_state = outcome.get("next_state", "UPLOAD_PREPARE")

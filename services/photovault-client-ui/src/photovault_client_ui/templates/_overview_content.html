@@ -33,7 +33,10 @@
           <div>
             <label for="source_paths">Source paths</label>
             <textarea id="source_paths" name="source_paths" required>{{ ingest_form.source_paths }}</textarea>
-            <p class="muted">Enter one absolute path per line.</p>
+            <p class="muted">
+              Enter one absolute path per line. File paths are ingested directly. Directory paths (for example a
+              mounted media root) are enumerated recursively.
+            </p>
           </div>
           <div class="button-row">
             <button type="submit">Create ingest job</button>

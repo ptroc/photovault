@@ -1,5 +1,6 @@
 """Local control-plane API exposed by photovault-clientd."""
 
+import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -58,6 +59,93 @@ class IngestJobCreateRequest(BaseModel):
 class IngestStageNextRequest(BaseModel):
     job_id: int
     staging_root: str = Field(min_length=1)
+
+
+def _format_path_os_error(exc: OSError) -> str:
+    return exc.strerror or exc.__class__.__name__
+
+
+def _enumerate_directory_files(path: Path) -> list[str]:
+    discovered: list[str] = []
+    walk_errors: list[OSError] = []
+
+    def _on_walk_error(exc: OSError) -> None:
+        walk_errors.append(exc)
+
+    for root, dirnames, filenames in os.walk(path, onerror=_on_walk_error):
+        if walk_errors:
+            break
+        dirnames.sort()
+        filenames.sort()
+        for filename in filenames:
+            file_path = Path(root) / filename
+            try:
+                if file_path.is_file():
+                    discovered.append(str(file_path))
+            except OSError as exc:
+                raise OSError(f"failed to stat {file_path}: {_format_path_os_error(exc)}") from exc
+
+    if walk_errors:
+        raise OSError(
+            f"failed to read directory {path}: {_format_path_os_error(walk_errors[0])}"
+        ) from walk_errors[0]
+    return discovered
+
+
+def _discover_source_files(
+    source_paths: list[str],
+) -> tuple[list[str], list[dict[str, str]]]:
+    discovered: list[str] = []
+    invalid_sources: list[dict[str, str]] = []
+    for raw_source_path in source_paths:
+        source_path = raw_source_path.strip()
+        source = Path(source_path)
+        if not source.is_absolute():
+            invalid_sources.append(
+                {
+                    "source_path": source_path,
+                    "reason": "Source path must be absolute.",
+                }
+            )
+            continue
+        try:
+            if source.is_file():
+                discovered.append(str(source))
+                continue
+            if source.is_dir():
+                directory_files = _enumerate_directory_files(source)
+                if not directory_files:
+                    invalid_sources.append(
+                        {
+                            "source_path": source_path,
+                            "reason": "Directory does not contain readable files.",
+                        }
+                    )
+                    continue
+                discovered.extend(directory_files)
+                continue
+            if not source.exists():
+                invalid_sources.append(
+                    {
+                        "source_path": source_path,
+                        "reason": "Path does not exist.",
+                    }
+                )
+                continue
+            invalid_sources.append(
+                {
+                    "source_path": source_path,
+                    "reason": "Path must be a regular file or directory.",
+                }
+            )
+        except OSError as exc:
+            invalid_sources.append(
+                {
+                    "source_path": source_path,
+                    "reason": _format_path_os_error(exc),
+                }
+            )
+    return discovered, invalid_sources
 
 
 def _next_state_for_stage_phase(pending_copy: int, hash_pending: int) -> ClientState:
@@ -232,9 +320,22 @@ def create_app(
             conn.close()
             raise HTTPException(status_code=409, detail=f"daemon must be IDLE, got {current_state}")
 
+        discovered_source_paths, invalid_sources = _discover_source_files(request.source_paths)
+        if invalid_sources:
+            conn.close()
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "INGEST_SOURCE_PATH_INVALID",
+                    "message": "One or more source paths could not be used for ingest discovery.",
+                    "invalid_sources": invalid_sources,
+                    "suggestion": "Fix the listed paths, then retry ingest creation.",
+                },
+            )
+
         transition_daemon_state(conn, ClientState.DISCOVERING, now, reason="ingest job created", commit=False)
         job_id = create_ingest_job(conn, request.media_label, now)
-        discovered_count = insert_discovered_files(conn, job_id, request.source_paths, now)
+        discovered_count = insert_discovered_files(conn, job_id, discovered_source_paths, now)
         set_job_status(conn, job_id, ClientState.STAGING_COPY.value, now)
         transition_daemon_state(
             conn,

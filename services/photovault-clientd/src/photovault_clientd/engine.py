@@ -1,6 +1,7 @@
 """Single-thread daemon tick and recovery helpers for photovault-clientd."""
 
 import json
+import os
 import subprocess
 from collections import defaultdict
 from datetime import UTC, datetime, timedelta
@@ -51,6 +52,7 @@ from photovault_clientd.db import (
     mark_uploaded_for_reupload,
     mark_uploaded_retry,
     register_local_sha,
+    replace_copy_candidate_with_discovered_files,
     requeue_error_file_for_upload,
     set_job_status,
     transition_daemon_state,
@@ -207,6 +209,30 @@ def _retry_due_time(updated_at_utc: str, retry_count: int) -> datetime:
     return updated_at + timedelta(seconds=_retry_backoff_seconds(retry_count))
 
 
+def _enumerate_directory_source_files(path: Path) -> list[str]:
+    discovered: list[str] = []
+    walk_errors: list[OSError] = []
+
+    def _on_walk_error(exc: OSError) -> None:
+        walk_errors.append(exc)
+
+    for root, dirnames, filenames in os.walk(path, onerror=_on_walk_error):
+        if walk_errors:
+            break
+        dirnames.sort()
+        filenames.sort()
+        for filename in filenames:
+            file_path = Path(root) / filename
+            if file_path.is_file():
+                discovered.append(str(file_path))
+
+    if walk_errors:
+        walk_error = walk_errors[0]
+        reason = walk_error.strerror or str(walk_error)
+        raise OSError(f"failed to read directory {path}: {reason}") from walk_error
+    return discovered
+
+
 def _network_is_online() -> bool:
     """Return True when NetworkManager reports connected state."""
     try:
@@ -290,6 +316,143 @@ def run_staging_copy_tick(conn, staging_root: Path) -> dict[str, object]:
         }
 
     file_id, source_path = candidate
+    source = Path(source_path)
+    if source.is_dir():
+        try:
+            directory_files = _enumerate_directory_source_files(source)
+        except OSError as exc:
+            retry_message = f"Directory source path could not be read: {source_path} ({exc})"
+            mark_file_copy_retry(conn, file_id, retry_message, now)
+            append_daemon_event(
+                conn,
+                level=EventLevel.ERROR,
+                category=EventCategory.COPY_RETRY_SCHEDULED,
+                message=f"COPY_IO_ERROR: file_id={file_id}, error={retry_message}",
+                created_at_utc=now,
+                from_state=ClientState.STAGING_COPY,
+                to_state=ClientState.STAGING_COPY,
+            )
+            pending_copy = count_pending_copy_files_global(conn)
+            staged = count_staged_files_global(conn)
+            hash_pending = count_hash_pending_files_global(conn)
+            next_state = _copy_phase_next_state(pending_copy, hash_pending)
+            set_job_status(conn, job_id, next_state.value, now)
+            transition_daemon_state(
+                conn,
+                next_state,
+                now,
+                reason=f"staging tick directory read failed for file_id={file_id}; retry scheduled",
+                commit=False,
+            )
+            conn.commit()
+            return {
+                "handled": True,
+                "progressed": False,
+                "errored": True,
+                "error": retry_message,
+                "pending_copy": pending_copy,
+                "staged": staged,
+                "hash_pending": hash_pending,
+                "next_state": next_state.value,
+                "job_id": job_id,
+                "file_id": file_id,
+            }
+
+        if not directory_files:
+            retry_message = f"Directory source path has no readable files: {source_path}"
+            mark_file_copy_retry(conn, file_id, retry_message, now)
+            append_daemon_event(
+                conn,
+                level=EventLevel.ERROR,
+                category=EventCategory.COPY_RETRY_SCHEDULED,
+                message=f"COPY_IO_ERROR: file_id={file_id}, error={retry_message}",
+                created_at_utc=now,
+                from_state=ClientState.STAGING_COPY,
+                to_state=ClientState.STAGING_COPY,
+            )
+            pending_copy = count_pending_copy_files_global(conn)
+            staged = count_staged_files_global(conn)
+            hash_pending = count_hash_pending_files_global(conn)
+            next_state = _copy_phase_next_state(pending_copy, hash_pending)
+            set_job_status(conn, job_id, next_state.value, now)
+            transition_daemon_state(
+                conn,
+                next_state,
+                now,
+                reason=f"staging tick found empty directory source for file_id={file_id}; retry scheduled",
+                commit=False,
+            )
+            conn.commit()
+            return {
+                "handled": True,
+                "progressed": False,
+                "errored": True,
+                "error": retry_message,
+                "pending_copy": pending_copy,
+                "staged": staged,
+                "hash_pending": hash_pending,
+                "next_state": next_state.value,
+                "job_id": job_id,
+                "file_id": file_id,
+            }
+
+        replaced, inserted = replace_copy_candidate_with_discovered_files(
+            conn,
+            job_id=job_id,
+            file_id=file_id,
+            source_paths=directory_files,
+            now_utc=now,
+        )
+        if not replaced:
+            append_daemon_event(
+                conn,
+                level=EventLevel.WARN,
+                category=EventCategory.STAGING_INCONSISTENT,
+                message=f"unable to replace directory copy candidate file_id={file_id} for job_id={job_id}",
+                created_at_utc=now,
+                from_state=ClientState.STAGING_COPY,
+                to_state=ClientState.STAGING_COPY,
+            )
+            conn.commit()
+            return {
+                "handled": True,
+                "progressed": False,
+                "errored": True,
+                "pending_copy": count_pending_copy_files_global(conn),
+                "staged": count_staged_files_global(conn),
+                "hash_pending": count_hash_pending_files_global(conn),
+                "next_state": get_daemon_state(conn).value if get_daemon_state(conn) else "UNKNOWN",
+                "job_id": job_id,
+                "file_id": file_id,
+            }
+
+        pending_copy = count_pending_copy_files_global(conn)
+        staged = count_staged_files_global(conn)
+        hash_pending = count_hash_pending_files_global(conn)
+        next_state = _copy_phase_next_state(pending_copy, hash_pending)
+        set_job_status(conn, job_id, next_state.value, now)
+        transition_daemon_state(
+            conn,
+            next_state,
+            now,
+            reason=f"staging tick expanded directory source file_id={file_id} into {inserted} file(s)",
+            commit=False,
+        )
+        conn.commit()
+        return {
+            "handled": True,
+            "progressed": True,
+            "errored": False,
+            "pending_copy": pending_copy,
+            "staged": staged,
+            "hash_pending": hash_pending,
+            "next_state": next_state.value,
+            "job_id": job_id,
+            "file_id": file_id,
+            "expanded_directory_source": source_path,
+            "expanded_file_count": inserted,
+        }
+
     staged_path = build_staged_path(staging_root, job_id, file_id, source_path)
     try:
         copied_size = copy_with_fsync(source_path, staged_path)
