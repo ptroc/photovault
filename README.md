@@ -69,6 +69,16 @@ This is intentionally a scaffold: explicit entrypoints, placeholder endpoints, a
 Business logic for ingest, hashing, deduplication, and upload state transitions should be implemented
 incrementally against the v1 state machine and roadmap docs.
 
+## Raspberry Pi deploy helper
+
+For iterative Raspberry Pi deployment, use:
+
+- `scripts/deploy_rpi.sh`
+
+The script uses `rsync` to push the repo to `/opt/photovault`, refreshes the remote `.venv`,
+restarts photovault systemd services, and runs basic health checks. See
+[`scripts/README.md`](scripts/README.md) for examples.
+
 ---
 
 ## Dev Workflow (Root Makefile)

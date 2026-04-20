@@ -73,6 +73,10 @@ Docs impacted: none | <list>
 - Preferred activation command: `source .venv/bin/activate`
 - Install Python dependencies into this local venv only.
 
+## Raspberry Pi Deploy Preference
+- When a task requires deploying to the Raspberry Pi at `10.100.1.95`, prefer using `scripts/deploy_rpi.sh`.
+- In future Codex prompts that require Raspberry Pi validation, explicitly instruct Codex to use `scripts/deploy_rpi.sh` after local verification unless the task specifically requires a different deploy path.
+
 ## Codex Action Logging (Mandatory)
 - Maintain an append-only log file at `codex_log.md` in the repository root.
 - For every substantive Codex action, append one entry with:
