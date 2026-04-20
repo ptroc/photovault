@@ -39,7 +39,8 @@ Anything not listed here is either **explicitly deferred** or **out of scope**.
 | M1 | Offline Ingest | SD → staging → hash → local dedup |
 | M2 | Network Upload | Eventual upload with retries |
 | M3 | Observability | Operator trust without SSH |
-| M4 | Appliance Networking | Reliable local access and captive-portal connectivity |
+| M4 | Server File Storage | Filesystem-backed storage layout and indexability |
+| M5 | Appliance Networking | Reliable local access and captive-portal connectivity |
 
 Milestones are **sequential**.  
 Later milestones must not weaken guarantees from earlier ones.
@@ -138,7 +139,35 @@ The system is **operable without SSH**.
 
 ---
 
-## Milestone M4 – Appliance Networking & Connectivity
+## Milestone M4 – Server File Storage & Indexing
+
+### Goal
+Store uploaded files directly in a deterministic filesystem layout on the server and make that storage
+auditable by indexing files that already exist in those folders.
+
+### Epics
+- Filesystem-backed server storage instead of DB-backed binary storage
+- Deterministic folder layout using `./year/month/Name_of_the_job`
+- Server-side file write/finalize flow targeting the filesystem layout
+- Server endpoint to index files that already exist in the storage tree
+- Reconciliation between indexed filesystem files and the server SHA registry
+
+### Must-have outcomes
+- Uploaded files are persisted as normal files on disk, not inside the database
+- Files are organized under `./year/month/Name_of_the_job`
+- Server verification and dedup still use SHA256 as the source of truth
+- Existing files already present in those folders can be indexed through a dedicated server endpoint
+- Indexed files populate or reconcile with the server-side SHA registry without re-uploading content
+
+### Explicit non-goals
+- Object storage backends
+- Content-addressed storage redesign beyond the required folder layout
+- Full media-library management features
+- Background distributed indexing systems
+
+---
+
+## Milestone M5 – Appliance Networking & Connectivity
 
 ### Goal
 The client behaves like a self-contained appliance that is always reachable locally and can be moved onto
@@ -187,6 +216,7 @@ photovault v1 is shippable only if:
 - Corruption is detected
 - Upload retries are deterministic
 - System state is explainable via UI
+- Server-side files are stored in the deterministic filesystem layout and can be re-indexed
 - Local device access remains available through the appliance networking model
 - Captive-portal / hotel Wi-Fi setup is possible without SSH
 

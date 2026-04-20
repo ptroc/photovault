@@ -1,0 +1,52 @@
+version: "3.9"
+
+services:
+  photovault-api:
+    image: python:3.12-slim
+    container_name: photovault-api
+    restart: unless-stopped
+    working_dir: /opt/photovault/services/photovault-api
+    command: >-
+      sh -c "python -m photovault_api.main"
+    environment:
+      PYTHONUNBUFFERED: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+      PHOTOVAULT_API_DATABASE_URL: "${PHOTOVAULT_API_DATABASE_URL:?set PHOTOVAULT_API_DATABASE_URL in .env}"
+      PYTHONPATH: "/opt/photovault/services/photovault-api/src"
+    ports:
+      - "9301:9301"
+    volumes:
+      - /opt/photovault:/opt/photovault:ro
+      - /var/storage:/var/storage
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9301/healthz').read()"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  photovault-server-ui:
+    image: python:3.12-slim
+    container_name: photovault-server-ui
+    restart: unless-stopped
+    working_dir: /opt/photovault/services/photovault-server-ui
+    command: >-
+      sh -c "python -m photovault_server_ui.main"
+    environment:
+      PYTHONUNBUFFERED: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONPATH: "/opt/photovault/services/photovault-server-ui/src"
+    ports:
+      - "9401:9401"
+    volumes:
+      - /opt/photovault:/opt/photovault:ro
+      - /var/storage:/var/storage
+    depends_on:
+      photovault-api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9401/').read()"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
