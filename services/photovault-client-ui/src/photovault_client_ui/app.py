@@ -57,6 +57,9 @@ _AUTO_PROGRESS_DAEMON_STATES = {
     "JOB_COMPLETE_LOCAL",
 }
 
+_WAITING_DAEMON_STATES = {"WAIT_NETWORK", "WAIT_MEDIA"}
+_BLOCKED_DAEMON_STATES = {"ERROR_DAEMON", "ERROR_JOB", "PAUSED_STORAGE"}
+
 _M2_PHASE_LABELS = {
     "READY_TO_UPLOAD": "queued for upload",
     "UPLOADED": "uploaded; waiting for server verify",
@@ -82,6 +85,45 @@ _TICK_ACTION_STATES = {
     "CLEANUP_STAGING",
     "JOB_COMPLETE_REMOTE",
     "JOB_COMPLETE_LOCAL",
+}
+
+_STATE_GUIDANCE = {
+    "WAIT_NETWORK": {
+        "kind": "waiting",
+        "title": "Waiting for network connectivity",
+        "summary": "Upload and server verification are paused until connectivity is restored.",
+        "operator_action": "Connect to Wi-Fi or wait for connectivity to return, then refresh.",
+    },
+    "WAIT_MEDIA": {
+        "kind": "waiting",
+        "title": "Waiting for source media",
+        "summary": "The daemon cannot continue copy work until source media is available.",
+        "operator_action": "Reconnect the source device/path and run one daemon tick.",
+    },
+    "PAUSED_STORAGE": {
+        "kind": "blocked",
+        "title": "Storage health pause",
+        "summary": "Ingest and upload progression are paused because local storage is unhealthy.",
+        "operator_action": "Restore storage health, then run one daemon tick to resume.",
+    },
+    "ERROR_FILE": {
+        "kind": "blocked",
+        "title": "File-level errors need action",
+        "summary": "At least one file hit retry exhaustion or verification failure.",
+        "operator_action": "Open blocked jobs and retry or isolate affected files.",
+    },
+    "ERROR_JOB": {
+        "kind": "blocked",
+        "title": "Job-level failure",
+        "summary": "A job cannot proceed automatically.",
+        "operator_action": "Inspect job detail and diagnostics, then recover before new ingest.",
+    },
+    "ERROR_DAEMON": {
+        "kind": "blocked",
+        "title": "Daemon fault state",
+        "summary": "The daemon entered a fatal state and cannot self-recover.",
+        "operator_action": "Resolve daemon/service errors and return to IDLE before operations.",
+    },
 }
 
 _INGEST_BLOCKED_GUIDANCE = {
@@ -334,7 +376,73 @@ def _annotate_job_record(job: dict[str, Any]) -> dict[str, Any]:
             file_copy["m2"] = _derive_file_m2_view(file_copy)
             normalized_files.append(file_copy)
         annotated["files"] = normalized_files
+    annotated["operator_view"] = _derive_job_operator_view(annotated)
     return annotated
+
+
+def _job_phase_label(status: str) -> str:
+    labels = {
+        "DISCOVERING": "discovering source files",
+        "STAGING_COPY": "copying files into staging",
+        "HASHING": "hashing staged files",
+        "DEDUP_SESSION_SHA": "deduplicating within this job",
+        "DEDUP_LOCAL_SHA": "checking local SHA history",
+        "QUEUE_UPLOAD": "queuing remote upload work",
+        "WAIT_NETWORK": "waiting for network to continue upload",
+        "UPLOAD_PREPARE": "preparing server handshake",
+        "UPLOAD_FILE": "uploading file bytes",
+        "SERVER_VERIFY": "waiting for server-side verification",
+        "REUPLOAD_OR_QUARANTINE": "deciding retry or quarantine",
+        "POST_UPLOAD_VERIFY": "running post-upload local verify",
+        "CLEANUP_STAGING": "cleaning staged files",
+        "JOB_COMPLETE_REMOTE": "remote completion finalization",
+        "JOB_COMPLETE_LOCAL": "local completion finalization",
+        "ERROR_JOB": "job blocked by failure",
+        "PAUSED_STORAGE": "paused due to storage issue",
+        "ERROR_DAEMON": "blocked by daemon error",
+    }
+    return labels.get(status, "state not yet classified")
+
+
+def _derive_job_operator_view(job: dict[str, Any]) -> dict[str, Any]:
+    status = str(job.get("status", ""))
+    status_counts = dict(job.get("status_counts", {}))
+    files = job.get("files")
+    file_rows = files if isinstance(files, list) else []
+    error_files = [row for row in file_rows if str(row.get("status", "")) == "ERROR_FILE"]
+    retrying_files = [row for row in file_rows if int(row.get("retry_count", 0) or 0) > 0]
+    max_retry_count = 0
+    for row in file_rows:
+        retry_count = int(row.get("retry_count", 0) or 0)
+        if retry_count > max_retry_count:
+            max_retry_count = retry_count
+    upload_required_count = int(
+        sum(status_counts.get(file_status, 0) for file_status in _UPLOAD_REQUIRED_STATUSES)
+    )
+    waiting_on_network = status == "WAIT_NETWORK"
+    retry_backoff_active = waiting_on_network and (len(retrying_files) > 0 or upload_required_count > 0)
+    requires_operator_action = status in _BLOCKED_DAEMON_STATES or len(error_files) > 0
+    if requires_operator_action:
+        next_action = "Open job detail and resolve failed files before new ingest."
+    elif waiting_on_network:
+        next_action = "Wait for network connectivity; upload retry progression is automatic."
+    elif status in _AUTO_PROGRESS_DAEMON_STATES:
+        next_action = "Wait for auto-progression and refresh."
+    else:
+        next_action = "Monitor progress; run one manual tick only for explicit recovery."
+
+    return {
+        "phase_label": _job_phase_label(status),
+        "error_file_count": int(status_counts.get("ERROR_FILE", 0)),
+        "upload_required_count": upload_required_count,
+        "verified_remote_count": int(status_counts.get("VERIFIED_REMOTE", 0)),
+        "retrying_file_count": len(retrying_files),
+        "max_retry_count": max_retry_count,
+        "retry_backoff_active": retry_backoff_active,
+        "requires_operator_action": requires_operator_action,
+        "next_action": next_action,
+        "error_files": error_files,
+    }
 
 
 def _job_filter_key(job: dict[str, Any]) -> str:
@@ -346,6 +454,8 @@ def _job_filter_key(job: dict[str, Any]) -> str:
         return "completed"
     if paused_on_error or status in _PAUSED_ERROR_JOB_STATUSES:
         return "blocked"
+    if status in _WAITING_DAEMON_STATES:
+        return "waiting"
     return "active"
 
 
@@ -361,15 +471,96 @@ def _daemon_health_label(state: dict[str, Any] | None, daemon_error: str | None)
     if not state:
         return "warning", "State unavailable"
     current_state = str(state.get("current_state", "UNKNOWN"))
-    if current_state in {"ERROR_DAEMON", "ERROR_JOB", "PAUSED_STORAGE"}:
+    if current_state in _BLOCKED_DAEMON_STATES:
         return "critical", "Blocked by daemon or storage error"
-    if current_state in {"WAIT_NETWORK", "WAIT_MEDIA"}:
+    if current_state in _WAITING_DAEMON_STATES:
         return "warning", "Waiting for external dependency"
     if current_state == "IDLE":
         return "ok", "Idle and ready"
     if current_state in _ACTIVE_DAEMON_STATES:
         return "active", "Processing workload"
     return "warning", "Unknown daemon state"
+
+
+def _derive_state_guidance(state: dict[str, Any] | None, daemon_error: str | None) -> dict[str, str]:
+    if daemon_error:
+        return {
+            "kind": "blocked",
+            "title": "Daemon API unavailable",
+            "summary": "The UI cannot retrieve current daemon state.",
+            "operator_action": "Check photovault-clientd.service and local daemon API reachability.",
+        }
+
+    current_state = str((state or {}).get("current_state", "UNKNOWN"))
+    if current_state in _STATE_GUIDANCE:
+        return dict(_STATE_GUIDANCE[current_state])
+    if current_state == "IDLE":
+        return {
+            "kind": "healthy",
+            "title": "System ready",
+            "summary": "Daemon is idle and ready for ingest.",
+            "operator_action": "Start ingest when media is ready.",
+        }
+    if current_state in _AUTO_PROGRESS_DAEMON_STATES:
+        return {
+            "kind": "active",
+            "title": "Auto progression active",
+            "summary": "Daemon is advancing upload/completion work without manual ticks.",
+            "operator_action": "Wait and refresh status unless recovery actions are required.",
+        }
+    if current_state in _TICK_ACTION_STATES:
+        return {
+            "kind": "active",
+            "title": "Work in progress",
+            "summary": "Daemon is processing state-machine work.",
+            "operator_action": "Wait and monitor; use manual tick for explicit recovery only.",
+        }
+    return {
+        "kind": "waiting",
+        "title": "State unknown",
+        "summary": f"Daemon reported unclassified state: {current_state}.",
+        "operator_action": "Use diagnostics/events to understand recent transitions.",
+    }
+
+
+def _summarize_recent_events(events: list[dict[str, Any]]) -> dict[str, Any]:
+    if not events:
+        return {
+            "highlights": [],
+            "error_count": 0,
+            "warn_count": 0,
+            "latest_error": None,
+            "latest_activity": None,
+        }
+
+    error_events = [event for event in events if str(event.get("level", "")) == "ERROR"]
+    warn_events = [event for event in events if str(event.get("level", "")) == "WARN"]
+    latest_error = error_events[0] if error_events else None
+    latest_activity = events[0]
+    highlights: list[dict[str, str]] = []
+    seen_categories: set[str] = set()
+    for event in events:
+        category = str(event.get("category", "UNKNOWN"))
+        if category in seen_categories:
+            continue
+        seen_categories.add(category)
+        highlights.append(
+            {
+                "category": category,
+                "created_at_utc": str(event.get("created_at_utc", "")),
+                "message": str(event.get("message", "")),
+                "level": str(event.get("level", "INFO")),
+            }
+        )
+        if len(highlights) >= 4:
+            break
+    return {
+        "highlights": highlights,
+        "error_count": len(error_events),
+        "warn_count": len(warn_events),
+        "latest_error": latest_error,
+        "latest_activity": latest_activity,
+    }
 
 
 def _dependency_health_label(dependencies: list[dict[str, str]]) -> tuple[str, int]:
@@ -390,14 +581,18 @@ def _build_overview_metrics(
     daemon_error: str | None,
     diagnostics: dict[str, Any] | None,
     dependencies: list[dict[str, str]],
+    events: list[dict[str, Any]],
 ) -> dict[str, Any]:
     active_jobs = [job for job in jobs if _job_filter_key(job) == "active"]
+    waiting_jobs = [job for job in jobs if _job_filter_key(job) == "waiting"]
     blocked_jobs = [job for job in jobs if _job_filter_key(job) == "blocked"]
     completed_jobs = [job for job in jobs if _job_filter_key(job) == "completed"]
     upload_pending_jobs = [job for job in jobs if bool(job.get("upload_pending"))]
 
     daemon_health_level, daemon_health_label = _daemon_health_label(state, daemon_error)
     dependency_health_level, dependency_degraded_count = _dependency_health_label(dependencies)
+    state_guidance = _derive_state_guidance(state, daemon_error)
+    event_summary = _summarize_recent_events(events)
 
     alerts: list[dict[str, str]] = []
     if daemon_error:
@@ -419,13 +614,24 @@ def _build_overview_metrics(
                 ),
             }
         )
-    current_state = str((state or {}).get("current_state", "UNKNOWN"))
-    if current_state == "WAIT_NETWORK":
+    if waiting_jobs:
         alerts.append(
             {
                 "severity": "warning",
-                "title": "Waiting for network",
-                "message": "Upload and verify progression is gated until connectivity returns.",
+                "title": f"{len(waiting_jobs)} waiting job(s)",
+                "message": (
+                    "Jobs are paused on dependencies such as network/media; "
+                    "operator wait/fix required."
+                ),
+            }
+        )
+    current_state = str((state or {}).get("current_state", "UNKNOWN"))
+    if current_state in _WAITING_DAEMON_STATES:
+        alerts.append(
+            {
+                "severity": "warning",
+                "title": f"Daemon waiting in {current_state}",
+                "message": state_guidance["summary"],
             }
         )
     if dependency_degraded_count > 0:
@@ -445,27 +651,24 @@ def _build_overview_metrics(
             }
         )
 
-    if alerts:
-        next_action = "Address alerts first, then run one daemon tick to confirm recovery."
-    elif current_state == "IDLE":
-        next_action = "Create the next ingest job when new media is ready."
-    elif current_state in _AUTO_PROGRESS_DAEMON_STATES:
-        next_action = "Daemon is auto-progressing upload/completion work; wait and refresh status."
-    elif current_state in _TICK_ACTION_STATES:
-        next_action = "Run one daemon tick to advance current state-machine work."
+    if alerts and state_guidance["kind"] == "blocked":
+        next_action = "Resolve blocked conditions first, then run one daemon tick to confirm recovery."
     else:
-        next_action = "Monitor current work and use Jobs for detailed progress."
+        next_action = state_guidance["operator_action"]
 
     return {
         "daemon_health_level": daemon_health_level,
         "daemon_health_label": daemon_health_label,
         "dependency_health_level": dependency_health_level,
         "active_jobs_count": len(active_jobs),
+        "waiting_jobs_count": len(waiting_jobs),
         "blocked_jobs_count": len(blocked_jobs),
         "completed_jobs_count": len(completed_jobs),
         "upload_pending_jobs_count": len(upload_pending_jobs),
         "alerts": alerts,
-        "highlight_jobs": (blocked_jobs + active_jobs)[:3],
+        "highlight_jobs": (blocked_jobs + waiting_jobs + active_jobs)[:3],
+        "state_guidance": state_guidance,
+        "event_summary": event_summary,
         "next_action": next_action,
     }
 
@@ -763,6 +966,7 @@ def create_app(
             daemon_error=context["daemon_error"],
             diagnostics=context["diagnostics"],
             dependencies=dependencies,
+            events=context["events"],
         )
         context.update(
             {
@@ -793,7 +997,7 @@ def create_app(
         jobs = [_annotate_job_record(job) for job in context["jobs"]]
         effective_filter = (
             selected_filter
-            if selected_filter in {"active", "blocked", "completed", "all"}
+            if selected_filter in {"active", "waiting", "blocked", "completed", "all"}
             else "active"
         )
         filtered_jobs = _filter_jobs(jobs, effective_filter)
@@ -804,6 +1008,7 @@ def create_app(
                 "job_filter": effective_filter,
                 "job_filter_counts": {
                     "active": len(_filter_jobs(jobs, "active")),
+                    "waiting": len(_filter_jobs(jobs, "waiting")),
                     "blocked": len(_filter_jobs(jobs, "blocked")),
                     "completed": len(_filter_jobs(jobs, "completed")),
                     "all": len(jobs),
@@ -830,10 +1035,19 @@ def create_app(
             return _render_jobs(selected_filter="all")
 
         selected_job = _annotate_job_record(selected_job)
+        job_events: list[dict[str, Any]] = []
+        for event in context["events"]:
+            message = str(event.get("message", ""))
+            if f"job_id={job_id}" in message:
+                job_events.append(event)
+        if not job_events:
+            job_events = context["events"][:4]
         context.update(
             {
                 "daemon_base_url": daemon_base_url,
                 "daemon_progress": _derive_daemon_progress_view(context["state"]),
+                "state_guidance": _derive_state_guidance(context["state"], context["daemon_error"]),
+                "job_events": job_events[:4],
                 "selected_job": selected_job,
                 "active_page": "jobs",
                 "action_error": action_error,
@@ -848,6 +1062,8 @@ def create_app(
         context.update(
             {
                 "daemon_base_url": daemon_base_url,
+                "event_summary": _summarize_recent_events(context["events"]),
+                "state_guidance": _derive_state_guidance(context["state"], context["daemon_error"]),
                 "active_page": "events",
             }
         )

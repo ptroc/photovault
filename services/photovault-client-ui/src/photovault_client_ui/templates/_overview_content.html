@@ -7,12 +7,7 @@
 >
   <section class="section dashboard-grid">
     <article class="card stack">
-      <div class="section-title">
-        <h2>Appliance status</h2>
-        {% if state %}
-          <span class="pill active">{{ state.current_state }}</span>
-        {% endif %}
-      </div>
+      <h2>Operator dashboard</h2>
       <div class="kpi-grid">
         <div class="kpi-box">
           <span class="muted">Daemon health</span>
@@ -24,6 +19,13 @@
           <span class="muted">Ingest/upload activity</span>
           <span class="kpi-value status-active">{{ overview_metrics.active_jobs_count }}</span>
           <span class="muted">active jobs</span>
+        </div>
+        <div class="kpi-box">
+          <span class="muted">Waiting jobs</span>
+          <span class="kpi-value {% if overview_metrics.waiting_jobs_count > 0 %}status-warn{% else %}status-ok{% endif %}">
+            {{ overview_metrics.waiting_jobs_count }}
+          </span>
+          <span class="muted">dependency gated</span>
         </div>
         <div class="kpi-box">
           <span class="muted">Blocked work</span>
@@ -40,11 +42,16 @@
           <span class="muted">jobs still uploading</span>
         </div>
       </div>
+      <div class="banner {% if overview_metrics.state_guidance.kind == 'blocked' %}banner-critical{% elif overview_metrics.state_guidance.kind == 'waiting' %}banner-warning{% elif overview_metrics.state_guidance.kind == 'active' %}banner-warning{% else %}banner-success{% endif %}">
+        <strong>{{ overview_metrics.state_guidance.title }}</strong>
+        <span>{{ overview_metrics.state_guidance.summary }}</span>
+        <span>Operator action: {{ overview_metrics.state_guidance.operator_action }}</span>
+      </div>
       <p class="muted">
         Next operator action: <strong>{{ overview_metrics.next_action }}</strong>
       </p>
       {% if state %}
-        <p class="muted">Last state update: {{ state.updated_at_utc }}</p>
+        <p class="muted">Current state: <code>{{ state.current_state }}</code> · Last update: {{ state.updated_at_utc }}</p>
       {% endif %}
       <div class="banner {% if daemon_progress.is_auto_progressing %}banner-warning{% else %}banner-success{% endif %}">
         <strong>{{ daemon_progress.badge_label }}</strong>
@@ -100,7 +107,7 @@
 
   <section class="section dashboard-grid">
     <article class="card stack">
-      <h2>Attention</h2>
+      <h2>Attention and blockers</h2>
       {% if overview_metrics.alerts %}
         {% for alert in overview_metrics.alerts %}
           <div class="banner {% if alert.severity == 'critical' %}banner-critical{% else %}banner-warning{% endif %}">
@@ -116,6 +123,57 @@
       {% endif %}
     </article>
 
+    <article class="card stack">
+      <h2>Recent daemon activity</h2>
+      <div class="kpi-grid">
+        <div class="kpi-box">
+          <span class="muted">Recent error events</span>
+          <span class="kpi-value {% if overview_metrics.event_summary.error_count > 0 %}status-error{% else %}status-ok{% endif %}">
+            {{ overview_metrics.event_summary.error_count }}
+          </span>
+        </div>
+        <div class="kpi-box">
+          <span class="muted">Recent warnings</span>
+          <span class="kpi-value {% if overview_metrics.event_summary.warn_count > 0 %}status-warn{% else %}status-ok{% endif %}">
+            {{ overview_metrics.event_summary.warn_count }}
+          </span>
+        </div>
+      </div>
+      {% if overview_metrics.event_summary.latest_error %}
+        <div class="banner banner-critical">
+          <strong>Latest error: {{ overview_metrics.event_summary.latest_error.category }}</strong>
+          <span>{{ overview_metrics.event_summary.latest_error.message }}</span>
+          <span>{{ overview_metrics.event_summary.latest_error.created_at_utc }}</span>
+        </div>
+      {% elif overview_metrics.event_summary.latest_activity %}
+        <div class="banner banner-success">
+          <strong>Latest event: {{ overview_metrics.event_summary.latest_activity.category }}</strong>
+          <span>{{ overview_metrics.event_summary.latest_activity.message }}</span>
+        </div>
+      {% endif %}
+      {% if overview_metrics.event_summary.highlights %}
+        <ul class="list-inline">
+          {% for event in overview_metrics.event_summary.highlights %}
+            <li>
+              <strong>{{ event.category }}</strong>
+              <span class="pill {% if event.level == 'ERROR' %}blocked{% elif event.level == 'WARN' %}active{% else %}completed{% endif %}">
+                {{ event.level }}
+              </span><br>
+              <span class="muted">{{ event.created_at_utc }}</span><br>
+              <span>{{ event.message }}</span>
+            </li>
+          {% endfor %}
+        </ul>
+      {% else %}
+        <p class="muted">No recent events available.</p>
+      {% endif %}
+      <div class="action-row">
+        <a class="button-link" href="/events">Open full diagnostics and events</a>
+      </div>
+    </article>
+  </section>
+
+  <section class="section dashboard-grid">
     <article class="card stack">
       <h2>Dependency health</h2>
       {% if dependencies %}
@@ -134,53 +192,6 @@
         <p class="muted">No dependency status is available.</p>
       {% endif %}
     </article>
-  </section>
-
-  <section class="section dashboard-grid">
-    <article class="card stack">
-      <h2>Create ingest job</h2>
-      {% if ingest_error %}
-        <div class="banner banner-critical">
-          <strong>Ingest request failed</strong>
-          <span>{{ ingest_error }}</span>
-          {% if ingest_error_detail %}
-            <details class="meta-details">
-              <summary>Debug detail</summary>
-              <code>{{ ingest_error_detail }}</code>
-            </details>
-          {% endif %}
-        </div>
-      {% endif %}
-      {% if ingest_notice %}
-        <div class="banner banner-success">
-          <strong>Ingest queued</strong>
-          <span>{{ ingest_notice }}</span>
-          {% if ingest_notice_detail %}
-            <details class="meta-details">
-              <summary>Filtered files</summary>
-              <code>{{ ingest_notice_detail }}</code>
-            </details>
-          {% endif %}
-        </div>
-      {% endif %}
-      <form class="form-grid" method="post" action="/ingest/jobs" data-ajax-target="#overview-shell">
-        <div>
-          <label for="media_label">Media label</label>
-          <input id="media_label" name="media_label" value="{{ ingest_form.media_label }}" required>
-        </div>
-        <div>
-          <label for="source_paths">Source paths</label>
-          <textarea id="source_paths" name="source_paths" required>{{ ingest_form.source_paths }}</textarea>
-          <p class="muted">
-            One absolute file or directory path per line. Mounted directories skip obvious filesystem junk
-            and only include supported photo, RAW, and video files.
-          </p>
-        </div>
-        <div class="action-row">
-          <button type="submit">Create ingest job</button>
-        </div>
-      </form>
-    </article>
 
     <article class="card stack">
       <h2>Active job summary</h2>
@@ -198,10 +209,11 @@
                 </span>
               </div>
               <div class="muted">
-                status={{ job.status }},
-                upload required={{ job.m2.upload_required_count }},
-                already exists={{ job.m2.remote_already_exists_count }}
+                phase={{ job.operator_view.phase_label }},
+                upload required={{ job.operator_view.upload_required_count }},
+                retries={{ job.operator_view.retrying_file_count }}
               </div>
+              <div class="muted">Next action: {{ job.operator_view.next_action }}</div>
             </article>
           {% endfor %}
         </div>
@@ -210,8 +222,54 @@
       {% endif %}
       <div class="action-row">
         <a class="button-link" href="/jobs?filter=active">Active jobs</a>
+        <a class="button-link" href="/jobs?filter=waiting">Waiting jobs</a>
         <a class="button-link" href="/jobs?filter=blocked">Blocked jobs</a>
       </div>
     </article>
+  </section>
+
+  <section class="section card stack">
+    <h2>Create ingest job</h2>
+    {% if ingest_error %}
+      <div class="banner banner-critical">
+        <strong>Ingest request failed</strong>
+        <span>{{ ingest_error }}</span>
+        {% if ingest_error_detail %}
+          <details class="meta-details">
+            <summary>Debug detail</summary>
+            <code>{{ ingest_error_detail }}</code>
+          </details>
+        {% endif %}
+      </div>
+    {% endif %}
+    {% if ingest_notice %}
+      <div class="banner banner-success">
+        <strong>Ingest queued</strong>
+        <span>{{ ingest_notice }}</span>
+        {% if ingest_notice_detail %}
+          <details class="meta-details">
+            <summary>Filtered files</summary>
+            <code>{{ ingest_notice_detail }}</code>
+          </details>
+        {% endif %}
+      </div>
+    {% endif %}
+    <form class="form-grid" method="post" action="/ingest/jobs" data-ajax-target="#overview-shell">
+      <div>
+        <label for="media_label">Media label</label>
+        <input id="media_label" name="media_label" value="{{ ingest_form.media_label }}" required>
+      </div>
+      <div>
+        <label for="source_paths">Source paths</label>
+        <textarea id="source_paths" name="source_paths" required>{{ ingest_form.source_paths }}</textarea>
+        <p class="muted">
+          One absolute file or directory path per line. Mounted directories skip obvious filesystem junk
+          and only include supported photo, RAW, and video files.
+        </p>
+      </div>
+      <div class="action-row">
+        <button type="submit">Create ingest job</button>
+      </div>
+    </form>
   </section>
 </section>

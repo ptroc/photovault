@@ -93,11 +93,21 @@ def _overview_payloads(daemon_state: str = "WAIT_NETWORK") -> dict[str, object]:
                 {
                     "job_id": 2,
                     "media_label": "camera-2",
-                    "status": "QUEUE_UPLOAD",
+                    "status": "WAIT_NETWORK",
                     "local_ingest_complete": False,
                     "upload_pending": True,
                     "status_counts": {
                         "READY_TO_UPLOAD": 4,
+                    },
+                },
+                {
+                    "job_id": 4,
+                    "media_label": "camera-4",
+                    "status": "HASHING",
+                    "local_ingest_complete": False,
+                    "upload_pending": False,
+                    "status_counts": {
+                        "STAGED": 2,
                     },
                 },
                 {
@@ -115,6 +125,7 @@ def _overview_payloads(daemon_state: str = "WAIT_NETWORK") -> dict[str, object]:
         "/events?limit=10": {
             "events": [
                 {
+                    "level": "WARN",
                     "category": "QUEUE_UPLOAD_PREPARED",
                     "created_at_utc": "2026-04-19T16:51:44.120670+00:00",
                     "message": "job_id=1, ready_to_upload=2",
@@ -124,11 +135,13 @@ def _overview_payloads(daemon_state: str = "WAIT_NETWORK") -> dict[str, object]:
         "/events?limit=30": {
             "events": [
                 {
+                    "level": "WARN",
                     "category": "QUEUE_UPLOAD_PREPARED",
                     "created_at_utc": "2026-04-19T16:51:44.120670+00:00",
                     "message": "job_id=1, ready_to_upload=2",
                 },
                 {
+                    "level": "ERROR",
                     "category": "UPLOAD_RETRY",
                     "created_at_utc": "2026-04-19T16:55:44.120670+00:00",
                     "message": "file_id=6, retry=2",
@@ -242,19 +255,39 @@ def test_index_route_renders_dashboard_not_raw_tables() -> None:
 
     assert response.status_code == 200
     assert 'class="active">Overview<' in body
-    assert "Appliance status" in body
+    assert "Operator dashboard" in body
     assert "Top actions" in body
-    assert "Attention" in body
+    assert "Attention and blockers" in body
+    assert "Recent daemon activity" in body
     assert "Create ingest job" in body
     assert "Active job summary" in body
-    assert "Ingest blocked" in body
-    assert "Current daemon state: <code>WAIT_NETWORK</code>" in body
+    assert "Waiting for network connectivity" in body
+    assert "Current state: <code>WAIT_NETWORK</code>" in body
     assert "Auto progression active" in body
+    assert "Waiting jobs" in body
     assert "Run daemon tick (auto progression active)" in body
     assert "disabled" in body
     assert "Ingest Jobs" not in body
     assert "Recent Events" not in body
     assert "Visible Wi-Fi Networks" not in body
+
+
+def test_overview_surfaces_blocked_state_guidance_for_storage_pause() -> None:
+    payloads = _overview_payloads(daemon_state="PAUSED_STORAGE")
+
+    def fake_daemon_get(_: str, path: str) -> object:
+        return payloads[path]
+
+    app = create_app(
+        daemon_get=fake_daemon_get,
+        network_snapshot_get=_network_snapshot,
+        dependency_snapshot_get=_dependency_snapshot,
+    )
+    body = app.test_client().get("/").get_data(as_text=True)
+
+    assert "Storage health pause" in body
+    assert "Restore storage health, then run one daemon tick to resume." in body
+    assert "Resolve blocked conditions first, then run one daemon tick to confirm recovery." in body
 
 
 def test_jobs_page_renders_filtered_views() -> None:
@@ -271,12 +304,16 @@ def test_jobs_page_renders_filtered_views() -> None:
     client = app.test_client()
 
     active = client.get("/jobs?filter=active").get_data(as_text=True)
+    waiting = client.get("/jobs?filter=waiting").get_data(as_text=True)
     blocked = client.get("/jobs?filter=blocked").get_data(as_text=True)
     completed = client.get("/jobs?filter=completed").get_data(as_text=True)
 
     assert "Jobs" in active
     assert "Open job detail" in active
-    assert "Job #2" in active
+    assert "Job #4" in active
+    assert "Job #2" not in active
+    assert "Job #2" in waiting
+    assert "Retry backoff is active while the daemon remains in WAIT_NETWORK." in waiting
     assert "Job #1" not in active
     assert "Job #1" in blocked
     assert "Job #3" in completed
@@ -303,6 +340,8 @@ def test_job_detail_route_renders_file_level_state() -> None:
     assert "upload required" in body
     assert "uploaded; waiting for server verify" in body
     assert "Retry upload" in body
+    assert "Upload and retry posture" in body
+    assert "Files needing attention" in body
 
 
 def test_events_page_shows_diagnostics_and_events() -> None:
@@ -319,7 +358,8 @@ def test_events_page_shows_diagnostics_and_events() -> None:
     body = app.test_client().get("/events").get_data(as_text=True)
 
     assert "Diagnostics summary" in body
-    assert "Recent daemon events" in body
+    assert "Recent event digest" in body
+    assert "Detailed daemon events" in body
     assert "QUEUE_UPLOAD_PREPARED" in body
     assert "UPLOAD_RETRY" in body
 

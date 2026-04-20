@@ -39,6 +39,7 @@ Anything not listed here is either **explicitly deferred** or **out of scope**.
 | M1 | Offline Ingest | SD → staging → hash → local dedup |
 | M2 | Network Upload | Eventual upload with retries |
 | M3 | Observability | Operator trust without SSH |
+| M4 | Appliance Networking | Reliable local access and captive-portal connectivity |
 
 Milestones are **sequential**.  
 Later milestones must not weaken guarantees from earlier ones.
@@ -137,6 +138,34 @@ The system is **operable without SSH**.
 
 ---
 
+## Milestone M4 – Appliance Networking & Connectivity
+
+### Goal
+The client behaves like a self-contained appliance that is always reachable locally and can be moved onto
+unfamiliar Wi-Fi environments, including captive-portal hotel networks, without SSH.
+
+### Epics
+- Default client Wi-Fi access point (AP) on first boot / no-network state
+- UI controls for AP SSID and password customization
+- AP + STA operating model using NetworkManager
+- Captive-portal Wi-Fi join flow for hotel and similar networks
+- Clear UI guidance for local access vs upstream Internet connectivity
+
+### Must-have outcomes
+- A default photovault Wi-Fi AP is available when the device is not yet joined to another usable network
+- Operator can customize AP SSID and password from the client UI
+- Client remains locally reachable while configuring upstream Wi-Fi
+- Hotel / captive-portal Wi-Fi can be joined through an operator-friendly UI flow
+- Network state and next required operator action are explainable from the UI
+
+### Explicit non-goals
+- Custom networking stack outside NetworkManager
+- Enterprise Wi-Fi policy management
+- Advanced mesh / multi-radio orchestration
+- Cloud-managed provisioning
+
+---
+
 ## Explicitly Deferred (Not v1)
 
 - Resumable / chunked uploads
@@ -158,6 +187,8 @@ photovault v1 is shippable only if:
 - Corruption is detected
 - Upload retries are deterministic
 - System state is explainable via UI
+- Local device access remains available through the appliance networking model
+- Captive-portal / hotel Wi-Fi setup is possible without SSH
 
 ---
 

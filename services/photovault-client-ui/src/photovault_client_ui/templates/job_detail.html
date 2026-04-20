@@ -26,6 +26,10 @@
         <span class="kpi-value">{{ selected_job.status }}</span>
       </div>
       <div class="kpi-box">
+        <span class="muted">Current phase</span>
+        <span class="kpi-value">{{ selected_job.operator_view.phase_label }}</span>
+      </div>
+      <div class="kpi-box">
         <span class="muted">M2 operation</span>
         <span class="kpi-value {% if selected_job.m2.paused_on_error %}status-error{% elif selected_job.m2.remote_complete %}status-ok{% else %}status-active{% endif %}">
           {{ selected_job.m2.operation_state_label }}
@@ -38,11 +42,18 @@
         </span>
       </div>
       <div class="kpi-box">
-        <span class="muted">Upload pending</span>
-        <span class="kpi-value {% if selected_job.upload_pending %}status-warn{% else %}status-ok{% endif %}">
-          {% if selected_job.upload_pending %}yes{% else %}no{% endif %}
+        <span class="muted">Retrying files</span>
+        <span class="kpi-value {% if selected_job.operator_view.retrying_file_count > 0 %}status-warn{% else %}status-ok{% endif %}">
+          {{ selected_job.operator_view.retrying_file_count }}
         </span>
       </div>
+    </div>
+    <div class="banner {% if selected_job.operator_view.requires_operator_action %}banner-critical{% elif selected_job.status == 'WAIT_NETWORK' %}banner-warning{% else %}banner-success{% endif %}">
+      <strong>Operator guidance</strong>
+      <span>{{ selected_job.operator_view.next_action }}</span>
+      {% if selected_job.operator_view.retry_backoff_active %}
+        <span>Retry backoff is active: daemon is waiting in <code>WAIT_NETWORK</code> after prior failures.</span>
+      {% endif %}
     </div>
 
     <div class="action-row">
@@ -68,6 +79,32 @@
   </section>
 
   <section class="section card stack">
+    <h2>Upload and retry posture</h2>
+    <div class="kpi-grid">
+      <div class="kpi-box">
+        <span class="muted">Upload pending</span>
+        <span class="kpi-value {% if selected_job.upload_pending %}status-warn{% else %}status-ok{% endif %}">
+          {% if selected_job.upload_pending %}yes{% else %}no{% endif %}
+        </span>
+      </div>
+      <div class="kpi-box">
+        <span class="muted">Upload required files</span>
+        <span class="kpi-value status-warn">{{ selected_job.operator_view.upload_required_count }}</span>
+      </div>
+      <div class="kpi-box">
+        <span class="muted">Verified remote files</span>
+        <span class="kpi-value status-ok">{{ selected_job.operator_view.verified_remote_count }}</span>
+      </div>
+      <div class="kpi-box">
+        <span class="muted">Highest retry count</span>
+        <span class="kpi-value {% if selected_job.operator_view.max_retry_count >= 3 %}status-error{% elif selected_job.operator_view.max_retry_count > 0 %}status-warn{% else %}status-ok{% endif %}">
+          {{ selected_job.operator_view.max_retry_count }}
+        </span>
+      </div>
+    </div>
+  </section>
+
+  <section class="section card stack">
     <h2>Status counts</h2>
     {% if selected_job.status_counts %}
       <div class="kpi-grid">
@@ -80,6 +117,65 @@
       </div>
     {% else %}
       <p class="muted">No status counters available.</p>
+    {% endif %}
+  </section>
+
+  <section class="section card stack">
+    <h2>Files needing attention</h2>
+    {% if selected_job.operator_view.error_files %}
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>File</th>
+              <th>Retries</th>
+              <th>Last error</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for file in selected_job.operator_view.error_files %}
+              <tr>
+                <td>
+                  <strong>#{{ file.file_id }}</strong><br>
+                  <span class="muted">{{ file.source_path }}</span>
+                </td>
+                <td>{{ file.retry_count }}</td>
+                <td><span class="status-error">{{ file.last_error or 'unknown error' }}</span></td>
+                <td>
+                  <form method="post" action="/actions/retry-upload">
+                    <input type="hidden" name="job_id" value="{{ selected_job.job_id }}">
+                    <input type="hidden" name="file_id" value="{{ file.file_id }}">
+                    <button type="submit">Retry upload</button>
+                  </form>
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% else %}
+      <p class="muted">No files currently require direct operator intervention.</p>
+    {% endif %}
+  </section>
+
+  <section class="section card stack">
+    <h2>Recent job events</h2>
+    {% if job_events %}
+      <ul class="list-inline">
+        {% for event in job_events %}
+          <li class="job-card">
+            <strong>{{ event.category }}</strong>
+            <span class="pill {% if event.level == 'ERROR' %}blocked{% elif event.level == 'WARN' %}active{% else %}completed{% endif %}">
+              {{ event.level }}
+            </span><br>
+            <span class="muted">{{ event.created_at_utc }}</span><br>
+            <span>{{ event.message }}</span>
+          </li>
+        {% endfor %}
+      </ul>
+    {% else %}
+      <p class="muted">No recent daemon events available for this job.</p>
     {% endif %}
   </section>
 
