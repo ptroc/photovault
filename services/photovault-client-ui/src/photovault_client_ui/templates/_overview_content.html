@@ -80,6 +80,42 @@
 
   <section class="section">
     <article class="card">
+      <h2>Dependencies</h2>
+      {% if dependencies %}
+        <table>
+          <thead>
+            <tr>
+              <th>Dependency</th>
+              <th>Status</th>
+              <th>Detail</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for dependency in dependencies %}
+              <tr>
+                <td><code>{{ dependency.name }}</code></td>
+                <td>
+                  {% if dependency.status in ["ready", "active"] %}
+                    <span class="status-ok">{{ dependency.status }}</span>
+                  {% elif dependency.status in ["provisionable", "activating", "reloading"] %}
+                    <span class="status-warn">{{ dependency.status }}</span>
+                  {% else %}
+                    <span class="status-error">{{ dependency.status }}</span>
+                  {% endif %}
+                </td>
+                <td><span class="muted">{{ dependency.detail }}</span></td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% else %}
+        <p class="muted">No dependency status is available.</p>
+      {% endif %}
+    </article>
+  </section>
+
+  <section class="section">
+    <article class="card">
       <div class="section-head">
         <h2>Ingest Jobs</h2>
         {% if selected_job %}
@@ -92,9 +128,9 @@
             <tr>
               <th>Job</th>
               <th>Status</th>
-              <th>Local ingest</th>
-              <th>Upload pending</th>
-              <th>Status counts</th>
+              <th>M2 operation</th>
+              <th>Remote classification</th>
+              <th>Cleanup staging</th>
             </tr>
           </thead>
           <tbody>
@@ -106,23 +142,34 @@
                 </td>
                 <td>{{ job.status }}</td>
                 <td>
-                  {% if job.local_ingest_complete %}
-                    <span class="status-ok">complete</span>
+                  {% if job.m2.operation_state_label == "remote complete" %}
+                    <span class="status-ok">{{ job.m2.operation_state_label }}</span>
+                  {% elif job.m2.operation_state_label == "paused on error" %}
+                    <span class="status-error">{{ job.m2.operation_state_label }}</span>
+                  {% elif job.m2.operation_state_label == "local complete" %}
+                    <span class="status-warn">{{ job.m2.operation_state_label }}</span>
                   {% else %}
-                    <span class="status-warn">in progress</span>
+                    <span class="status-warn">{{ job.m2.operation_state_label }}</span>
                   {% endif %}
+                  <div class="muted">local ingest: {% if job.local_ingest_complete %}complete{% else %}active{% endif %}</div>
                 </td>
                 <td>
+                  <div><span class="status-ok">already exists:</span> {{ job.m2.remote_already_exists_count }}</div>
+                  <div><span class="status-warn">upload required:</span> {{ job.m2.upload_required_count }}</div>
                   {% if job.upload_pending %}
-                    <span class="status-warn">yes</span>
+                    <div class="muted">pending upload work: yes</div>
                   {% else %}
-                    <span class="status-ok">no</span>
+                    <div class="muted">pending upload work: no</div>
                   {% endif %}
                 </td>
                 <td>
-                  {% for status, count in job.status_counts.items() %}
-                    <div><code>{{ status }}</code>: {{ count }}</div>
-                  {% endfor %}
+                  {% if job.m2.cleanup_label == "complete" %}
+                    <span class="status-ok">{{ job.m2.cleanup_label }}</span>
+                  {% elif job.m2.cleanup_label == "blocked by error" %}
+                    <span class="status-error">{{ job.m2.cleanup_label }}</span>
+                  {% else %}
+                    <span class="status-warn">{{ job.m2.cleanup_label }}</span>
+                  {% endif %}
                 </td>
               </tr>
             {% endfor %}
@@ -157,6 +204,15 @@
             </p>
           </div>
         </div>
+        <div class="section">
+          <h3>M2 Operational Summary</h3>
+          <div><strong>Overall:</strong> {{ selected_job.m2.operation_state_label }}</div>
+          <div><strong>Remote complete:</strong> {% if selected_job.m2.remote_complete %}yes{% else %}no{% endif %}</div>
+          <div><strong>Paused on error:</strong> {% if selected_job.m2.paused_on_error %}yes{% else %}no{% endif %}</div>
+          <div><strong>Cleanup staging:</strong> {{ selected_job.m2.cleanup_label }}</div>
+          <div><strong>Remote already exists:</strong> {{ selected_job.m2.remote_already_exists_count }}</div>
+          <div><strong>Upload required:</strong> {{ selected_job.m2.upload_required_count }}</div>
+        </div>
 
         <div class="section">
           <h3>Status Counts</h3>
@@ -173,6 +229,8 @@
                 <th>File</th>
                 <th>Status</th>
                 <th>SHA</th>
+                <th>Remote class</th>
+                <th>Upload/verify phase</th>
                 <th>Retries</th>
                 <th>Last error</th>
                 <th>Action</th>
@@ -193,6 +251,16 @@
                       <span class="muted">pending</span>
                     {% endif %}
                   </td>
+                  <td>
+                    {% if file.m2.classification_key == "REMOTE_ALREADY_EXISTS" %}
+                      <span class="status-ok">{{ file.m2.classification_label }}</span>
+                    {% elif file.m2.classification_key == "UPLOAD_REQUIRED" %}
+                      <span class="status-warn">{{ file.m2.classification_label }}</span>
+                    {% else %}
+                      <span class="muted">{{ file.m2.classification_label }}</span>
+                    {% endif %}
+                  </td>
+                  <td>{{ file.m2.phase_label }}</td>
                   <td>{{ file.retry_count }}</td>
                   <td>
                     {% if file.last_error %}

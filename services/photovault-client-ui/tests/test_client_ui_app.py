@@ -32,6 +32,36 @@ def _network_snapshot() -> dict[str, object]:
     }
 
 
+def _dependency_snapshot() -> list[dict[str, str]]:
+    return [
+        {
+            "name": "SQLite",
+            "status": "ready",
+            "detail": "/var/lib/photovault-clientd/state.sqlite3",
+        },
+        {
+            "name": "Storage",
+            "status": "ready",
+            "detail": "/var/lib/photovault-clientd/staging",
+        },
+        {
+            "name": "photovault-clientd.service",
+            "status": "active",
+            "detail": "local daemon API at http://127.0.0.1:9101",
+        },
+        {
+            "name": "NetworkManager.service",
+            "status": "active",
+            "detail": "network connectivity and Wi-Fi control",
+        },
+        {
+            "name": "photovault-api.service",
+            "status": "inactive",
+            "detail": "server upload and verify API at http://127.0.0.1:9301",
+        },
+    ]
+
+
 def test_parse_nmcli_multiline_splits_records_without_blank_lines() -> None:
     output = """IN-USE:                                  
 SSID:                                   :)
@@ -77,11 +107,15 @@ def _overview_payloads() -> dict[str, object]:
                 {
                     "job_id": 1,
                     "media_label": "pi-test-sd",
-                    "status": "WAIT_NETWORK",
+                    "status": "ERROR_FILE",
                     "local_ingest_complete": True,
                     "upload_pending": True,
                     "status_counts": {
                         "READY_TO_UPLOAD": 2,
+                        "UPLOADED": 1,
+                        "VERIFIED_REMOTE": 1,
+                        "DUPLICATE_SHA_GLOBAL": 1,
+                        "ERROR_FILE": 1,
                         "DUPLICATE_SESSION_SHA": 1,
                     },
                 }
@@ -99,12 +133,16 @@ def _overview_payloads() -> dict[str, object]:
         "/ingest/jobs/1": {
             "job_id": 1,
             "media_label": "pi-test-sd",
-            "status": "WAIT_NETWORK",
+            "status": "ERROR_FILE",
             "updated_at_utc": "2026-04-19T16:51:44.120670+00:00",
             "local_ingest_complete": True,
             "upload_pending": True,
             "status_counts": {
                 "READY_TO_UPLOAD": 2,
+                "UPLOADED": 1,
+                "VERIFIED_REMOTE": 1,
+                "DUPLICATE_SHA_GLOBAL": 1,
+                "ERROR_FILE": 1,
                 "DUPLICATE_SESSION_SHA": 1,
             },
             "files": [
@@ -119,14 +157,38 @@ def _overview_payloads() -> dict[str, object]:
                 {
                     "file_id": 2,
                     "source_path": "/var/lib/photovault-clientd/test-media/002.jpg",
+                    "status": "UPLOADED",
+                    "sha256_hex": "ffcc22",
+                    "retry_count": 1,
+                    "last_error": "verify pending after reconnect",
+                },
+                {
+                    "file_id": 3,
+                    "source_path": "/var/lib/photovault-clientd/test-media/003.jpg",
+                    "status": "VERIFIED_REMOTE",
+                    "sha256_hex": "deadbeef",
+                    "retry_count": 0,
+                    "last_error": None,
+                },
+                {
+                    "file_id": 4,
+                    "source_path": "/var/lib/photovault-clientd/test-media/004.jpg",
+                    "status": "DUPLICATE_SHA_GLOBAL",
+                    "sha256_hex": "cafebabe",
+                    "retry_count": 0,
+                    "last_error": None,
+                },
+                {
+                    "file_id": 5,
+                    "source_path": "/var/lib/photovault-clientd/test-media/002.jpg",
                     "status": "DUPLICATE_SESSION_SHA",
                     "sha256_hex": "abc123",
                     "retry_count": 0,
                     "last_error": None,
                 },
                 {
-                    "file_id": 3,
-                    "source_path": "/var/lib/photovault-clientd/test-media/003.jpg",
+                    "file_id": 6,
+                    "source_path": "/var/lib/photovault-clientd/test-media/006.jpg",
                     "status": "ERROR_FILE",
                     "sha256_hex": "deadbeef",
                     "retry_count": 3,
@@ -146,6 +208,7 @@ def test_index_route_renders_overview_sections() -> None:
     app = create_app(
         daemon_get=fake_daemon_get,
         network_snapshot_get=_network_snapshot,
+        dependency_snapshot_get=_dependency_snapshot,
     )
     client = app.test_client()
     response = client.get("/")
@@ -155,11 +218,24 @@ def test_index_route_renders_overview_sections() -> None:
     assert 'class="active">Overview<' in body
     assert 'href="/network"' in body
     assert "Create ingest job" in body
-    assert "WAIT_NETWORK" in body
+    assert "ERROR_FILE" in body
     assert "PASS" in body
     assert "QUEUE_UPLOAD_PREPARED" in body
     assert 'href="/jobs/1"' in body
     assert 'data-ajax-target="#overview-shell"' in body
+    assert "M2 operation" in body
+    assert "Remote classification" in body
+    assert "paused on error" in body
+    assert "already exists:" in body
+    assert "upload required:" in body
+    assert "Cleanup staging" in body
+    assert "Dependencies" in body
+    assert "SQLite" in body
+    assert "Storage" in body
+    assert "photovault-clientd.service" in body
+    assert "NetworkManager.service" in body
+    assert "photovault-api.service" in body
+    assert "http://127.0.0.1:9301" in body
     assert "Connect Wi-Fi" not in body
     assert "Visible Wi-Fi Networks" not in body
 
@@ -173,6 +249,7 @@ def test_network_page_renders_network_sections() -> None:
     app = create_app(
         daemon_get=fake_daemon_get,
         network_snapshot_get=_network_snapshot,
+        dependency_snapshot_get=_dependency_snapshot,
     )
     client = app.test_client()
     response = client.get("/network")
@@ -204,6 +281,7 @@ def test_create_ingest_job_redirects_to_detail_page() -> None:
         daemon_get=fake_daemon_get,
         daemon_post=fake_daemon_post,
         network_snapshot_get=_network_snapshot,
+        dependency_snapshot_get=_dependency_snapshot,
     )
     client = app.test_client()
     response = client.post(
@@ -248,6 +326,7 @@ def test_create_ingest_job_returns_partial_for_ajax_requests() -> None:
         daemon_get=fake_daemon_get,
         daemon_post=fake_daemon_post,
         network_snapshot_get=_network_snapshot,
+        dependency_snapshot_get=_dependency_snapshot,
     )
     client = app.test_client()
     response = client.post(
@@ -270,7 +349,11 @@ def test_create_ingest_job_shows_validation_error() -> None:
     def fake_daemon_get(_: str, path: str) -> object:
         return payloads[path]
 
-    app = create_app(daemon_get=fake_daemon_get, network_snapshot_get=_network_snapshot)
+    app = create_app(
+        daemon_get=fake_daemon_get,
+        network_snapshot_get=_network_snapshot,
+        dependency_snapshot_get=_dependency_snapshot,
+    )
     client = app.test_client()
     response = client.post("/ingest/jobs", data={"media_label": "", "source_paths": ""})
     body = response.get_data(as_text=True)
@@ -294,6 +377,7 @@ def test_network_scan_redirects_to_network_page() -> None:
         daemon_get=fake_daemon_get,
         network_snapshot_get=_network_snapshot,
         network_scan=fake_network_scan,
+        dependency_snapshot_get=_dependency_snapshot,
     )
     client = app.test_client()
     response = client.post("/network/scan", follow_redirects=False)
@@ -320,6 +404,7 @@ def test_network_scan_shows_error_when_nmcli_fails() -> None:
         daemon_get=fake_daemon_get,
         network_snapshot_get=_network_snapshot,
         network_scan=failing_network_scan,
+        dependency_snapshot_get=_dependency_snapshot,
     )
     client = app.test_client()
     response = client.post("/network/scan")
@@ -345,6 +430,7 @@ def test_network_connect_redirects_to_network_page() -> None:
         daemon_get=fake_daemon_get,
         network_snapshot_get=_network_snapshot,
         network_connect=fake_network_connect,
+        dependency_snapshot_get=_dependency_snapshot,
     )
     client = app.test_client()
     response = client.post(
@@ -375,6 +461,7 @@ def test_network_connect_shows_error_when_nmcli_fails() -> None:
         daemon_get=fake_daemon_get,
         network_snapshot_get=_network_snapshot,
         network_connect=failing_network_connect,
+        dependency_snapshot_get=_dependency_snapshot,
     )
     client = app.test_client()
     response = client.post(
@@ -400,6 +487,7 @@ def test_network_snapshot_shows_friendly_error_when_nmcli_is_missing() -> None:
     app = create_app(
         daemon_get=fake_daemon_get,
         network_snapshot_get=missing_nmcli,
+        dependency_snapshot_get=_dependency_snapshot,
     )
     client = app.test_client()
     response = client.get("/network")
@@ -418,6 +506,7 @@ def test_job_detail_route_renders_file_level_status() -> None:
     app = create_app(
         daemon_get=fake_daemon_get,
         network_snapshot_get=_network_snapshot,
+        dependency_snapshot_get=_dependency_snapshot,
     )
     client = app.test_client()
     response = client.get("/jobs/1")
@@ -430,6 +519,13 @@ def test_job_detail_route_renders_file_level_status() -> None:
     assert "DUPLICATE_SESSION_SHA" in body
     assert "Retry upload" in body
     assert "Back to overview" in body
+    assert "M2 Operational Summary" in body
+    assert "Overall:</strong> paused on error" in body
+    assert "Paused on error:</strong> yes" in body
+    assert "already existed remotely" in body
+    assert "upload required" in body
+    assert "uploaded; waiting for server verify" in body
+    assert "verified on server" in body
 
 
 def test_job_detail_route_returns_partial_for_ajax_requests() -> None:
@@ -441,6 +537,7 @@ def test_job_detail_route_returns_partial_for_ajax_requests() -> None:
     app = create_app(
         daemon_get=fake_daemon_get,
         network_snapshot_get=_network_snapshot,
+        dependency_snapshot_get=_dependency_snapshot,
     )
     client = app.test_client()
     response = client.get("/jobs/1", headers={"X-Requested-With": "XMLHttpRequest"})
@@ -467,6 +564,7 @@ def test_daemon_tick_returns_partial_notice_for_ajax_requests() -> None:
         daemon_get=fake_daemon_get,
         daemon_post=fake_daemon_post,
         network_snapshot_get=_network_snapshot,
+        dependency_snapshot_get=_dependency_snapshot,
     )
     client = app.test_client()
     response = client.post(
@@ -502,16 +600,16 @@ def test_retry_upload_action_returns_partial_notice_for_ajax_requests() -> None:
     client = app.test_client()
     response = client.post(
         "/actions/retry-upload",
-        data={"selected_job_id": "1", "file_id": "3"},
+        data={"selected_job_id": "1", "file_id": "6"},
         headers={"X-Requested-With": "XMLHttpRequest"},
     )
     body = response.get_data(as_text=True)
 
     assert response.status_code == 200
     assert response.headers["X-Client-Location"].endswith("/jobs/1")
-    assert observed["path"] == "/ingest/files/3/retry-upload"
+    assert observed["path"] == "/ingest/files/6/retry-upload"
     assert observed["payload"] == {}
-    assert "File #3 requeued for upload; daemon moved to UPLOAD_PREPARE." in body
+    assert "File #6 requeued for upload; daemon moved to UPLOAD_PREPARE." in body
 
 
 def test_retry_upload_action_surfaces_daemon_error() -> None:
@@ -521,9 +619,9 @@ def test_retry_upload_action_surfaces_daemon_error() -> None:
         return payloads[path]
 
     def failing_daemon_post(_: str, path: str, payload: dict[str, object]) -> object:
-        assert path == "/ingest/files/3/retry-upload"
+        assert path == "/ingest/files/6/retry-upload"
         assert payload == {}
-        req = httpx.Request("POST", "http://127.0.0.1:9101/ingest/files/3/retry-upload")
+        req = httpx.Request("POST", "http://127.0.0.1:9101/ingest/files/6/retry-upload")
         resp = httpx.Response(409, request=req)
         raise httpx.HTTPStatusError("conflict", request=req, response=resp)
 
@@ -531,14 +629,15 @@ def test_retry_upload_action_surfaces_daemon_error() -> None:
         daemon_get=fake_daemon_get,
         daemon_post=failing_daemon_post,
         network_snapshot_get=_network_snapshot,
+        dependency_snapshot_get=_dependency_snapshot,
     )
     client = app.test_client()
-    response = client.post("/actions/retry-upload", data={"selected_job_id": "1", "file_id": "3"})
+    response = client.post("/actions/retry-upload", data={"selected_job_id": "1", "file_id": "6"})
     body = response.get_data(as_text=True)
 
     assert response.status_code == 200
     assert "Ingest request failed." in body
-    assert "Failed to requeue file #3 for upload" in body
+    assert "Failed to requeue file #6 for upload" in body
 
 
 def test_job_detail_route_returns_404_for_unknown_job() -> None:
@@ -551,7 +650,11 @@ def test_job_detail_route_returns_404_for_unknown_job() -> None:
             raise httpx.HTTPStatusError("not found", request=request, response=response)
         return payloads[path]
 
-    app = create_app(daemon_get=fake_daemon_get, network_snapshot_get=_network_snapshot)
+    app = create_app(
+        daemon_get=fake_daemon_get,
+        network_snapshot_get=_network_snapshot,
+        dependency_snapshot_get=_dependency_snapshot,
+    )
     client = app.test_client()
     response = client.get("/jobs/9")
 
@@ -562,7 +665,11 @@ def test_index_route_surfaces_daemon_unreachable_error() -> None:
     def failing_daemon_get(_: str, __: str) -> object:
         raise httpx.ConnectError("connection refused")
 
-    app = create_app(daemon_get=failing_daemon_get, network_snapshot_get=_network_snapshot)
+    app = create_app(
+        daemon_get=failing_daemon_get,
+        network_snapshot_get=_network_snapshot,
+        dependency_snapshot_get=_dependency_snapshot,
+    )
     client = app.test_client()
     response = client.get("/")
     body = response.get_data(as_text=True)

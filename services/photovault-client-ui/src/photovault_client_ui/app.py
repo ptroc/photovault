@@ -1,7 +1,10 @@
 """SSR control-plane UI for the photovault client."""
 
+import os
+import sqlite3
 import subprocess
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -9,6 +12,110 @@ from flask import Flask, Response, abort, make_response, redirect, render_templa
 
 DEFAULT_DAEMON_BASE_URL = "http://127.0.0.1:9101"
 DEFAULT_HTTP_TIMEOUT_SECONDS = 2.0
+DEFAULT_CLIENT_DB_PATH = Path("/var/lib/photovault-clientd/state.sqlite3")
+DEFAULT_STAGING_ROOT = Path("/var/lib/photovault-clientd/staging")
+DEFAULT_SERVER_API_URL = "http://127.0.0.1:9301"
+
+_REMOTE_ALREADY_EXISTS_STATUSES = {"DUPLICATE_SHA_GLOBAL"}
+_UPLOAD_REQUIRED_STATUSES = {
+    "READY_TO_UPLOAD",
+    "UPLOADED",
+    "VERIFY_RUNNING",
+    "VERIFIED_REMOTE",
+    "ERROR_FILE",
+}
+_REMOTE_TERMINAL_STATUSES = {"VERIFIED_REMOTE", "DUPLICATE_SHA_GLOBAL"}
+_PAUSED_ERROR_JOB_STATUSES = {"ERROR_FILE", "ERROR_JOB", "PAUSED_STORAGE"}
+_REMOTE_COMPLETE_JOB_STATUSES = {"JOB_COMPLETE_REMOTE", "JOB_COMPLETE_LOCAL"}
+
+_M2_PHASE_LABELS = {
+    "READY_TO_UPLOAD": "queued for upload",
+    "UPLOADED": "uploaded; waiting for server verify",
+    "VERIFY_RUNNING": "server verify in progress",
+    "VERIFIED_REMOTE": "verified on server",
+    "DUPLICATE_SHA_GLOBAL": "already existed on server",
+    "ERROR_FILE": "paused after upload/verify error",
+    "QUARANTINED_LOCAL": "quarantined after local verify mismatch",
+}
+
+
+def _derive_file_m2_view(file_record: dict[str, Any]) -> dict[str, str]:
+    status = str(file_record.get("status", ""))
+    if status in _REMOTE_ALREADY_EXISTS_STATUSES:
+        classification_key = "REMOTE_ALREADY_EXISTS"
+        classification_label = "already existed remotely"
+    elif status in _UPLOAD_REQUIRED_STATUSES:
+        classification_key = "UPLOAD_REQUIRED"
+        classification_label = "upload required"
+    else:
+        classification_key = "NOT_CLASSIFIED_REMOTE"
+        classification_label = "not yet remote-classified"
+
+    return {
+        "classification_key": classification_key,
+        "classification_label": classification_label,
+        "phase_label": _M2_PHASE_LABELS.get(status, "not in upload/verify path yet"),
+    }
+
+
+def _derive_job_m2_view(job: dict[str, Any]) -> dict[str, Any]:
+    status_counts = dict(job.get("status_counts", {}))
+    status = str(job.get("status", ""))
+    local_ingest_complete = bool(job.get("local_ingest_complete"))
+
+    remote_already_exists_count = int(
+        sum(status_counts.get(file_status, 0) for file_status in _REMOTE_ALREADY_EXISTS_STATUSES)
+    )
+    upload_required_count = int(sum(status_counts.get(file_status, 0) for file_status in _UPLOAD_REQUIRED_STATUSES))
+    remote_terminal_count = int(sum(status_counts.get(file_status, 0) for file_status in _REMOTE_TERMINAL_STATUSES))
+    paused_on_error = status in _PAUSED_ERROR_JOB_STATUSES or int(status_counts.get("ERROR_FILE", 0)) > 0
+    cleanup_complete = status in _REMOTE_COMPLETE_JOB_STATUSES
+    remote_complete = cleanup_complete and remote_terminal_count > 0
+
+    if paused_on_error:
+        operation_state_label = "paused on error"
+    elif remote_complete:
+        operation_state_label = "remote complete"
+    elif local_ingest_complete:
+        operation_state_label = "local complete"
+    else:
+        operation_state_label = "local processing"
+
+    if remote_terminal_count <= 0 and upload_required_count <= 0:
+        cleanup_label = "n/a"
+    elif cleanup_complete:
+        cleanup_label = "complete"
+    elif status == "CLEANUP_STAGING":
+        cleanup_label = "in progress"
+    elif paused_on_error:
+        cleanup_label = "blocked by error"
+    else:
+        cleanup_label = "pending"
+
+    return {
+        "operation_state_label": operation_state_label,
+        "remote_already_exists_count": remote_already_exists_count,
+        "upload_required_count": upload_required_count,
+        "remote_terminal_count": remote_terminal_count,
+        "paused_on_error": paused_on_error,
+        "remote_complete": remote_complete,
+        "cleanup_complete": cleanup_complete,
+        "cleanup_label": cleanup_label,
+    }
+
+
+def _annotate_job_record(job: dict[str, Any]) -> dict[str, Any]:
+    annotated = dict(job)
+    annotated["m2"] = _derive_job_m2_view(annotated)
+    files = annotated.get("files")
+    if isinstance(files, list):
+        normalized_files: list[dict[str, Any]] = []
+        for file_record in files:
+            file_copy = dict(file_record)
+            file_copy["m2"] = _derive_file_m2_view(file_copy)
+            normalized_files.append(file_copy)
+        annotated["files"] = normalized_files
+    return annotated
 
 
 def _daemon_get(daemon_base_url: str, path: str) -> Any:
@@ -134,6 +241,79 @@ def _format_network_error(action: str, exc: subprocess.CalledProcessError | File
     return f"Failed to {action}: nmcli exited with status {exc.returncode}."
 
 
+def _systemd_service_state(
+    service_name: str,
+    command_runner: Callable[[list[str]], str] = _run_command,
+) -> str:
+    try:
+        return command_runner(["systemctl", "is-active", service_name]).strip() or "unknown"
+    except FileNotFoundError:
+        return "systemctl unavailable"
+    except subprocess.CalledProcessError as exc:
+        stderr = (exc.stderr or "").strip()
+        stdout = (exc.stdout or "").strip()
+        return stderr or stdout or f"exit {exc.returncode}"
+
+
+def _get_dependency_snapshot() -> list[dict[str, str]]:
+    dependencies: list[dict[str, str]] = []
+
+    if DEFAULT_CLIENT_DB_PATH.exists():
+        sqlite_status = "ready"
+        sqlite_detail = str(DEFAULT_CLIENT_DB_PATH)
+        try:
+            with sqlite3.connect(DEFAULT_CLIENT_DB_PATH) as conn:
+                conn.execute("SELECT 1;").fetchone()
+        except sqlite3.Error as exc:
+            sqlite_status = "error"
+            sqlite_detail = f"{DEFAULT_CLIENT_DB_PATH}: {exc}"
+    else:
+        sqlite_status = "missing"
+        sqlite_detail = str(DEFAULT_CLIENT_DB_PATH)
+    dependencies.append({"name": "SQLite", "status": sqlite_status, "detail": sqlite_detail})
+
+    storage_status = "ready"
+    if DEFAULT_STAGING_ROOT.exists():
+        storage_detail = str(DEFAULT_STAGING_ROOT)
+        if not DEFAULT_STAGING_ROOT.is_dir():
+            storage_status = "error"
+            storage_detail = f"{DEFAULT_STAGING_ROOT}: not a directory"
+    else:
+        parent = DEFAULT_STAGING_ROOT.parent
+        if parent.exists():
+            writable = parent.is_dir() and os.access(parent, os.W_OK)
+            storage_status = "provisionable" if writable else "missing"
+            storage_detail = f"{DEFAULT_STAGING_ROOT} (parent {parent})"
+        else:
+            storage_status = "missing"
+            storage_detail = f"{DEFAULT_STAGING_ROOT} (parent missing)"
+    dependencies.append({"name": "Storage", "status": storage_status, "detail": storage_detail})
+
+    dependencies.append(
+        {
+            "name": "photovault-clientd.service",
+            "status": _systemd_service_state("photovault-clientd.service"),
+            "detail": f"local daemon API at {DEFAULT_DAEMON_BASE_URL}",
+        }
+    )
+    dependencies.append(
+        {
+            "name": "NetworkManager.service",
+            "status": _systemd_service_state("NetworkManager.service"),
+            "detail": "network connectivity and Wi-Fi control",
+        }
+    )
+    dependencies.append(
+        {
+            "name": "photovault-api.service",
+            "status": _systemd_service_state("photovault-api.service"),
+            "detail": f"server upload and verify API at {DEFAULT_SERVER_API_URL}",
+        }
+    )
+
+    return dependencies
+
+
 def create_app(
     daemon_base_url: str = DEFAULT_DAEMON_BASE_URL,
     daemon_get: Callable[[str, str], Any] = _daemon_get,
@@ -141,6 +321,7 @@ def create_app(
     network_snapshot_get: Callable[[], dict[str, Any]] = _get_network_snapshot,
     network_connect: Callable[[str, str | None], None] = _connect_network,
     network_scan: Callable[[], None] = _scan_networks,
+    dependency_snapshot_get: Callable[[], list[dict[str, str]]] = _get_dependency_snapshot,
 ) -> Flask:
     app = Flask(__name__)
 
@@ -208,11 +389,15 @@ def create_app(
         if form_data:
             ingest_form.update(form_data)
         context = _load_daemon_context()
+        context["jobs"] = [_annotate_job_record(job) for job in context["jobs"]]
         selected_job, selected_job_error = _load_selected_job(selected_job_id)
         if selected_job_error and context["daemon_error"] is None:
             context["daemon_error"] = selected_job_error
+        if selected_job is not None:
+            selected_job = _annotate_job_record(selected_job)
         context.update(
             {
+                "dependencies": dependency_snapshot_get(),
                 "daemon_base_url": daemon_base_url,
                 "selected_job": selected_job,
                 "selected_job_id": selected_job_id,
