@@ -2,7 +2,7 @@
 
 import json
 from collections import defaultdict
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -29,6 +29,7 @@ from photovault_clientd.db import (
     fetch_next_staging_job_with_pending_copy,
     fetch_next_uploaded_file,
     fetch_ready_to_upload_files_global,
+    fetch_wait_network_retry_candidates,
     get_daemon_state,
     local_sha_exists,
     mark_file_copy_retry,
@@ -47,6 +48,7 @@ from photovault_clientd.db import (
     mark_uploaded_for_reupload,
     mark_uploaded_retry,
     register_local_sha,
+    requeue_error_file_for_upload,
     set_job_status,
     transition_daemon_state,
 )
@@ -59,6 +61,7 @@ DEFAULT_SERVER_BASE_URL = "http://127.0.0.1:9301"
 DEFAULT_HANDSHAKE_TIMEOUT_SECONDS = 5.0
 DEFAULT_RETAIN_STAGED_FILES = True
 DEFAULT_MAX_UPLOAD_RETRIES = 3
+DEFAULT_RETRY_BACKOFF_MAX_SECONDS = 30
 
 
 def _copy_phase_next_state(pending_copy: int, hash_pending: int) -> ClientState:
@@ -188,6 +191,17 @@ def _post_server_verify(
     if status not in {"VERIFIED", "ALREADY_EXISTS", "VERIFY_FAILED"}:
         raise ValueError("verify response has invalid status")
     return str(status)
+
+
+def _retry_backoff_seconds(retry_count: int) -> int:
+    if retry_count <= 0:
+        return 0
+    return min(2 ** (retry_count - 1), DEFAULT_RETRY_BACKOFF_MAX_SECONDS)
+
+
+def _retry_due_time(updated_at_utc: str, retry_count: int) -> datetime:
+    updated_at = datetime.fromisoformat(updated_at_utc)
+    return updated_at + timedelta(seconds=_retry_backoff_seconds(retry_count))
 
 
 def run_staging_copy_tick(conn, staging_root: Path) -> dict[str, object]:
@@ -650,10 +664,11 @@ def run_job_complete_local_tick(conn) -> dict[str, object]:
 
 
 def run_wait_network_tick(conn) -> dict[str, object]:
-    """Advance from WAIT_NETWORK to UPLOAD_PREPARE when ready files exist."""
+    """Advance from WAIT_NETWORK when retry backoff has elapsed."""
     now = datetime.now(UTC).isoformat()
-    ready_rows = fetch_ready_to_upload_files_global(conn)
-    if not ready_rows:
+    now_dt = datetime.fromisoformat(now)
+    candidates = fetch_wait_network_retry_candidates(conn)
+    if not candidates:
         transition_daemon_state(
             conn,
             ClientState.WAIT_NETWORK,
@@ -666,6 +681,40 @@ def run_wait_network_tick(conn) -> dict[str, object]:
             "errored": False,
             "ready_to_upload": 0,
             "uploaded": 0,
+            "next_retry_at_utc": None,
+            "next_state": ClientState.WAIT_NETWORK.value,
+        }
+
+    due_ready_count = 0
+    due_uploaded_count = 0
+    next_retry_at: datetime | None = None
+    for row in candidates:
+        retry_count = int(row["retry_count"])
+        updated_at_utc = str(row["updated_at_utc"])
+        due_at = _retry_due_time(updated_at_utc, retry_count)
+        if due_at <= now_dt:
+            if row["status"] == FileStatus.UPLOADED.value:
+                due_uploaded_count += 1
+            else:
+                due_ready_count += 1
+            continue
+        if next_retry_at is None or due_at < next_retry_at:
+            next_retry_at = due_at
+
+    if due_ready_count <= 0 and due_uploaded_count <= 0:
+        transition_daemon_state(
+            conn,
+            ClientState.WAIT_NETWORK,
+            now,
+            reason="wait network backoff still active",
+        )
+        return {
+            "handled": True,
+            "progressed": False,
+            "errored": False,
+            "ready_to_upload": 0,
+            "uploaded": 0,
+            "next_retry_at_utc": next_retry_at.isoformat() if next_retry_at else None,
             "next_state": ClientState.WAIT_NETWORK.value,
         }
 
@@ -673,13 +722,18 @@ def run_wait_network_tick(conn) -> dict[str, object]:
         conn,
         ClientState.UPLOAD_PREPARE,
         now,
-        reason=f"wait network gate opened for {len(ready_rows)} ready files",
+        reason=(
+            "wait network gate opened for "
+            f"ready={due_ready_count}, uploaded={due_uploaded_count} due retries"
+        ),
     )
     return {
         "handled": True,
         "progressed": True,
         "errored": False,
-        "ready_to_upload": len(ready_rows),
+        "ready_to_upload": due_ready_count,
+        "uploaded": due_uploaded_count,
+        "next_retry_at_utc": next_retry_at.isoformat() if next_retry_at else None,
         "next_state": ClientState.UPLOAD_PREPARE.value,
     }
 
@@ -1253,6 +1307,69 @@ def run_reupload_or_quarantine_tick(
         "errored": False,
         "file_id": file_id,
         "next_state": ClientState.WAIT_NETWORK.value,
+    }
+
+
+def run_error_file_requeue(
+    conn,
+    *,
+    file_id: int,
+) -> dict[str, object]:
+    """Operator action: requeue an ERROR_FILE upload back to READY_TO_UPLOAD."""
+    now = datetime.now(UTC).isoformat()
+    row = conn.execute(
+        """
+        SELECT id, job_id
+        FROM ingest_files
+        WHERE id = ? AND status = ?;
+        """,
+        (file_id, FileStatus.ERROR_FILE.value),
+    ).fetchone()
+    if row is None:
+        return {
+            "handled": False,
+            "progressed": False,
+            "errored": True,
+            "file_id": file_id,
+            "error": "file not in ERROR_FILE",
+        }
+
+    job_id = int(row[1])
+    updated = requeue_error_file_for_upload(conn, file_id, now)
+    if updated <= 0:
+        return {
+            "handled": False,
+            "progressed": False,
+            "errored": True,
+            "file_id": file_id,
+            "error": "requeue update failed",
+        }
+
+    set_job_status(conn, job_id, ClientState.WAIT_NETWORK.value, now)
+    transition_daemon_state(
+        conn,
+        ClientState.UPLOAD_PREPARE,
+        now,
+        reason=f"operator requeued error file_id={file_id}",
+        commit=False,
+    )
+    append_daemon_event(
+        conn,
+        level=EventLevel.INFO,
+        category=EventCategory.SERVER_VERIFY_RETRY_SCHEDULED,
+        message=f"operator requeued file_id={file_id}",
+        created_at_utc=now,
+        from_state=ClientState.ERROR_FILE,
+        to_state=ClientState.UPLOAD_PREPARE,
+    )
+    conn.commit()
+    return {
+        "handled": True,
+        "progressed": True,
+        "errored": False,
+        "file_id": file_id,
+        "job_id": job_id,
+        "next_state": ClientState.UPLOAD_PREPARE.value,
     }
 
 

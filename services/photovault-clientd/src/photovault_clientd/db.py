@@ -683,7 +683,7 @@ def mark_files_ready_to_upload(
 def fetch_ready_to_upload_files_global(conn: sqlite3.Connection) -> list[dict[str, object]]:
     rows = conn.execute(
         """
-        SELECT id, job_id, sha256_hex, size_bytes
+        SELECT id, job_id, sha256_hex, size_bytes, retry_count, updated_at_utc
         FROM ingest_files
         WHERE status = ?
         ORDER BY id ASC;
@@ -696,6 +696,8 @@ def fetch_ready_to_upload_files_global(conn: sqlite3.Connection) -> list[dict[st
             "job_id": int(row[1]),
             "sha256_hex": row[2],
             "size_bytes": row[3],
+            "retry_count": int(row[4]),
+            "updated_at_utc": row[5],
         }
         for row in rows
     ]
@@ -727,7 +729,7 @@ def fetch_next_ready_to_upload_file(conn: sqlite3.Connection) -> dict[str, objec
 def fetch_next_uploaded_file(conn: sqlite3.Connection) -> dict[str, object] | None:
     row = conn.execute(
         """
-        SELECT id, job_id, sha256_hex, size_bytes
+        SELECT id, job_id, sha256_hex, size_bytes, retry_count, updated_at_utc
         FROM ingest_files
         WHERE status = ?
         ORDER BY id ASC
@@ -742,7 +744,31 @@ def fetch_next_uploaded_file(conn: sqlite3.Connection) -> dict[str, object] | No
         "job_id": int(row[1]),
         "sha256_hex": row[2],
         "size_bytes": row[3],
+        "retry_count": int(row[4]),
+        "updated_at_utc": row[5],
     }
+
+
+def fetch_wait_network_retry_candidates(conn: sqlite3.Connection) -> list[dict[str, object]]:
+    rows = conn.execute(
+        """
+        SELECT id, job_id, status, retry_count, updated_at_utc
+        FROM ingest_files
+        WHERE status IN (?, ?)
+        ORDER BY id ASC;
+        """,
+        (FileStatus.READY_TO_UPLOAD.value, FileStatus.UPLOADED.value),
+    ).fetchall()
+    return [
+        {
+            "file_id": int(row[0]),
+            "job_id": int(row[1]),
+            "status": row[2],
+            "retry_count": int(row[3]),
+            "updated_at_utc": row[4],
+        }
+        for row in rows
+    ]
 
 
 def count_job_files_by_statuses(conn: sqlite3.Connection, job_id: int, statuses: Sequence[str]) -> int:
@@ -865,6 +891,18 @@ def mark_ready_to_upload_error(
         """,
         (FileStatus.ERROR_FILE.value, error_message, now_utc, file_id, FileStatus.READY_TO_UPLOAD.value),
     )
+
+
+def requeue_error_file_for_upload(conn: sqlite3.Connection, file_id: int, now_utc: str) -> int:
+    cursor = conn.execute(
+        """
+        UPDATE ingest_files
+        SET status = ?, last_error = NULL, updated_at_utc = ?
+        WHERE id = ? AND status = ?;
+        """,
+        (FileStatus.READY_TO_UPLOAD.value, now_utc, file_id, FileStatus.ERROR_FILE.value),
+    )
+    return int(cursor.rowcount)
 
 
 def mark_files_upload_retry(

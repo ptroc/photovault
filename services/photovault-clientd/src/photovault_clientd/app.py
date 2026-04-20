@@ -38,6 +38,7 @@ from photovault_clientd.engine import (
     DEFAULT_RETAIN_STAGED_FILES,
     DEFAULT_SERVER_BASE_URL,
     run_daemon_tick,
+    run_error_file_requeue,
     run_recovery_dispatch,
 )
 from photovault_clientd.events import EventCategory, EventLevel, classify_copy_error
@@ -354,5 +355,22 @@ def create_app(
             "hash_pending": hash_pending,
             "next_state": next_state.value,
         }
+
+    @app.post("/ingest/files/{file_id}/retry-upload")
+    def retry_error_file_upload(file_id: int) -> dict[str, object]:
+        conn = open_db(db_path)
+        current_state = get_daemon_state(conn)
+        if current_state != ClientState.ERROR_FILE:
+            conn.close()
+            raise HTTPException(
+                status_code=409,
+                detail=f"daemon must be ERROR_FILE for upload requeue, got {current_state}",
+            )
+
+        outcome = run_error_file_requeue(conn, file_id=file_id)
+        conn.close()
+        if not outcome.get("handled"):
+            raise HTTPException(status_code=404, detail=f"file_id {file_id} not in ERROR_FILE")
+        return outcome
 
     return app
