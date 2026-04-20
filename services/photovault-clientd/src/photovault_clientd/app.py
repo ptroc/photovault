@@ -233,7 +233,7 @@ def create_app(
                         retain_staged_files=retain_staged_files,
                         max_steps=auto_progress_max_steps,
                     )
-                    if outcome["steps"] > 0:
+                    if outcome["progressed_steps"] > 0:
                         append_daemon_event(
                             conn_loop,
                             level=EventLevel.INFO,

@@ -70,6 +70,11 @@ DEFAULT_RETRY_BACKOFF_MAX_SECONDS = 30
 DEFAULT_AUTO_PROGRESS_MAX_STEPS = 32
 
 AUTO_PROGRESS_SAFE_STATES = {
+    ClientState.WAIT_NETWORK,
+    ClientState.UPLOAD_PREPARE,
+    ClientState.UPLOAD_FILE,
+    ClientState.SERVER_VERIFY,
+    ClientState.REUPLOAD_OR_QUARANTINE,
     ClientState.POST_UPLOAD_VERIFY,
     ClientState.CLEANUP_STAGING,
     ClientState.JOB_COMPLETE_REMOTE,
@@ -1986,7 +1991,7 @@ def run_auto_progress_dispatch(
     max_upload_retries: int = DEFAULT_MAX_UPLOAD_RETRIES,
     max_steps: int = DEFAULT_AUTO_PROGRESS_MAX_STEPS,
 ) -> dict[str, object]:
-    """Bounded auto-drain for deterministic completion follow-up states."""
+    """Bounded auto-drain for deterministic online/upload and completion states."""
     steps = 0
     progressed_steps = 0
     errored = False
