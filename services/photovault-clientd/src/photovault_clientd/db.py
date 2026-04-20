@@ -704,7 +704,7 @@ def fetch_ready_to_upload_files_global(conn: sqlite3.Connection) -> list[dict[st
 def fetch_next_ready_to_upload_file(conn: sqlite3.Connection) -> dict[str, object] | None:
     row = conn.execute(
         """
-        SELECT id, job_id, staged_path, sha256_hex, size_bytes
+        SELECT id, job_id, staged_path, sha256_hex, size_bytes, retry_count
         FROM ingest_files
         WHERE status = ?
         ORDER BY id ASC
@@ -720,6 +720,7 @@ def fetch_next_ready_to_upload_file(conn: sqlite3.Connection) -> dict[str, objec
         "staged_path": row[2],
         "sha256_hex": row[3],
         "size_bytes": row[4],
+        "retry_count": int(row[5]),
     }
 
 
@@ -847,6 +848,22 @@ def mark_uploaded_for_reupload(
         WHERE id = ? AND status = ?;
         """,
         (FileStatus.READY_TO_UPLOAD.value, error_message, now_utc, file_id, FileStatus.UPLOADED.value),
+    )
+
+
+def mark_ready_to_upload_error(
+    conn: sqlite3.Connection,
+    file_id: int,
+    error_message: str,
+    now_utc: str,
+) -> None:
+    conn.execute(
+        """
+        UPDATE ingest_files
+        SET status = ?, last_error = ?, updated_at_utc = ?
+        WHERE id = ? AND status = ?;
+        """,
+        (FileStatus.ERROR_FILE.value, error_message, now_utc, file_id, FileStatus.READY_TO_UPLOAD.value),
     )
 
 

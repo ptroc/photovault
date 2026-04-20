@@ -1,3 +1,4 @@
+import sqlite3
 from pathlib import Path
 from urllib.error import URLError
 
@@ -392,6 +393,74 @@ def test_server_verify_failure_moves_file_back_to_ready_to_upload(tmp_path: Path
         assert file_row["status"] == "READY_TO_UPLOAD"
         assert file_row["retry_count"] == 1
         assert file_row["last_error"] == "server verification failed"
+
+
+def test_reupload_or_quarantine_marks_error_file_when_retries_exhausted(
+    tmp_path: Path, monkeypatch
+) -> None:
+    db_path = tmp_path / "state.sqlite3"
+    staging_root = tmp_path / "staging"
+    source = tmp_path / "media" / "sd" / "verify-exhausted.jpg"
+    _write_source_file(source, b"verify-exhausted")
+
+    monkeypatch.setattr(
+        engine,
+        "_post_metadata_handshake",
+        lambda *, server_base_url, files, timeout_seconds=5.0: {
+            int(item["file_id"]): "UPLOAD_REQUIRED" for item in files
+        },
+    )
+    monkeypatch.setattr(
+        engine,
+        "_upload_file_content",
+        lambda *, server_base_url, sha256_hex, size_bytes, content, timeout_seconds=5.0: "STORED_TEMP",
+    )
+    monkeypatch.setattr(
+        engine,
+        "_post_server_verify",
+        lambda *, server_base_url, sha256_hex, size_bytes, timeout_seconds=5.0: "VERIFY_FAILED",
+    )
+
+    app = create_app(db_path=db_path, staging_root=staging_root, server_base_url="http://fake")
+    with TestClient(app) as client:
+        create_response = client.post(
+            "/ingest/jobs",
+            json={"media_label": "sd-m2-verify-exhausted", "source_paths": [str(source)]},
+        )
+        assert create_response.status_code == 200
+        job_id = int(create_response.json()["job_id"])
+        _tick_until_state(client, "WAIT_NETWORK")
+
+        _advance_to_upload_file(client)
+        upload_tick = client.post("/daemon/tick")
+        assert upload_tick.status_code == 200
+        assert upload_tick.json()["next_state"] == "SERVER_VERIFY"
+
+        verify_tick = client.post("/daemon/tick")
+        assert verify_tick.status_code == 200
+        assert verify_tick.json()["next_state"] == "REUPLOAD_OR_QUARANTINE"
+
+        conn = sqlite3.connect(db_path)
+        conn.execute("UPDATE ingest_files SET retry_count = 3 WHERE job_id = ?;", (job_id,))
+        conn.commit()
+        conn.close()
+
+        reupload_tick = client.post("/daemon/tick")
+        assert reupload_tick.status_code == 200
+        assert reupload_tick.json()["next_state"] == "ERROR_FILE"
+        assert reupload_tick.json()["max_retries"] == 3
+
+        state_response = client.get("/state")
+        assert state_response.status_code == 200
+        assert state_response.json()["current_state"] == "ERROR_FILE"
+
+        detail_response = client.get(f"/ingest/jobs/{job_id}")
+        assert detail_response.status_code == 200
+        detail = detail_response.json()
+        assert detail["status"] == "ERROR_FILE"
+        file_row = detail["files"][0]
+        assert file_row["status"] == "ERROR_FILE"
+        assert "retries exhausted" in (file_row["last_error"] or "")
 
 
 def test_restart_safety_with_uploaded_file_resumes_server_verify(tmp_path: Path, monkeypatch) -> None:

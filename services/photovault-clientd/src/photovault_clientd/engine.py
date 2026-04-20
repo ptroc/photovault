@@ -42,6 +42,7 @@ from photovault_clientd.db import (
     mark_files_duplicate_session,
     mark_files_ready_to_upload,
     mark_files_upload_retry,
+    mark_ready_to_upload_error,
     mark_ready_to_upload_retry,
     mark_uploaded_for_reupload,
     mark_uploaded_retry,
@@ -57,6 +58,7 @@ from photovault_clientd.storage import build_staged_path, copy_with_fsync
 DEFAULT_SERVER_BASE_URL = "http://127.0.0.1:9301"
 DEFAULT_HANDSHAKE_TIMEOUT_SECONDS = 5.0
 DEFAULT_RETAIN_STAGED_FILES = True
+DEFAULT_MAX_UPLOAD_RETRIES = 3
 
 
 def _copy_phase_next_state(pending_copy: int, hash_pending: int) -> ClientState:
@@ -1161,7 +1163,11 @@ def run_server_verify_tick(conn, *, server_base_url: str = DEFAULT_SERVER_BASE_U
     }
 
 
-def run_reupload_or_quarantine_tick(conn) -> dict[str, object]:
+def run_reupload_or_quarantine_tick(
+    conn,
+    *,
+    max_upload_retries: int = DEFAULT_MAX_UPLOAD_RETRIES,
+) -> dict[str, object]:
     """Apply v1 reupload policy after server verify failure."""
     now = datetime.now(UTC).isoformat()
     candidate = fetch_next_ready_to_upload_file(conn)
@@ -1181,6 +1187,48 @@ def run_reupload_or_quarantine_tick(conn) -> dict[str, object]:
 
     file_id = int(candidate["file_id"])
     job_id = int(candidate["job_id"])
+    retry_count = int(candidate["retry_count"])
+    if retry_count >= max_upload_retries:
+        mark_ready_to_upload_error(
+            conn,
+            file_id,
+            (
+                "server verification failed retries exhausted "
+                f"(retry_count={retry_count}, max_retries={max_upload_retries})"
+            ),
+            now,
+        )
+        set_job_status(conn, job_id, ClientState.ERROR_FILE.value, now)
+        transition_daemon_state(
+            conn,
+            ClientState.ERROR_FILE,
+            now,
+            reason=f"reupload exhausted for file_id={file_id}",
+            commit=False,
+        )
+        append_daemon_event(
+            conn,
+            level=EventLevel.ERROR,
+            category=EventCategory.SERVER_VERIFY_RETRY_SCHEDULED,
+            message=(
+                f"reupload exhausted for file_id={file_id} "
+                f"(retry_count={retry_count}, max_retries={max_upload_retries})"
+            ),
+            created_at_utc=now,
+            from_state=ClientState.REUPLOAD_OR_QUARANTINE,
+            to_state=ClientState.ERROR_FILE,
+        )
+        conn.commit()
+        return {
+            "handled": True,
+            "progressed": True,
+            "errored": True,
+            "file_id": file_id,
+            "retry_count": retry_count,
+            "max_retries": max_upload_retries,
+            "next_state": ClientState.ERROR_FILE.value,
+        }
+
     set_job_status(conn, job_id, ClientState.WAIT_NETWORK.value, now)
     transition_daemon_state(
         conn,
@@ -1382,6 +1430,7 @@ def run_daemon_tick(
     *,
     server_base_url: str = DEFAULT_SERVER_BASE_URL,
     retain_staged_files: bool = DEFAULT_RETAIN_STAGED_FILES,
+    max_upload_retries: int = DEFAULT_MAX_UPLOAD_RETRIES,
 ) -> dict[str, object]:
     """Run one daemon tick for the current state."""
     state = get_daemon_state(conn)
@@ -1404,7 +1453,7 @@ def run_daemon_tick(
     if state == ClientState.SERVER_VERIFY:
         return run_server_verify_tick(conn, server_base_url=server_base_url)
     if state == ClientState.REUPLOAD_OR_QUARANTINE:
-        return run_reupload_or_quarantine_tick(conn)
+        return run_reupload_or_quarantine_tick(conn, max_upload_retries=max_upload_retries)
     if state == ClientState.POST_UPLOAD_VERIFY:
         return run_post_upload_verify_tick(conn)
     if state == ClientState.CLEANUP_STAGING:
@@ -1439,6 +1488,7 @@ def run_recovery_dispatch(
     *,
     server_base_url: str = DEFAULT_SERVER_BASE_URL,
     retain_staged_files: bool = DEFAULT_RETAIN_STAGED_FILES,
+    max_upload_retries: int = DEFAULT_MAX_UPLOAD_RETRIES,
     max_steps: int = 1000,
 ) -> dict[str, object]:
     """Drain implemented recovery phase work after bootstrap selection."""
@@ -1475,6 +1525,7 @@ def run_recovery_dispatch(
             staging_root,
             server_base_url=server_base_url,
             retain_staged_files=retain_staged_files,
+            max_upload_retries=max_upload_retries,
         )
         steps += 1
         if outcome.get("progressed"):

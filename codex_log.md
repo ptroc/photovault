@@ -218,3 +218,8 @@ Append-only log of substantive Codex actions in this repository.
 - Summary: Aligned client M2 verify-failure flow with the state machine by routing `SERVER_VERIFY` `VERIFY_FAILED` outcomes through `REUPLOAD_OR_QUARANTINE` before deterministic return to `WAIT_NETWORK` (no new states, non-resumable behavior preserved), and updated integration tests accordingly.
 - Files changed: `services/photovault-clientd/src/photovault_clientd/engine.py`, `services/photovault-clientd/tests/test_m2_handshake.py`, `codex_log.md`
 - Verification: `source .venv/bin/activate && pytest services/photovault-clientd/tests/test_m2_handshake.py services/photovault-clientd/tests/test_transitions_and_events.py`, `source .venv/bin/activate && ruff check services/photovault-clientd/src/photovault_clientd/engine.py services/photovault-clientd/tests/test_m2_handshake.py`, `source .venv/bin/activate && make check` (84 passed)
+
+- Timestamp (UTC): 2026-04-20T04:07:08Z
+- Summary: Implemented explicit retry-exhaustion handling for M2 remote verify failures: `REUPLOAD_OR_QUARANTINE` now deterministically moves files to `ERROR_FILE` after `max_upload_retries` (default `3`) and transitions daemon/job to `ERROR_FILE`; non-exhausted retries still return to `WAIT_NETWORK` as non-resumable retry policy.
+- Files changed: `services/photovault-clientd/src/photovault_clientd/db.py`, `services/photovault-clientd/src/photovault_clientd/engine.py`, `services/photovault-clientd/tests/test_m2_handshake.py`, `codex_log.md`
+- Verification: `source .venv/bin/activate && pytest services/photovault-clientd/tests/test_m2_handshake.py`, `source .venv/bin/activate && ruff check --fix services/photovault-clientd/src/photovault_clientd/engine.py`, `source .venv/bin/activate && make check` (85 passed)
