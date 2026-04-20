@@ -1,11 +1,20 @@
 import sqlite3
+import subprocess
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from urllib.error import URLError
 
+import pytest
 from fastapi.testclient import TestClient
 from photovault_clientd import engine
 from photovault_clientd.app import create_app
+
+ORIGINAL_NETWORK_IS_ONLINE = engine._network_is_online
+
+
+@pytest.fixture(autouse=True)
+def _default_network_online(monkeypatch):
+    monkeypatch.setattr(engine, "_network_is_online", lambda: True)
 
 
 def _write_source_file(path: Path, content: bytes) -> None:
@@ -195,6 +204,105 @@ def test_wait_network_handshake_network_failure_is_retry_safe_and_deterministic(
         assert success_file["status"] == "READY_TO_UPLOAD"
         assert success_file["retry_count"] == 1
         assert success_file["last_error"] is None
+
+
+def test_wait_network_stays_put_while_offline_even_when_retry_due(tmp_path: Path, monkeypatch) -> None:
+    db_path = tmp_path / "state.sqlite3"
+    staging_root = tmp_path / "staging"
+    source = tmp_path / "media" / "sd" / "offline-due.jpg"
+    _write_source_file(source, b"offline-due")
+
+    monkeypatch.setattr(engine, "_network_is_online", lambda: False)
+
+    app = create_app(db_path=db_path, staging_root=staging_root, server_base_url="http://fake")
+    with TestClient(app) as client:
+        create_response = client.post(
+            "/ingest/jobs",
+            json={"media_label": "sd-m2-offline-due", "source_paths": [str(source)]},
+        )
+        assert create_response.status_code == 200
+        _tick_until_state(client, "WAIT_NETWORK")
+
+        wait_tick = client.post("/daemon/tick")
+        assert wait_tick.status_code == 200
+        payload = wait_tick.json()
+        assert payload["next_state"] == "WAIT_NETWORK"
+        assert payload["progressed"] is False
+        assert payload["network_online"] is False
+        assert payload["ready_to_upload"] == 1
+
+
+def test_wait_network_stays_put_when_nmcli_unavailable(tmp_path: Path, monkeypatch) -> None:
+    db_path = tmp_path / "state.sqlite3"
+    staging_root = tmp_path / "staging"
+    source = tmp_path / "media" / "sd" / "nmcli-missing.jpg"
+    _write_source_file(source, b"nmcli-missing")
+
+    def missing_nmcli(*_args, **_kwargs):
+        raise FileNotFoundError("nmcli")
+
+    monkeypatch.setattr(engine, "_network_is_online", ORIGINAL_NETWORK_IS_ONLINE)
+    monkeypatch.setattr(subprocess, "run", missing_nmcli)
+
+    app = create_app(db_path=db_path, staging_root=staging_root, server_base_url="http://fake")
+    with TestClient(app) as client:
+        create_response = client.post(
+            "/ingest/jobs",
+            json={"media_label": "sd-m2-nmcli-missing", "source_paths": [str(source)]},
+        )
+        assert create_response.status_code == 200
+        _tick_until_state(client, "WAIT_NETWORK")
+
+        wait_tick = client.post("/daemon/tick")
+        assert wait_tick.status_code == 200
+        payload = wait_tick.json()
+        assert payload["next_state"] == "WAIT_NETWORK"
+        assert payload["progressed"] is False
+        assert payload["network_online"] is False
+
+
+def test_wait_network_advances_only_when_online_and_retry_due(tmp_path: Path, monkeypatch) -> None:
+    db_path = tmp_path / "state.sqlite3"
+    staging_root = tmp_path / "staging"
+    source = tmp_path / "media" / "sd" / "online-due.jpg"
+    _write_source_file(source, b"online-due")
+
+    monkeypatch.setattr(engine, "_network_is_online", lambda: True)
+
+    app = create_app(db_path=db_path, staging_root=staging_root, server_base_url="http://fake")
+    with TestClient(app) as client:
+        create_response = client.post(
+            "/ingest/jobs",
+            json={"media_label": "sd-m2-online-due", "source_paths": [str(source)]},
+        )
+        assert create_response.status_code == 200
+        _tick_until_state(client, "WAIT_NETWORK")
+
+        now_iso = datetime.now(UTC).isoformat()
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            "UPDATE ingest_files SET retry_count = 2, updated_at_utc = ? WHERE status = 'READY_TO_UPLOAD';",
+            (now_iso,),
+        )
+        conn.commit()
+        conn.close()
+
+        not_due_tick = client.post("/daemon/tick")
+        assert not_due_tick.status_code == 200
+        not_due_payload = not_due_tick.json()
+        assert not_due_payload["next_state"] == "WAIT_NETWORK"
+        assert not_due_payload["progressed"] is False
+        assert not_due_payload["network_online"] is True
+        assert not_due_payload["next_retry_at_utc"] is not None
+
+        _age_status_rows(db_path, status="READY_TO_UPLOAD")
+
+        due_tick = client.post("/daemon/tick")
+        assert due_tick.status_code == 200
+        due_payload = due_tick.json()
+        assert due_payload["next_state"] == "UPLOAD_PREPARE"
+        assert due_payload["progressed"] is True
+        assert due_payload["network_online"] is True
 
 
 def test_restart_safety_preserves_handshake_classification(tmp_path: Path, monkeypatch) -> None:
@@ -477,6 +585,69 @@ def test_reupload_or_quarantine_marks_error_file_when_retries_exhausted(
         assert "retries exhausted" in (file_row["last_error"] or "")
 
 
+def test_reupload_or_quarantine_targets_specific_failed_file(
+    tmp_path: Path, monkeypatch
+) -> None:
+    db_path = tmp_path / "state.sqlite3"
+    staging_root = tmp_path / "staging"
+    source_a = tmp_path / "media" / "sd" / "a.jpg"
+    source_b = tmp_path / "media" / "sd" / "b.jpg"
+    _write_source_file(source_a, b"file-a")
+    _write_source_file(source_b, b"file-b")
+
+    app = create_app(db_path=db_path, staging_root=staging_root, server_base_url="http://fake")
+    with TestClient(app) as client:
+        create_response = client.post(
+            "/ingest/jobs",
+            json={
+                "media_label": "sd-m2-reupload-target",
+                "source_paths": [str(source_a), str(source_b)],
+            },
+        )
+        assert create_response.status_code == 200
+        job_id = int(create_response.json()["job_id"])
+        _tick_until_state(client, "WAIT_NETWORK")
+
+        detail = client.get(f"/ingest/jobs/{job_id}").json()
+        files = detail["files"]
+        assert len(files) == 2
+        first_id = int(files[0]["file_id"])
+        target_id = int(files[1]["file_id"])
+
+        now_iso = datetime.now(UTC).isoformat()
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            "UPDATE daemon_state SET current_state = ?, updated_at_utc = ? WHERE id = 1;",
+            ("REUPLOAD_OR_QUARANTINE", now_iso),
+        )
+        conn.execute(
+            "UPDATE ingest_jobs SET status = ?, updated_at_utc = ? WHERE id = ?;",
+            ("REUPLOAD_OR_QUARANTINE", now_iso, job_id),
+        )
+        conn.execute(
+            "UPDATE ingest_files SET retry_count = 3, last_error = ?, updated_at_utc = ? WHERE id = ?;",
+            ("handshake transient", now_iso, first_id),
+        )
+        conn.execute(
+            "UPDATE ingest_files SET retry_count = 1, last_error = ?, updated_at_utc = ? WHERE id = ?;",
+            ("server verification failed", now_iso, target_id),
+        )
+        conn.commit()
+        conn.close()
+
+        reupload_tick = client.post("/daemon/tick")
+        assert reupload_tick.status_code == 200
+        payload = reupload_tick.json()
+        assert payload["next_state"] == "WAIT_NETWORK"
+        assert int(payload["file_id"]) == target_id
+
+        detail_after = client.get(f"/ingest/jobs/{job_id}").json()
+        files_after = {int(item["file_id"]): item for item in detail_after["files"]}
+        assert files_after[target_id]["status"] == "READY_TO_UPLOAD"
+        assert files_after[target_id]["last_error"] == "server verification failed"
+        assert files_after[first_id]["status"] == "READY_TO_UPLOAD"
+
+
 def test_wait_network_applies_backoff_for_ready_to_upload_retry(tmp_path: Path, monkeypatch) -> None:
     db_path = tmp_path / "state.sqlite3"
     staging_root = tmp_path / "staging"
@@ -746,3 +917,184 @@ def test_verify_success_transitions_through_post_and_cleanup_states(tmp_path: Pa
         detail_response = client.get(f"/ingest/jobs/{job_id}")
         assert detail_response.status_code == 200
         assert detail_response.json()["status"] == "JOB_COMPLETE_LOCAL"
+
+
+def test_cleanup_staging_retains_files_when_policy_true(tmp_path: Path, monkeypatch) -> None:
+    db_path = tmp_path / "state.sqlite3"
+    staging_root = tmp_path / "staging"
+    source = tmp_path / "media" / "sd" / "cleanup-retain.jpg"
+    _write_source_file(source, b"cleanup-retain")
+
+    monkeypatch.setattr(
+        engine,
+        "_post_metadata_handshake",
+        lambda *, server_base_url, files, timeout_seconds=5.0: {
+            int(item["file_id"]): "UPLOAD_REQUIRED" for item in files
+        },
+    )
+    monkeypatch.setattr(
+        engine,
+        "_upload_file_content",
+        lambda *, server_base_url, sha256_hex, size_bytes, content, timeout_seconds=5.0: "STORED_TEMP",
+    )
+    monkeypatch.setattr(
+        engine,
+        "_post_server_verify",
+        lambda *, server_base_url, sha256_hex, size_bytes, timeout_seconds=5.0: "VERIFIED",
+    )
+
+    app = create_app(
+        db_path=db_path,
+        staging_root=staging_root,
+        server_base_url="http://fake",
+        retain_staged_files=True,
+    )
+    with TestClient(app) as client:
+        create_response = client.post(
+            "/ingest/jobs",
+            json={"media_label": "sd-m2-cleanup-retain", "source_paths": [str(source)]},
+        )
+        assert create_response.status_code == 200
+        job_id = int(create_response.json()["job_id"])
+        _tick_until_state(client, "WAIT_NETWORK")
+
+        _advance_to_upload_file(client)
+        assert client.post("/daemon/tick").json()["next_state"] == "SERVER_VERIFY"
+        assert client.post("/daemon/tick").json()["next_state"] == "POST_UPLOAD_VERIFY"
+        assert client.post("/daemon/tick").json()["next_state"] == "CLEANUP_STAGING"
+
+        detail = client.get(f"/ingest/jobs/{job_id}").json()
+        staged_path = Path(detail["files"][0]["staged_path"])
+        assert staged_path.exists()
+
+        cleanup_tick = client.post("/daemon/tick")
+        assert cleanup_tick.status_code == 200
+        assert cleanup_tick.json()["next_state"] == "JOB_COMPLETE_REMOTE"
+        assert cleanup_tick.json()["retained_count"] == 1
+        assert cleanup_tick.json()["deleted_count"] == 0
+        assert staged_path.exists()
+
+
+def test_cleanup_staging_deletes_files_when_policy_false(tmp_path: Path, monkeypatch) -> None:
+    db_path = tmp_path / "state.sqlite3"
+    staging_root = tmp_path / "staging"
+    source = tmp_path / "media" / "sd" / "cleanup-delete.jpg"
+    _write_source_file(source, b"cleanup-delete")
+
+    monkeypatch.setattr(
+        engine,
+        "_post_metadata_handshake",
+        lambda *, server_base_url, files, timeout_seconds=5.0: {
+            int(item["file_id"]): "UPLOAD_REQUIRED" for item in files
+        },
+    )
+    monkeypatch.setattr(
+        engine,
+        "_upload_file_content",
+        lambda *, server_base_url, sha256_hex, size_bytes, content, timeout_seconds=5.0: "STORED_TEMP",
+    )
+    monkeypatch.setattr(
+        engine,
+        "_post_server_verify",
+        lambda *, server_base_url, sha256_hex, size_bytes, timeout_seconds=5.0: "VERIFIED",
+    )
+
+    app = create_app(
+        db_path=db_path,
+        staging_root=staging_root,
+        server_base_url="http://fake",
+        retain_staged_files=False,
+    )
+    with TestClient(app) as client:
+        create_response = client.post(
+            "/ingest/jobs",
+            json={"media_label": "sd-m2-cleanup-delete", "source_paths": [str(source)]},
+        )
+        assert create_response.status_code == 200
+        job_id = int(create_response.json()["job_id"])
+        _tick_until_state(client, "WAIT_NETWORK")
+
+        _advance_to_upload_file(client)
+        assert client.post("/daemon/tick").json()["next_state"] == "SERVER_VERIFY"
+        assert client.post("/daemon/tick").json()["next_state"] == "POST_UPLOAD_VERIFY"
+        assert client.post("/daemon/tick").json()["next_state"] == "CLEANUP_STAGING"
+
+        detail = client.get(f"/ingest/jobs/{job_id}").json()
+        staged_path = Path(detail["files"][0]["staged_path"])
+        assert staged_path.exists()
+
+        cleanup_tick = client.post("/daemon/tick")
+        assert cleanup_tick.status_code == 200
+        assert cleanup_tick.json()["next_state"] == "JOB_COMPLETE_REMOTE"
+        assert cleanup_tick.json()["retained_count"] == 0
+        assert cleanup_tick.json()["deleted_count"] == 1
+        assert not staged_path.exists()
+
+
+def test_cleanup_staging_transitions_paused_storage_on_delete_failure(
+    tmp_path: Path, monkeypatch
+) -> None:
+    db_path = tmp_path / "state.sqlite3"
+    staging_root = tmp_path / "staging"
+    source = tmp_path / "media" / "sd" / "cleanup-fail.jpg"
+    _write_source_file(source, b"cleanup-fail")
+
+    monkeypatch.setattr(
+        engine,
+        "_post_metadata_handshake",
+        lambda *, server_base_url, files, timeout_seconds=5.0: {
+            int(item["file_id"]): "UPLOAD_REQUIRED" for item in files
+        },
+    )
+    monkeypatch.setattr(
+        engine,
+        "_upload_file_content",
+        lambda *, server_base_url, sha256_hex, size_bytes, content, timeout_seconds=5.0: "STORED_TEMP",
+    )
+    monkeypatch.setattr(
+        engine,
+        "_post_server_verify",
+        lambda *, server_base_url, sha256_hex, size_bytes, timeout_seconds=5.0: "VERIFIED",
+    )
+
+    real_unlink = Path.unlink
+
+    def fail_under_staging(self: Path, *args, **kwargs):
+        if "staging" in str(self):
+            raise OSError("disk failure")
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fail_under_staging)
+
+    app = create_app(
+        db_path=db_path,
+        staging_root=staging_root,
+        server_base_url="http://fake",
+        retain_staged_files=False,
+    )
+    with TestClient(app) as client:
+        create_response = client.post(
+            "/ingest/jobs",
+            json={"media_label": "sd-m2-cleanup-fail", "source_paths": [str(source)]},
+        )
+        assert create_response.status_code == 200
+        job_id = int(create_response.json()["job_id"])
+        _tick_until_state(client, "WAIT_NETWORK")
+
+        _advance_to_upload_file(client)
+        assert client.post("/daemon/tick").json()["next_state"] == "SERVER_VERIFY"
+        assert client.post("/daemon/tick").json()["next_state"] == "POST_UPLOAD_VERIFY"
+        assert client.post("/daemon/tick").json()["next_state"] == "CLEANUP_STAGING"
+
+        cleanup_tick = client.post("/daemon/tick")
+        assert cleanup_tick.status_code == 200
+        payload = cleanup_tick.json()
+        assert payload["next_state"] == "PAUSED_STORAGE"
+        assert payload["errored"] is True
+
+        state_response = client.get("/state")
+        assert state_response.status_code == 200
+        assert state_response.json()["current_state"] == "PAUSED_STORAGE"
+
+        detail = client.get(f"/ingest/jobs/{job_id}").json()
+        assert detail["status"] == "PAUSED_STORAGE"

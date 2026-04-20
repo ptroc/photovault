@@ -57,7 +57,11 @@ ALLOWED_TRANSITIONS: dict[ClientState | None, set[ClientState]] = {
     },
     ClientState.POST_UPLOAD_VERIFY: {ClientState.CLEANUP_STAGING},
     ClientState.REUPLOAD_OR_QUARANTINE: {ClientState.WAIT_NETWORK, ClientState.ERROR_FILE},
-    ClientState.CLEANUP_STAGING: {ClientState.UPLOAD_PREPARE, ClientState.JOB_COMPLETE_REMOTE},
+    ClientState.CLEANUP_STAGING: {
+        ClientState.UPLOAD_PREPARE,
+        ClientState.JOB_COMPLETE_REMOTE,
+        ClientState.PAUSED_STORAGE,
+    },
     ClientState.JOB_COMPLETE_REMOTE: {ClientState.JOB_COMPLETE_LOCAL, ClientState.ERROR_JOB},
     ClientState.JOB_COMPLETE_LOCAL: {ClientState.IDLE},
     ClientState.VERIFY_IDLE: {ClientState.VERIFY_HASH, ClientState.VERIFY_IDLE},

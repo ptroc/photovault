@@ -1,0 +1,26 @@
+{
+  "name": "photovault",
+  "version": "1.0.0",
+  "description": "**photovault** is an offline-first, self-hosted photo ingestion and backup system designed primarily for photographers and camera-based workflows.",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs"
+  },
+  "scripts": {},
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ptroc/photovault.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/ptroc/photovault/issues"
+  },
+  "homepage": "https://github.com/ptroc/photovault#readme",
+  "devDependencies": {
+    "@playwright/test": "^1.59.1",
+    "@types/node": "^25.6.0"
+  }
+}

@@ -1,6 +1,7 @@
 """Single-thread daemon tick and recovery helpers for photovault-clientd."""
 
 import json
+import subprocess
 from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -20,6 +21,7 @@ from photovault_clientd.db import (
     count_ready_to_upload_files_global,
     count_staged_files_global,
     count_uploaded_files_global,
+    fetch_cleanup_remote_terminal_files,
     fetch_hashed_files_for_job,
     fetch_next_copy_candidate,
     fetch_next_hash_candidate,
@@ -29,6 +31,7 @@ from photovault_clientd.db import (
     fetch_next_staging_job_with_pending_copy,
     fetch_next_uploaded_file,
     fetch_ready_to_upload_files_global,
+    fetch_reupload_target_file,
     fetch_wait_network_retry_candidates,
     get_daemon_state,
     local_sha_exists,
@@ -202,6 +205,39 @@ def _retry_backoff_seconds(retry_count: int) -> int:
 def _retry_due_time(updated_at_utc: str, retry_count: int) -> datetime:
     updated_at = datetime.fromisoformat(updated_at_utc)
     return updated_at + timedelta(seconds=_retry_backoff_seconds(retry_count))
+
+
+def _network_is_online() -> bool:
+    """Return True when NetworkManager reports connected state."""
+    try:
+        completed = subprocess.run(
+            ["nmcli", "-m", "multiline", "-f", "STATE,CONNECTIVITY", "general"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError:
+        # v1 contract: networking must be gated through NetworkManager availability.
+        return False
+    except subprocess.CalledProcessError:
+        return False
+
+    state = ""
+    connectivity = ""
+    for raw_line in completed.stdout.splitlines():
+        line = raw_line.strip()
+        if not line or ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        normalized = key.strip().upper()
+        if normalized == "STATE":
+            state = value.strip().lower()
+        elif normalized == "CONNECTIVITY":
+            connectivity = value.strip().lower()
+
+    if state != "connected":
+        return False
+    return connectivity in {"full", "limited", "portal", "unknown"}
 
 
 def run_staging_copy_tick(conn, staging_root: Path) -> dict[str, object]:
@@ -667,6 +703,7 @@ def run_wait_network_tick(conn) -> dict[str, object]:
     """Advance from WAIT_NETWORK when retry backoff has elapsed."""
     now = datetime.now(UTC).isoformat()
     now_dt = datetime.fromisoformat(now)
+    network_online = _network_is_online()
     candidates = fetch_wait_network_retry_candidates(conn)
     if not candidates:
         transition_daemon_state(
@@ -681,6 +718,7 @@ def run_wait_network_tick(conn) -> dict[str, object]:
             "errored": False,
             "ready_to_upload": 0,
             "uploaded": 0,
+            "network_online": network_online,
             "next_retry_at_utc": None,
             "next_state": ClientState.WAIT_NETWORK.value,
         }
@@ -714,6 +752,28 @@ def run_wait_network_tick(conn) -> dict[str, object]:
             "errored": False,
             "ready_to_upload": 0,
             "uploaded": 0,
+            "network_online": network_online,
+            "next_retry_at_utc": next_retry_at.isoformat() if next_retry_at else None,
+            "next_state": ClientState.WAIT_NETWORK.value,
+        }
+
+    if not network_online:
+        transition_daemon_state(
+            conn,
+            ClientState.WAIT_NETWORK,
+            now,
+            reason=(
+                "wait network detected offline state with due retries "
+                f"(ready={due_ready_count}, uploaded={due_uploaded_count})"
+            ),
+        )
+        return {
+            "handled": True,
+            "progressed": False,
+            "errored": False,
+            "ready_to_upload": due_ready_count,
+            "uploaded": due_uploaded_count,
+            "network_online": network_online,
             "next_retry_at_utc": next_retry_at.isoformat() if next_retry_at else None,
             "next_state": ClientState.WAIT_NETWORK.value,
         }
@@ -733,6 +793,7 @@ def run_wait_network_tick(conn) -> dict[str, object]:
         "errored": False,
         "ready_to_upload": due_ready_count,
         "uploaded": due_uploaded_count,
+        "network_online": network_online,
         "next_retry_at_utc": next_retry_at.isoformat() if next_retry_at else None,
         "next_state": ClientState.UPLOAD_PREPARE.value,
     }
@@ -1224,13 +1285,13 @@ def run_reupload_or_quarantine_tick(
 ) -> dict[str, object]:
     """Apply v1 reupload policy after server verify failure."""
     now = datetime.now(UTC).isoformat()
-    candidate = fetch_next_ready_to_upload_file(conn)
-    if candidate is None:
+    job_id = fetch_next_job_with_status(conn, ClientState.REUPLOAD_OR_QUARANTINE)
+    if job_id is None:
         transition_daemon_state(
             conn,
             ClientState.WAIT_NETWORK,
             now,
-            reason="reupload tick found no ready files",
+            reason="reupload tick found no reupload jobs",
         )
         return {
             "handled": True,
@@ -1239,8 +1300,23 @@ def run_reupload_or_quarantine_tick(
             "next_state": ClientState.WAIT_NETWORK.value,
         }
 
+    candidate = fetch_reupload_target_file(conn, job_id)
+    if candidate is None:
+        transition_daemon_state(
+            conn,
+            ClientState.WAIT_NETWORK,
+            now,
+            reason=f"reupload tick found no ready file for job_id={job_id}",
+        )
+        return {
+            "handled": True,
+            "progressed": False,
+            "errored": True,
+            "job_id": job_id,
+            "next_state": ClientState.WAIT_NETWORK.value,
+        }
+
     file_id = int(candidate["file_id"])
-    job_id = int(candidate["job_id"])
     retry_count = int(candidate["retry_count"])
     if retry_count >= max_upload_retries:
         mark_ready_to_upload_error(
@@ -1442,11 +1518,51 @@ def run_cleanup_staging_tick(
             "next_state": next_state.value,
         }
 
-    remote_terminal_count = count_job_files_by_statuses(
-        conn,
-        job_id,
-        (FileStatus.VERIFIED_REMOTE.value, FileStatus.DUPLICATE_SHA_GLOBAL.value),
-    )
+    remote_terminal_files = fetch_cleanup_remote_terminal_files(conn, job_id)
+    remote_terminal_count = len(remote_terminal_files)
+    deleted_count = 0
+    retained_count = 0
+    if retain_staged_files:
+        retained_count = remote_terminal_count
+    else:
+        for row in remote_terminal_files:
+            staged_path = row.get("staged_path")
+            if not isinstance(staged_path, str) or not staged_path:
+                continue
+            path = Path(staged_path)
+            try:
+                if path.exists():
+                    path.unlink()
+                    deleted_count += 1
+            except OSError as exc:
+                set_job_status(conn, job_id, ClientState.PAUSED_STORAGE.value, now)
+                transition_daemon_state(
+                    conn,
+                    ClientState.PAUSED_STORAGE,
+                    now,
+                    reason=f"cleanup delete failed for job_id={job_id}",
+                    commit=False,
+                )
+                append_daemon_event(
+                    conn,
+                    level=EventLevel.ERROR,
+                    category=EventCategory.CLEANUP_STAGING_APPLIED,
+                    message=f"cleanup delete failed for file_id={row['file_id']}: {exc}",
+                    created_at_utc=now,
+                    from_state=ClientState.CLEANUP_STAGING,
+                    to_state=ClientState.PAUSED_STORAGE,
+                )
+                conn.commit()
+                return {
+                    "handled": True,
+                    "progressed": True,
+                    "errored": True,
+                    "job_id": job_id,
+                    "remote_terminal_count": remote_terminal_count,
+                    "deleted_count": deleted_count,
+                    "retained_count": retained_count,
+                    "next_state": ClientState.PAUSED_STORAGE.value,
+                }
     pending_upload_count = count_job_files_by_statuses(
         conn,
         job_id,
@@ -1477,7 +1593,8 @@ def run_cleanup_staging_tick(
         category=EventCategory.CLEANUP_STAGING_APPLIED,
         message=(
             f"job_id={job_id}, retain_staged_files={retain_staged_files}, "
-            f"remote_terminal={remote_terminal_count}, pending_upload={pending_upload_count}"
+            f"remote_terminal={remote_terminal_count}, pending_upload={pending_upload_count}, "
+            f"deleted={deleted_count}, retained={retained_count}"
         ),
         created_at_utc=now,
         from_state=ClientState.CLEANUP_STAGING,
@@ -1490,6 +1607,8 @@ def run_cleanup_staging_tick(
         "errored": False,
         "job_id": job_id,
         "remote_terminal_count": remote_terminal_count,
+        "deleted_count": deleted_count,
+        "retained_count": retained_count,
         "next_state": next_state.value,
     }
 

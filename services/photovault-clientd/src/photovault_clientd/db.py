@@ -771,6 +771,77 @@ def fetch_wait_network_retry_candidates(conn: sqlite3.Connection) -> list[dict[s
     ]
 
 
+def fetch_reupload_target_file(conn: sqlite3.Connection, job_id: int) -> dict[str, object] | None:
+    row = conn.execute(
+        """
+        SELECT id, job_id, staged_path, sha256_hex, size_bytes, retry_count, last_error, updated_at_utc
+        FROM ingest_files
+        WHERE job_id = ?
+          AND status = ?
+          AND last_error = ?
+        ORDER BY updated_at_utc DESC, id DESC
+        LIMIT 1;
+        """,
+        (job_id, FileStatus.READY_TO_UPLOAD.value, "server verification failed"),
+    ).fetchone()
+    if row is not None:
+        return {
+            "file_id": int(row[0]),
+            "job_id": int(row[1]),
+            "staged_path": row[2],
+            "sha256_hex": row[3],
+            "size_bytes": row[4],
+            "retry_count": int(row[5]),
+            "last_error": row[6],
+            "updated_at_utc": row[7],
+        }
+
+    row = conn.execute(
+        """
+        SELECT id, job_id, staged_path, sha256_hex, size_bytes, retry_count, last_error, updated_at_utc
+        FROM ingest_files
+        WHERE job_id = ?
+          AND status = ?
+        ORDER BY updated_at_utc DESC, id DESC
+        LIMIT 1;
+        """,
+        (job_id, FileStatus.READY_TO_UPLOAD.value),
+    ).fetchone()
+    if row is None:
+        return None
+    return {
+        "file_id": int(row[0]),
+        "job_id": int(row[1]),
+        "staged_path": row[2],
+        "sha256_hex": row[3],
+        "size_bytes": row[4],
+        "retry_count": int(row[5]),
+        "last_error": row[6],
+        "updated_at_utc": row[7],
+    }
+
+
+def fetch_cleanup_remote_terminal_files(conn: sqlite3.Connection, job_id: int) -> list[dict[str, object]]:
+    rows = conn.execute(
+        """
+        SELECT id, staged_path, status
+        FROM ingest_files
+        WHERE job_id = ?
+          AND status IN (?, ?)
+        ORDER BY id ASC;
+        """,
+        (job_id, FileStatus.VERIFIED_REMOTE.value, FileStatus.DUPLICATE_SHA_GLOBAL.value),
+    ).fetchall()
+    return [
+        {
+            "file_id": int(row[0]),
+            "staged_path": row[1],
+            "status": row[2],
+        }
+        for row in rows
+    ]
+
+
 def count_job_files_by_statuses(conn: sqlite3.Connection, job_id: int, statuses: Sequence[str]) -> int:
     if not statuses:
         return 0
