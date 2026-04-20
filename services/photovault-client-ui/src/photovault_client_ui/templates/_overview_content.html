@@ -1,11 +1,17 @@
 <section id="overview-shell">
-  <section class="grid section">
+  <section class="overview-top">
     <article class="card">
       <h2>Start Ingest</h2>
       {% if ingest_error %}
         <div class="banner banner-error">
           <strong>Ingest request failed.</strong>
           <span>{{ ingest_error }}</span>
+          {% if ingest_error_detail %}
+            <details class="meta-details">
+              <summary>Debug detail</summary>
+              <code>{{ ingest_error_detail }}</code>
+            </details>
+          {% endif %}
         </div>
       {% endif %}
       {% if ingest_notice %}
@@ -14,68 +20,100 @@
           <span>{{ ingest_notice }}</span>
         </div>
       {% endif %}
-      <form class="form-grid" method="post" action="/ingest/jobs" data-ajax-target="#overview-shell">
-        <div>
-          <label for="media_label">Media label</label>
-          <input id="media_label" name="media_label" value="{{ ingest_form.media_label }}" required>
-        </div>
-        <div>
-          <label for="source_paths">Source paths</label>
-          <textarea id="source_paths" name="source_paths" required>{{ ingest_form.source_paths }}</textarea>
-          <p class="muted">Enter one absolute path per line.</p>
-        </div>
-        <div class="button-row">
-          <button type="submit">Create ingest job</button>
-        </div>
-      </form>
-    </article>
-
-    <article class="card">
-      <h2>Daemon State</h2>
-      {% if state %}
-        <div class="kpi status-active">{{ state.current_state }}</div>
-        <p class="muted">Updated: {{ state.updated_at_utc }}</p>
-      {% else %}
-        <p class="status-error">Unavailable</p>
-      {% endif %}
-    </article>
-
-    <article class="card">
-      <h2>M0 Diagnostics</h2>
-      {% if diagnostics %}
-        <div class="kpi {% if diagnostics.ok %}status-ok{% else %}status-error{% endif %}">
-          {% if diagnostics.ok %}PASS{% else %}FAIL{% endif %}
-        </div>
-        <p class="muted">Invariant issues: {{ diagnostics.invariant_issue_count }}</p>
-        <p class="muted">Pending bootstrap entries: {{ diagnostics.pending_bootstrap_entries }}</p>
-      {% else %}
-        <p class="status-error">Unavailable</p>
-      {% endif %}
-    </article>
-
-    <article class="card">
-      <h2>Operator Actions</h2>
-      {% if operator_notice %}
+      {% if ingest_gate.can_start %}
         <div class="banner banner-success">
-          <strong>Action complete.</strong>
-          <span>{{ operator_notice }}</span>
+          <strong>Daemon ready.</strong>
+          <span>{{ ingest_gate.summary }}</span>
         </div>
-      {% endif %}
-      <div class="button-row">
-        <form method="post" action="/actions/daemon/tick" data-ajax-target="#overview-shell">
-          {% if selected_job_id %}
-            <input type="hidden" name="selected_job_id" value="{{ selected_job_id }}">
-          {% endif %}
-          <button type="submit">Run daemon tick</button>
+        <form class="form-grid" method="post" action="/ingest/jobs" data-ajax-target="#overview-shell">
+          <div>
+            <label for="media_label">Media label</label>
+            <input id="media_label" name="media_label" value="{{ ingest_form.media_label }}" required>
+          </div>
+          <div>
+            <label for="source_paths">Source paths</label>
+            <textarea id="source_paths" name="source_paths" required>{{ ingest_form.source_paths }}</textarea>
+            <p class="muted">Enter one absolute path per line.</p>
+          </div>
+          <div class="button-row">
+            <button type="submit">Create ingest job</button>
+          </div>
         </form>
-        <a
-          href="{% if selected_job_id %}/jobs/{{ selected_job_id }}{% else %}/{% endif %}"
-          class="button-link secondary"
-          data-ajax-target="#overview-shell"
-        >Refresh status</a>
-      </div>
-      <p class="muted">These actions refresh the dashboard in place and keep state changes inside the daemon.</p>
+      {% else %}
+        <div class="banner banner-warning">
+          <strong>Ingest blocked.</strong>
+          <span>Current daemon state: <code>{{ ingest_gate.current_state }}</code>.</span>
+          <span>{{ ingest_gate.summary }}</span>
+          <span>{{ ingest_gate.operator_action }}</span>
+        </div>
+        {% if ingest_gate.show_tick_action %}
+          <p class="muted">Next step</p>
+          <form method="post" action="/actions/daemon/tick" data-ajax-target="#overview-shell">
+            {% if selected_job_id %}
+              <input type="hidden" name="selected_job_id" value="{{ selected_job_id }}">
+            {% endif %}
+            <button type="submit">Run daemon tick now</button>
+          </form>
+        {% endif %}
+      {% endif %}
     </article>
+
+    <section class="status-stack">
+      <article class="card">
+        <h2>System Status</h2>
+        {% if state %}
+          <div class="kpi kpi-state status-active">{{ state.current_state }}</div>
+          <p class="muted">Updated: {{ state.updated_at_utc }}</p>
+        {% else %}
+          <p class="status-error">Unavailable</p>
+        {% endif %}
+        {% if diagnostics %}
+          <div class="status-metrics">
+            <div class="metric-item">
+              <strong class="{% if diagnostics.ok %}status-ok{% else %}status-error{% endif %}">
+                {% if diagnostics.ok %}M0 PASS{% else %}M0 FAIL{% endif %}
+              </strong>
+              <span class="muted">Foundation checks</span>
+            </div>
+            <div class="metric-item">
+              <strong>{{ diagnostics.invariant_issue_count }}</strong>
+              <span class="muted">Invariant issues</span>
+            </div>
+            <div class="metric-item">
+              <strong>{{ diagnostics.pending_bootstrap_entries }}</strong>
+              <span class="muted">Bootstrap pending</span>
+            </div>
+          </div>
+        {% endif %}
+      </article>
+
+      <article class="card">
+        <h2>Operator Actions</h2>
+        {% if operator_notice %}
+          <div class="banner banner-success">
+            <strong>Action complete.</strong>
+            <span>{{ operator_notice }}</span>
+          </div>
+        {% endif %}
+        <ul class="action-list">
+          <li class="muted">Use tick to advance daemon state-machine work.</li>
+          <li class="muted">Use refresh to reload this panel without leaving overview.</li>
+        </ul>
+        <div class="button-row">
+          <form method="post" action="/actions/daemon/tick" data-ajax-target="#overview-shell">
+            {% if selected_job_id %}
+              <input type="hidden" name="selected_job_id" value="{{ selected_job_id }}">
+            {% endif %}
+            <button type="submit">Run daemon tick</button>
+          </form>
+          <a
+            href="{% if selected_job_id %}/jobs/{{ selected_job_id }}{% else %}/{% endif %}"
+            class="button-link secondary"
+            data-ajax-target="#overview-shell"
+          >Refresh status</a>
+        </div>
+      </article>
+    </section>
   </section>
 
   <section class="section">

@@ -91,10 +91,10 @@ RATE:                                   195 Mbit/s
     assert records[2]["SSID"] == ":("
 
 
-def _overview_payloads() -> dict[str, object]:
+def _overview_payloads(daemon_state: str = "WAIT_NETWORK") -> dict[str, object]:
     return {
         "/state": {
-            "current_state": "WAIT_NETWORK",
+            "current_state": daemon_state,
             "updated_at_utc": "2026-04-19T16:51:44.120670+00:00",
         },
         "/diagnostics/m0": {
@@ -217,7 +217,10 @@ def test_index_route_renders_overview_sections() -> None:
     assert response.status_code == 200
     assert 'class="active">Overview<' in body
     assert 'href="/network"' in body
-    assert "Create ingest job" in body
+    assert "Ingest blocked." in body
+    assert "Current daemon state: <code>WAIT_NETWORK</code>." in body
+    assert "Run daemon tick now" in body
+    assert "Create ingest job" not in body
     assert "ERROR_FILE" in body
     assert "PASS" in body
     assert "QUEUE_UPLOAD_PREPARED" in body
@@ -266,7 +269,7 @@ def test_network_page_renders_network_sections() -> None:
 
 
 def test_create_ingest_job_redirects_to_detail_page() -> None:
-    payloads = _overview_payloads()
+    payloads = _overview_payloads(daemon_state="IDLE")
     observed: dict[str, object] = {}
 
     def fake_daemon_get(_: str, path: str) -> object:
@@ -303,7 +306,7 @@ def test_create_ingest_job_redirects_to_detail_page() -> None:
 
 
 def test_create_ingest_job_returns_partial_for_ajax_requests() -> None:
-    payloads = _overview_payloads()
+    payloads = _overview_payloads(daemon_state="IDLE")
     payloads["/ingest/jobs/7"] = {
         "job_id": 7,
         "media_label": "sd-new",
@@ -361,6 +364,78 @@ def test_create_ingest_job_shows_validation_error() -> None:
     assert response.status_code == 200
     assert "Ingest request failed." in body
     assert "Media label is required." in body
+
+
+def test_create_ingest_job_is_blocked_when_daemon_not_idle() -> None:
+    payloads = _overview_payloads(daemon_state="WAIT_NETWORK")
+    observed: dict[str, object] = {"called": False}
+
+    def fake_daemon_get(_: str, path: str) -> object:
+        return payloads[path]
+
+    def fake_daemon_post(_: str, __: str, ___: dict[str, object]) -> object:
+        observed["called"] = True
+        return {"job_id": 99}
+
+    app = create_app(
+        daemon_get=fake_daemon_get,
+        daemon_post=fake_daemon_post,
+        network_snapshot_get=_network_snapshot,
+        dependency_snapshot_get=_dependency_snapshot,
+    )
+    client = app.test_client()
+    response = client.post(
+        "/ingest/jobs",
+        data={"media_label": "sd-new", "source_paths": "/media/sd/001.jpg"},
+    )
+    body = response.get_data(as_text=True)
+
+    assert response.status_code == 200
+    assert observed["called"] is False
+    assert "Cannot start ingest while daemon state is WAIT_NETWORK." in body
+    assert "Do not start a new ingest yet." in body
+    assert "Run daemon tick now" in body
+
+
+def test_create_ingest_job_409_shows_job_complete_local_guidance() -> None:
+    payloads = _overview_payloads(daemon_state="IDLE")
+    state_calls: dict[str, int] = {"count": 0}
+
+    def fake_daemon_get(_: str, path: str) -> object:
+        if path == "/state":
+            state_calls["count"] += 1
+            if state_calls["count"] > 1:
+                return {
+                    "current_state": "JOB_COMPLETE_LOCAL",
+                    "updated_at_utc": "2026-04-19T16:52:12.120670+00:00",
+                }
+        return payloads[path]
+
+    def failing_daemon_post(_: str, path: str, payload: dict[str, object]) -> object:
+        assert path == "/ingest/jobs"
+        assert payload["media_label"] == "sd-new"
+        req = httpx.Request("POST", "http://127.0.0.1:9101/ingest/jobs")
+        resp = httpx.Response(409, request=req, json={"detail": "daemon must be IDLE, got JOB_COMPLETE_LOCAL"})
+        raise httpx.HTTPStatusError("conflict", request=req, response=resp)
+
+    app = create_app(
+        daemon_get=fake_daemon_get,
+        daemon_post=failing_daemon_post,
+        network_snapshot_get=_network_snapshot,
+        dependency_snapshot_get=_dependency_snapshot,
+    )
+    client = app.test_client()
+    response = client.post(
+        "/ingest/jobs",
+        data={"media_label": "sd-new", "source_paths": "/media/sd/001.jpg"},
+    )
+    body = response.get_data(as_text=True)
+
+    assert response.status_code == 200
+    assert "Daemon rejected ingest creation because it is not ready yet." in body
+    assert "Current state: JOB_COMPLETE_LOCAL." in body
+    assert "Run one daemon tick to return to IDLE" in body
+    assert "daemon API returned HTTP 409" in body
 
 
 def test_network_scan_redirects_to_network_page() -> None:

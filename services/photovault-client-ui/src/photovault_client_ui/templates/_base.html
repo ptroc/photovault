@@ -7,15 +7,19 @@
     <style>
       :root {
         color-scheme: light;
-        --bg: #f3efe7;
-        --surface: #fffaf2;
-        --surface-strong: #f5ead8;
-        --ink: #1f2a2e;
-        --muted: #5f6b71;
-        --accent: #1d6b57;
-        --warn: #9f4d1c;
-        --danger: #a12626;
-        --border: #d7ccb9;
+        --bg: #eceff3;
+        --surface: #ffffff;
+        --surface-muted: #f7f9fc;
+        --ink: #152134;
+        --muted: #4f5d74;
+        --primary: #0b63ce;
+        --primary-ink: #ffffff;
+        --warn: #a25d0a;
+        --danger: #b02a20;
+        --ok: #166a3f;
+        --border: #d8dee8;
+        --shadow-1: 0 1px 3px rgba(12, 30, 58, 0.08);
+        --shadow-2: 0 10px 28px rgba(12, 30, 58, 0.1);
       }
 
       * {
@@ -24,10 +28,10 @@
 
       body {
         margin: 0;
-        font-family: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", serif;
+        font-family: "Avenir Next", "Segoe UI", "Noto Sans", "Liberation Sans", sans-serif;
         background:
-          radial-gradient(circle at top left, rgba(29, 107, 87, 0.12), transparent 32%),
-          linear-gradient(180deg, #f8f4ec 0%, var(--bg) 100%);
+          radial-gradient(circle at top right, rgba(11, 99, 206, 0.18), transparent 35%),
+          linear-gradient(180deg, #f8fafc 0%, var(--bg) 100%);
         color: var(--ink);
       }
 
@@ -45,44 +49,73 @@
         margin-top: 0;
       }
 
-      h1,
-      h2,
-      h3 {
-        font-family: Georgia, "Times New Roman", serif;
-      }
-
       .hero {
         background: var(--surface);
-        border: 1px solid var(--border);
-        border-radius: 20px;
-        padding: 28px;
-        box-shadow: 0 10px 30px rgba(31, 42, 46, 0.08);
+        border-bottom: 1px solid var(--border);
+        border-radius: 0 0 20px 20px;
+        padding: 26px 28px 22px;
+        box-shadow: var(--shadow-2);
       }
 
-      .hero p:last-child {
-        margin-bottom: 0;
+      .hero h1 {
+        margin-bottom: 8px;
+        font-size: clamp(1.35rem, 2vw, 1.6rem);
+        letter-spacing: 0.02em;
+      }
+
+      .hero-meta {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        align-items: center;
+      }
+
+      .state-chip {
+        border: 1px solid var(--border);
+        background: var(--surface-muted);
+        border-radius: 999px;
+        padding: 6px 10px;
+        font-size: 0.83rem;
+        letter-spacing: 0.02em;
+        max-width: 100%;
+        overflow-wrap: anywhere;
+      }
+
+      .state-chip strong {
+        margin-right: 6px;
+      }
+
+      .state-chip code {
+        max-width: 100%;
+        overflow-wrap: anywhere;
       }
 
       .nav {
         display: flex;
         gap: 10px;
-        margin-top: 18px;
+        margin-top: 16px;
         flex-wrap: wrap;
       }
 
       .nav a {
         text-decoration: none;
-        border: 1px solid var(--border);
+        border: 1px solid #becbe0;
         border-radius: 999px;
-        padding: 8px 12px;
+        padding: 8px 14px;
         color: var(--ink);
-        background: white;
+        background: #f3f6fb;
+        font-weight: 600;
+        transition: all 120ms ease;
+      }
+
+      .nav a:hover {
+        background: #e8eef8;
       }
 
       .nav a.active {
-        background: var(--accent);
-        color: white;
-        border-color: var(--accent);
+        background: var(--primary);
+        color: var(--primary-ink);
+        border-color: var(--primary);
       }
 
       .grid {
@@ -95,28 +128,39 @@
       .card {
         background: var(--surface);
         border: 1px solid var(--border);
-        border-radius: 16px;
-        padding: 18px;
+        border-radius: 14px;
+        padding: 20px;
+        box-shadow: var(--shadow-1);
       }
 
       .card h2 {
-        font-size: 1.1rem;
-        margin-bottom: 10px;
+        font-size: 1.03rem;
+        margin-bottom: 12px;
+        letter-spacing: 0.01em;
       }
 
       .kpi {
-        font-size: 1.7rem;
+        font-size: 1.55rem;
         font-weight: 700;
         margin-bottom: 6px;
+        line-height: 1.15;
+      }
+
+      .kpi-state {
+        font-size: clamp(1.1rem, 2vw, 1.5rem);
+        overflow-wrap: anywhere;
       }
 
       .muted {
         color: var(--muted);
       }
 
-      .status-ok,
+      .status-ok {
+        color: var(--ok);
+      }
+
       .status-active {
-        color: var(--accent);
+        color: var(--primary);
       }
 
       .status-warn {
@@ -131,6 +175,44 @@
         margin-top: 24px;
       }
 
+      .overview-top {
+        display: grid;
+        grid-template-columns: minmax(320px, 1.35fr) minmax(260px, 1fr);
+        gap: 16px;
+        margin-top: 18px;
+        align-items: start;
+      }
+
+      .status-stack {
+        display: grid;
+        gap: 16px;
+      }
+
+      .status-metrics {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+        gap: 10px;
+      }
+
+      .metric-item {
+        background: var(--surface-muted);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 10px;
+      }
+
+      .metric-item strong {
+        display: block;
+      }
+
+      .action-list {
+        list-style: none;
+        padding: 0;
+        margin: 0 0 10px 0;
+        display: grid;
+        gap: 8px;
+      }
+
       .section-head {
         display: flex;
         justify-content: space-between;
@@ -141,30 +223,36 @@
       table {
         width: 100%;
         border-collapse: collapse;
+        border-radius: 12px;
+        overflow: hidden;
       }
 
       th,
       td {
         text-align: left;
         padding: 10px 12px;
-        border-bottom: 1px solid var(--border);
+        border-bottom: 1px solid #e4e9f1;
         vertical-align: top;
       }
 
       th {
-        font-size: 0.92rem;
+        font-size: 0.83rem;
+        letter-spacing: 0.03em;
+        text-transform: uppercase;
+        color: var(--muted);
+        background: var(--surface-muted);
       }
 
       code {
         font-family: "SFMono-Regular", "Menlo", monospace;
-        font-size: 0.92rem;
-        background: var(--surface-strong);
+        font-size: 0.88rem;
+        background: #ecf2fb;
         border-radius: 6px;
         padding: 2px 6px;
       }
 
       a {
-        color: var(--accent);
+        color: var(--primary);
       }
 
       .banner {
@@ -172,18 +260,26 @@
         padding: 14px 16px;
         border: 1px solid var(--border);
         margin-top: 18px;
+        display: grid;
+        gap: 4px;
       }
 
       .banner-error {
-        background: #fff0ed;
-        border-color: #e6b7ad;
+        background: #fff3f1;
+        border-color: #f3c8c3;
         color: var(--danger);
       }
 
       .banner-success {
-        background: #edf8f1;
-        border-color: #b8d8c0;
-        color: var(--accent);
+        background: #edf8f2;
+        border-color: #c7dfcf;
+        color: var(--ok);
+      }
+
+      .banner-warning {
+        background: #fff7ea;
+        border-color: #ecd3a1;
+        color: #845008;
       }
 
       .form-grid {
@@ -202,16 +298,16 @@
       textarea,
       button {
         width: 100%;
-        border: 1px solid var(--border);
+        border: 1px solid #b7c7dd;
         border-radius: 10px;
         padding: 10px 12px;
         font: inherit;
         color: inherit;
-        background: white;
+        background: #ffffff;
       }
 
       textarea {
-        min-height: 140px;
+        min-height: 120px;
         resize: vertical;
       }
 
@@ -221,16 +317,33 @@
         flex-wrap: wrap;
       }
 
+      .button-row form {
+        margin: 0;
+      }
+
       button {
         width: auto;
-        background: var(--accent);
-        color: white;
+        background: var(--primary);
+        color: var(--primary-ink);
         cursor: pointer;
+        border-color: var(--primary);
+        font-weight: 600;
+        box-shadow: 0 2px 8px rgba(11, 99, 206, 0.22);
+      }
+
+      button:disabled {
+        cursor: not-allowed;
+        background: #c9d3e2;
+        border-color: #c9d3e2;
+        color: #5c6777;
+        box-shadow: none;
       }
 
       button.secondary {
-        background: white;
+        background: #f4f7fc;
         color: var(--ink);
+        border-color: #b7c7dd;
+        box-shadow: none;
       }
 
       .button-link {
@@ -240,13 +353,26 @@
         border: 1px solid var(--border);
         border-radius: 10px;
         padding: 10px 12px;
-        background: var(--accent);
-        color: white;
+        background: var(--primary);
+        color: var(--primary-ink);
+        font-weight: 600;
       }
 
       .button-link.secondary {
-        background: white;
+        background: #f4f7fc;
         color: var(--ink);
+        border-color: #b7c7dd;
+      }
+
+      .meta-details {
+        margin-top: 8px;
+        font-size: 0.9rem;
+        color: var(--muted);
+      }
+
+      .meta-details code {
+        display: inline-block;
+        margin-top: 6px;
       }
 
       .list-inline {
@@ -264,9 +390,18 @@
           padding: 20px 14px 32px;
         }
 
-        .hero,
+        .hero {
+          padding: 18px;
+          border-radius: 0 0 14px 14px;
+        }
+
         .card {
           padding: 16px;
+        }
+
+        .overview-top {
+          grid-template-columns: 1fr;
+          gap: 14px;
         }
 
         table,
@@ -299,12 +434,23 @@
       <section class="hero">
         <h1>photovault client UI</h1>
         <p>Control-plane visibility for the local appliance.</p>
-        <p class="muted">Daemon API: <code>{{ daemon_base_url }}</code></p>
+        <div class="hero-meta">
+          <span class="state-chip"><strong>Daemon API</strong><code>{{ daemon_base_url }}</code></span>
+          {% if state %}
+            <span class="state-chip"><strong>State</strong>{{ state.current_state }}</span>
+          {% endif %}
+        </div>
 
         {% if daemon_error %}
           <div class="banner banner-error">
             <strong>Daemon unreachable.</strong>
             <span>{{ daemon_error }}</span>
+            {% if daemon_error_detail %}
+              <details class="meta-details">
+                <summary>Debug detail</summary>
+                <code>{{ daemon_error_detail }}</code>
+              </details>
+            {% endif %}
           </div>
         {% endif %}
 

@@ -38,6 +38,17 @@ _M2_PHASE_LABELS = {
     "QUARANTINED_LOCAL": "quarantined after local verify mismatch",
 }
 
+_INGEST_BLOCKED_GUIDANCE = {
+    "JOB_COMPLETE_LOCAL": {
+        "summary": "Local ingest finalization is still in progress.",
+        "operator_action": "Run one daemon tick to return to IDLE, then start the next ingest.",
+    },
+    "WAIT_NETWORK": {
+        "summary": "The daemon is waiting for network before continuing queued upload work.",
+        "operator_action": "Do not start a new ingest yet. Keep upload work moving until the daemon returns to IDLE.",
+    },
+}
+
 
 def _derive_file_m2_view(file_record: dict[str, Any]) -> dict[str, str]:
     status = str(file_record.get("status", ""))
@@ -101,6 +112,67 @@ def _derive_job_m2_view(job: dict[str, Any]) -> dict[str, Any]:
         "remote_complete": remote_complete,
         "cleanup_complete": cleanup_complete,
         "cleanup_label": cleanup_label,
+    }
+
+
+def _describe_http_error(exc: httpx.HTTPError) -> str:
+    if isinstance(exc, httpx.HTTPStatusError):
+        status_code = exc.response.status_code
+        detail = ""
+        try:
+            payload = exc.response.json()
+            if isinstance(payload, dict):
+                detail = str(payload.get("detail", "")).strip()
+        except ValueError:
+            detail = exc.response.text.strip()
+        summary = f"daemon API returned HTTP {status_code}"
+        if detail:
+            return f"{summary}: {detail}"
+        return summary
+
+    message = str(exc).strip()
+    if isinstance(exc, httpx.ConnectError):
+        return f"connection failure: {message or 'unable to reach daemon endpoint'}"
+    if isinstance(exc, httpx.TimeoutException):
+        return f"request timeout: {message or 'daemon did not respond in time'}"
+    if message:
+        return message
+    return exc.__class__.__name__
+
+
+def _build_ingest_gate(state: dict[str, Any] | None) -> dict[str, Any]:
+    if not state:
+        return {
+            "can_start": False,
+            "current_state": "UNKNOWN",
+            "summary": "Daemon state is unavailable.",
+            "operator_action": "Refresh status and confirm the daemon is reachable before creating ingest jobs.",
+            "show_tick_action": False,
+        }
+
+    current_state = str(state.get("current_state", "UNKNOWN"))
+    if current_state == "IDLE":
+        return {
+            "can_start": True,
+            "current_state": current_state,
+            "summary": "Daemon is ready for a new ingest job.",
+            "operator_action": "Create ingest job",
+            "show_tick_action": False,
+        }
+
+    state_guidance = _INGEST_BLOCKED_GUIDANCE.get(
+        current_state,
+        {
+            "summary": "The daemon is actively processing prior work.",
+            "operator_action": "Wait for IDLE or run a daemon tick if manual progression is needed.",
+        },
+    )
+    return {
+        "can_start": False,
+        "current_state": current_state,
+        "summary": state_guidance["summary"],
+        "operator_action": state_guidance["operator_action"],
+        "show_tick_action": current_state in {"JOB_COMPLETE_LOCAL", "WAIT_NETWORK"},
     }
 
 
@@ -331,6 +403,7 @@ def create_app(
     def _load_daemon_context() -> dict[str, Any]:
         context: dict[str, Any] = {
             "daemon_error": None,
+            "daemon_error_detail": None,
             "state": None,
             "diagnostics": None,
             "jobs": [],
@@ -344,7 +417,10 @@ def create_app(
             context["jobs"] = list(jobs_payload.get("jobs", []))
             context["events"] = list(events_payload.get("events", []))
         except httpx.HTTPError as exc:
-            context["daemon_error"] = str(exc)
+            context["daemon_error"] = (
+                "Unable to reach the local daemon API. Check photovault-clientd.service and try refresh."
+            )
+            context["daemon_error_detail"] = _describe_http_error(exc)
         return context
 
     def _load_selected_job(job_id: int | None) -> tuple[dict[str, Any] | None, str | None]:
@@ -381,6 +457,7 @@ def create_app(
         *,
         selected_job_id: int | None = None,
         ingest_error: str | None = None,
+        ingest_error_detail: str | None = None,
         ingest_notice: str | None = None,
         operator_notice: str | None = None,
         form_data: dict[str, str] | None = None,
@@ -395,6 +472,7 @@ def create_app(
             context["daemon_error"] = selected_job_error
         if selected_job is not None:
             selected_job = _annotate_job_record(selected_job)
+        ingest_gate = _build_ingest_gate(context["state"])
         context.update(
             {
                 "dependencies": dependency_snapshot_get(),
@@ -402,9 +480,11 @@ def create_app(
                 "selected_job": selected_job,
                 "selected_job_id": selected_job_id,
                 "ingest_error": ingest_error,
+                "ingest_error_detail": ingest_error_detail,
                 "ingest_notice": ingest_notice,
                 "operator_notice": operator_notice,
                 "ingest_form": ingest_form,
+                "ingest_gate": ingest_gate,
                 "active_page": "overview",
             }
         )
@@ -460,14 +540,55 @@ def create_app(
             )
 
         try:
+            state = daemon_get(daemon_base_url, "/state")
+        except httpx.HTTPError as exc:
+            return _render_overview(
+                ingest_error="Cannot start ingest because daemon readiness could not be confirmed.",
+                ingest_error_detail=_describe_http_error(exc),
+                form_data=form_data,
+            )
+
+        ingest_gate = _build_ingest_gate(state)
+        if not ingest_gate["can_start"]:
+            return _render_overview(
+                ingest_error=(
+                    "Cannot start ingest while daemon state is "
+                    f"{ingest_gate['current_state']}. {ingest_gate['operator_action']}"
+                ),
+                form_data=form_data,
+            )
+
+        try:
             created = daemon_post(
                 daemon_base_url,
                 "/ingest/jobs",
                 {"media_label": media_label, "source_paths": source_paths},
             )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 409:
+                conflict_state: dict[str, Any] | None = None
+                try:
+                    conflict_state = daemon_get(daemon_base_url, "/state")
+                except httpx.HTTPError:
+                    conflict_state = state
+                conflict_gate = _build_ingest_gate(conflict_state)
+                return _render_overview(
+                    ingest_error=(
+                        "Daemon rejected ingest creation because it is not ready yet. "
+                        f"Current state: {conflict_gate['current_state']}. {conflict_gate['operator_action']}"
+                    ),
+                    ingest_error_detail=_describe_http_error(exc),
+                    form_data=form_data,
+                )
+            return _render_overview(
+                ingest_error="Daemon failed to create ingest job.",
+                ingest_error_detail=_describe_http_error(exc),
+                form_data=form_data,
+            )
         except httpx.HTTPError as exc:
             return _render_overview(
-                ingest_error=f"Failed to create ingest job: {exc}",
+                ingest_error="Failed to create ingest job due to daemon communication error.",
+                ingest_error_detail=_describe_http_error(exc),
                 form_data=form_data,
             )
 
