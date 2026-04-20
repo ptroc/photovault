@@ -1,7 +1,6 @@
 """Single-thread daemon tick and recovery helpers for photovault-clientd."""
 
 import json
-import os
 import subprocess
 from collections import defaultdict
 from datetime import UTC, datetime, timedelta
@@ -59,6 +58,7 @@ from photovault_clientd.db import (
 )
 from photovault_clientd.events import EventCategory, EventLevel, classify_copy_error, classify_hash_error
 from photovault_clientd.hashing import compute_sha256
+from photovault_clientd.ingest_policy import enumerate_directory_media_files
 from photovault_clientd.state_machine import ClientState, FileStatus
 from photovault_clientd.storage import build_staged_path, copy_with_fsync
 
@@ -222,30 +222,6 @@ def _retry_due_time(updated_at_utc: str, retry_count: int) -> datetime:
     return updated_at + timedelta(seconds=_retry_backoff_seconds(retry_count))
 
 
-def _enumerate_directory_source_files(path: Path) -> list[str]:
-    discovered: list[str] = []
-    walk_errors: list[OSError] = []
-
-    def _on_walk_error(exc: OSError) -> None:
-        walk_errors.append(exc)
-
-    for root, dirnames, filenames in os.walk(path, onerror=_on_walk_error):
-        if walk_errors:
-            break
-        dirnames.sort()
-        filenames.sort()
-        for filename in filenames:
-            file_path = Path(root) / filename
-            if file_path.is_file():
-                discovered.append(str(file_path))
-
-    if walk_errors:
-        walk_error = walk_errors[0]
-        reason = walk_error.strerror or str(walk_error)
-        raise OSError(f"failed to read directory {path}: {reason}") from walk_error
-    return discovered
-
-
 def _network_is_online() -> bool:
     """Return True when NetworkManager reports connected state."""
     try:
@@ -332,7 +308,8 @@ def run_staging_copy_tick(conn, staging_root: Path) -> dict[str, object]:
     source = Path(source_path)
     if source.is_dir():
         try:
-            directory_files = _enumerate_directory_source_files(source)
+            directory_result = enumerate_directory_media_files(source)
+            directory_files = directory_result.discovered_files
         except OSError as exc:
             retry_message = f"Directory source path could not be read: {source_path} ({exc})"
             mark_file_copy_retry(conn, file_id, retry_message, now)
@@ -464,6 +441,7 @@ def run_staging_copy_tick(conn, staging_root: Path) -> dict[str, object]:
             "file_id": file_id,
             "expanded_directory_source": source_path,
             "expanded_file_count": inserted,
+            "filtered_file_count": directory_result.filtered_count,
         }
 
     staged_path = build_staged_path(staging_root, job_id, file_id, source_path)

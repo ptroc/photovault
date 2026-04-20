@@ -13,6 +13,8 @@ class UploadStateStore(Protocol):
 
     def has_sha(self, sha256_hex: str) -> bool: ...
 
+    def has_shas(self, sha256_hex_values: list[str]) -> set[str]: ...
+
     def upsert_temp_upload(self, sha256_hex: str, size_bytes: int, content: bytes) -> None: ...
 
     def get_temp_upload(self, sha256_hex: str) -> tuple[int, bytes] | None: ...
@@ -36,6 +38,10 @@ class InMemoryUploadStateStore:
     def has_sha(self, sha256_hex: str) -> bool:
         with self._lock:
             return sha256_hex in self.known_sha256
+
+    def has_shas(self, sha256_hex_values: list[str]) -> set[str]:
+        with self._lock:
+            return {sha256_hex for sha256_hex in sha256_hex_values if sha256_hex in self.known_sha256}
 
     def upsert_temp_upload(self, sha256_hex: str, size_bytes: int, content: bytes) -> None:
         with self._lock:
@@ -96,6 +102,24 @@ class PostgresUploadStateStore:
                     (sha256_hex,),
                 )
                 return cur.fetchone() is not None
+
+    def has_shas(self, sha256_hex_values: list[str]) -> set[str]:
+        if not sha256_hex_values:
+            return set()
+
+        # Preserve deterministic semantics for callers while reducing round-trips to PostgreSQL.
+        unique_values = list(dict.fromkeys(sha256_hex_values))
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT sha256_hex
+                    FROM api_known_sha256
+                    WHERE sha256_hex = ANY(%s);
+                    """,
+                    (unique_values,),
+                )
+                return {str(row[0]) for row in cur.fetchall()}
 
     def upsert_temp_upload(self, sha256_hex: str, size_bytes: int, content: bytes) -> None:
         now = datetime.now(UTC).isoformat()

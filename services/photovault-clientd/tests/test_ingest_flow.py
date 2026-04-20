@@ -242,6 +242,66 @@ def test_ingest_job_creation_enumerates_directory_source_path(tmp_path: Path) ->
     assert [row[0] for row in rows] == [str(media_root / "a.jpg"), str(media_root / "nested" / "b.jpg")]
 
 
+def test_ingest_job_creation_filters_junk_and_disallowed_directory_files(tmp_path: Path) -> None:
+    db_path = tmp_path / "state.sqlite3"
+    media_root = tmp_path / "mnt" / "usb"
+    _write_source_file(media_root / "photos" / "a.jpg", b"a")
+    _write_source_file(media_root / "photos" / "clip.mp4", b"clip")
+    _write_source_file(media_root / "notes.txt", b"notes")
+    _write_source_file(media_root / ".DS_Store", b"junk")
+    _write_source_file(media_root / ".Spotlight-V100" / "store.db", b"db")
+    _write_source_file(media_root / ".fseventsd" / "uuid", b"id")
+    app = create_app(db_path=db_path)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/ingest/jobs",
+            json={"media_label": "usb-root", "source_paths": [str(media_root)]},
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["discovered_count"] == 2
+        assert body["filtered_count"] == 2
+        assert any(item["source_path"].endswith("notes.txt") for item in body["filtered_sources"])
+
+    conn = open_db(db_path)
+    rows = conn.execute(
+        "SELECT source_path FROM ingest_files WHERE job_id = ? ORDER BY source_path ASC",
+        (body["job_id"],),
+    ).fetchall()
+    conn.close()
+
+    assert [row[0] for row in rows] == [
+        str(media_root / "photos" / "a.jpg"),
+        str(media_root / "photos" / "clip.mp4"),
+    ]
+
+
+def test_ingest_create_rejects_direct_file_with_disallowed_extension(tmp_path: Path) -> None:
+    db_path = tmp_path / "state.sqlite3"
+    source = tmp_path / "mnt" / "usb" / "notes.txt"
+    _write_source_file(source, b"notes")
+    app = create_app(db_path=db_path)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/ingest/jobs",
+            json={"media_label": "usb-root", "source_paths": [str(source)]},
+        )
+        assert response.status_code == 422
+        detail = response.json()["detail"]
+        assert detail["code"] == "INGEST_SOURCE_PATH_INVALID"
+        assert detail["invalid_sources"] == [
+            {
+                "source_path": str(source),
+                "reason": (
+                    "File is not allowed by the v1 ingest policy. Supported extensions include common "
+                    "photo, RAW, and video formats; got .txt."
+                ),
+            }
+        ]
+
+
 def test_ingest_create_rejects_invalid_source_paths_atomically(tmp_path: Path) -> None:
     db_path = tmp_path / "state.sqlite3"
     media_root = tmp_path / "mnt" / "usb"

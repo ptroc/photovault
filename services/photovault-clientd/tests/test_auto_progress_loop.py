@@ -1,7 +1,7 @@
 import time
-from threading import Event, Thread
 from datetime import UTC, datetime
 from pathlib import Path
+from threading import Event, Thread
 
 from fastapi.testclient import TestClient
 from photovault_clientd import engine

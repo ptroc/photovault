@@ -1,7 +1,6 @@
 """Local control-plane API exposed by photovault-clientd."""
 
 import asyncio
-import os
 import threading
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -47,6 +46,11 @@ from photovault_clientd.engine import (
     run_recovery_dispatch,
 )
 from photovault_clientd.events import EventCategory, EventLevel, classify_copy_error
+from photovault_clientd.ingest_policy import (
+    build_disallowed_file_reason,
+    enumerate_directory_media_files,
+    is_allowed_media_file,
+)
 from photovault_clientd.m0_checks import run_m0_foundation_checks
 from photovault_clientd.state_machine import ClientState
 from photovault_clientd.storage import build_staged_path, copy_with_fsync
@@ -70,38 +74,13 @@ def _format_path_os_error(exc: OSError) -> str:
     return exc.strerror or exc.__class__.__name__
 
 
-def _enumerate_directory_files(path: Path) -> list[str]:
-    discovered: list[str] = []
-    walk_errors: list[OSError] = []
-
-    def _on_walk_error(exc: OSError) -> None:
-        walk_errors.append(exc)
-
-    for root, dirnames, filenames in os.walk(path, onerror=_on_walk_error):
-        if walk_errors:
-            break
-        dirnames.sort()
-        filenames.sort()
-        for filename in filenames:
-            file_path = Path(root) / filename
-            try:
-                if file_path.is_file():
-                    discovered.append(str(file_path))
-            except OSError as exc:
-                raise OSError(f"failed to stat {file_path}: {_format_path_os_error(exc)}") from exc
-
-    if walk_errors:
-        raise OSError(
-            f"failed to read directory {path}: {_format_path_os_error(walk_errors[0])}"
-        ) from walk_errors[0]
-    return discovered
-
-
 def _discover_source_files(
     source_paths: list[str],
-) -> tuple[list[str], list[dict[str, str]]]:
+) -> tuple[list[str], list[dict[str, str]], list[dict[str, str]], int]:
     discovered: list[str] = []
     invalid_sources: list[dict[str, str]] = []
+    filtered_sources: list[dict[str, str]] = []
+    filtered_count = 0
     for raw_source_path in source_paths:
         source_path = raw_source_path.strip()
         source = Path(source_path)
@@ -115,19 +94,33 @@ def _discover_source_files(
             continue
         try:
             if source.is_file():
-                discovered.append(str(source))
-                continue
-            if source.is_dir():
-                directory_files = _enumerate_directory_files(source)
-                if not directory_files:
+                if not is_allowed_media_file(source):
                     invalid_sources.append(
                         {
                             "source_path": source_path,
-                            "reason": "Directory does not contain readable files.",
+                            "reason": build_disallowed_file_reason(source),
                         }
                     )
                     continue
-                discovered.extend(directory_files)
+                discovered.append(str(source))
+                continue
+            if source.is_dir():
+                directory_result = enumerate_directory_media_files(source)
+                if directory_result.filtered_count > 0:
+                    filtered_count += directory_result.filtered_count
+                    filtered_sources.extend(directory_result.to_examples())
+                if not directory_result.discovered_files:
+                    invalid_sources.append(
+                        {
+                            "source_path": source_path,
+                            "reason": (
+                                "Directory does not contain ingestable media files after applying "
+                                "the v1 exclusion and extension policy."
+                            ),
+                        }
+                    )
+                    continue
+                discovered.extend(directory_result.discovered_files)
                 continue
             if not source.exists():
                 invalid_sources.append(
@@ -150,7 +143,7 @@ def _discover_source_files(
                     "reason": _format_path_os_error(exc),
                 }
             )
-    return discovered, invalid_sources
+    return discovered, invalid_sources, filtered_sources[:10], filtered_count
 
 
 def _next_state_for_stage_phase(pending_copy: int, hash_pending: int) -> ClientState:
@@ -423,7 +416,9 @@ def create_app(
             conn.close()
             raise HTTPException(status_code=409, detail=f"daemon must be IDLE, got {current_state}")
 
-        discovered_source_paths, invalid_sources = _discover_source_files(request.source_paths)
+        discovered_source_paths, invalid_sources, filtered_sources, filtered_count = _discover_source_files(
+            request.source_paths
+        )
         if invalid_sources:
             conn.close()
             raise HTTPException(
@@ -452,6 +447,8 @@ def create_app(
         return {
             "job_id": job_id,
             "discovered_count": discovered_count,
+            "filtered_count": filtered_count,
+            "filtered_sources": filtered_sources,
             "state": ClientState.STAGING_COPY.value,
         }
 

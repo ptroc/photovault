@@ -413,7 +413,10 @@ def _build_overview_metrics(
             {
                 "severity": "critical",
                 "title": f"{len(blocked_jobs)} blocked job(s)",
-                "message": "Open Jobs and resolve upload/verify/storage errors before starting new ingest work.",
+                "message": (
+                    "Open Jobs and resolve upload/verify/storage errors before starting "
+                    "new ingest work."
+                ),
             }
         )
     current_state = str((state or {}).get("current_state", "UNKNOWN"))
@@ -741,6 +744,7 @@ def create_app(
         ingest_error: str | None = None,
         ingest_error_detail: str | None = None,
         ingest_notice: str | None = None,
+        ingest_notice_detail: str | None = None,
         operator_notice: str | None = None,
         operator_notice_pending: bool = False,
         auto_refresh_ms: int | None = None,
@@ -769,6 +773,7 @@ def create_app(
                 "ingest_error": ingest_error,
                 "ingest_error_detail": ingest_error_detail,
                 "ingest_notice": ingest_notice,
+                "ingest_notice_detail": ingest_notice_detail,
                 "operator_notice": operator_notice,
                 "operator_notice_pending": operator_notice_pending,
                 "auto_refresh_ms": auto_refresh_ms,
@@ -786,7 +791,11 @@ def create_app(
     def _render_jobs(*, selected_filter: str = "active") -> str:
         context = _load_daemon_context()
         jobs = [_annotate_job_record(job) for job in context["jobs"]]
-        effective_filter = selected_filter if selected_filter in {"active", "blocked", "completed", "all"} else "active"
+        effective_filter = (
+            selected_filter
+            if selected_filter in {"active", "blocked", "completed", "all"}
+            else "active"
+        )
         filtered_jobs = _filter_jobs(jobs, effective_filter)
         context.update(
             {
@@ -956,12 +965,28 @@ def create_app(
             )
 
         discovered_count = created.get("discovered_count")
+        filtered_count = int(created.get("filtered_count", 0) or 0)
+        filtered_sources = created.get("filtered_sources")
         if discovered_count is None:
             notice = f"Created ingest job #{created['job_id']}."
         else:
             notice = f"Created ingest job #{created['job_id']} with {discovered_count} discovered file(s)."
+        notice_detail = None
+        if filtered_count > 0:
+            notice = f"{notice} Skipped {filtered_count} file(s) by the v1 ingest policy."
+            if isinstance(filtered_sources, list) and filtered_sources:
+                detail_lines: list[str] = []
+                for item in filtered_sources:
+                    if not isinstance(item, dict):
+                        continue
+                    source_path = str(item.get("source_path", "")).strip()
+                    reason = str(item.get("reason", "")).strip()
+                    if source_path and reason:
+                        detail_lines.append(f"{source_path}: {reason}")
+                if detail_lines:
+                    notice_detail = "\n".join(detail_lines)
         if _is_ajax_request():
-            return _render_overview(ingest_notice=notice)
+            return _render_overview(ingest_notice=notice, ingest_notice_detail=notice_detail)
         return redirect(url_for("job_detail", job_id=created["job_id"]))
 
     @app.post("/actions/daemon/tick")
@@ -1038,7 +1063,12 @@ def create_app(
         job_id = request.form.get("job_id", type=int)
         if file_id is None:
             if job_id is not None:
-                return make_response(_render_job_detail(job_id, action_error="Missing file_id for retry action."))
+                return make_response(
+                    _render_job_detail(
+                        job_id,
+                        action_error="Missing file_id for retry action.",
+                    )
+                )
             return _render_overview(ingest_error="Missing file_id for retry action.")
         try:
             outcome = daemon_post(daemon_base_url, f"/ingest/files/{file_id}/retry-upload", {})
@@ -1046,7 +1076,10 @@ def create_app(
             detail = _describe_http_error(exc)
             if job_id is not None:
                 return make_response(
-                    _render_job_detail(job_id, action_error=f"Failed to requeue file #{file_id} for upload: {detail}")
+                    _render_job_detail(
+                        job_id,
+                        action_error=f"Failed to requeue file #{file_id} for upload: {detail}",
+                    )
                 )
             return _render_overview(
                 ingest_error=f"Failed to requeue file #{file_id} for upload.",

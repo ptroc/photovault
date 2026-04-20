@@ -47,6 +47,57 @@ def test_metadata_handshake_reports_upload_required_for_unknown_sha() -> None:
     }
 
 
+def test_metadata_handshake_classifies_mixed_batch_with_single_lookup() -> None:
+    known_sha = "a" * 64
+    unknown_sha = "b" * 64
+    observed: dict[str, object] = {}
+
+    class _BatchStore:
+        def initialize(self) -> None:
+            return None
+
+        def has_sha(self, sha256_hex: str) -> bool:
+            observed["has_sha_called"] = True
+            return False
+
+        def has_shas(self, sha256_hex_values: list[str]) -> set[str]:
+            observed["lookup"] = list(sha256_hex_values)
+            return {known_sha}
+
+        def get_temp_upload(self, sha256_hex: str) -> tuple[int, bytes] | None:
+            return None
+
+        def upsert_temp_upload(self, sha256_hex: str, size_bytes: int, content: bytes) -> None:
+            return None
+
+        def mark_sha_verified(self, sha256_hex: str) -> None:
+            return None
+
+        def remove_temp_upload(self, sha256_hex: str) -> None:
+            return None
+
+    client = TestClient(create_app(state_store=_BatchStore()))
+    response = client.post(
+        "/v1/upload/metadata-handshake",
+        json={
+            "files": [
+                {"client_file_id": 1, "sha256_hex": known_sha, "size_bytes": 10},
+                {"client_file_id": 2, "sha256_hex": unknown_sha, "size_bytes": 20},
+            ]
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "results": [
+            {"client_file_id": 1, "decision": "ALREADY_EXISTS"},
+            {"client_file_id": 2, "decision": "UPLOAD_REQUIRED"},
+        ]
+    }
+    assert observed["lookup"] == [known_sha, unknown_sha]
+    assert observed.get("has_sha_called") is None
+
+
 def test_upload_content_and_verify_promotes_sha_to_known_registry() -> None:
     content = b"hello-upload"
     sha256_hex = "520d43ad6c18a946d2e5c3a4d81f9d4261cf6a3c12f5a59d9667cc4b336c3550"
@@ -131,6 +182,9 @@ def test_create_app_uses_postgres_store_when_database_url_env_set(monkeypatch) -
 
         def has_sha(self, sha256_hex: str) -> bool:
             return False
+
+        def has_shas(self, sha256_hex_values: list[str]) -> set[str]:
+            return set()
 
         def get_temp_upload(self, sha256_hex: str) -> tuple[int, bytes] | None:
             return None

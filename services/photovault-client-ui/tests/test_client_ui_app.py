@@ -493,6 +493,55 @@ def test_create_ingest_job_shows_friendly_source_path_validation_error() -> None
     assert "/mnt/usb/missing.jpg: Path does not exist." in body
 
 
+def test_create_ingest_job_notice_reports_filtered_files() -> None:
+    payloads = _overview_payloads(daemon_state="IDLE")
+
+    def fake_daemon_get(_: str, path: str) -> object:
+        return payloads[path]
+
+    def success_daemon_post(_: str, path: str, payload: dict[str, object]) -> object:
+        assert path == "/ingest/jobs"
+        assert payload["media_label"] == "usb-root"
+        return {
+            "job_id": 11,
+            "discovered_count": 3,
+            "filtered_count": 4,
+            "filtered_sources": [
+                {
+                    "source_path": "/mnt/usb/.DS_Store",
+                    "reason": "Excluded by ingest policy: file name .DS_Store",
+                },
+                {
+                    "source_path": "/mnt/usb/readme.txt",
+                    "reason": "Skipped by ingest policy: unsupported file extension .txt",
+                },
+            ],
+            "state": "STAGING_COPY",
+        }
+
+    app = create_app(
+        daemon_get=fake_daemon_get,
+        daemon_post=success_daemon_post,
+        network_snapshot_get=_network_snapshot,
+        dependency_snapshot_get=_dependency_snapshot,
+    )
+    response = app.test_client().post(
+        "/ingest/jobs",
+        data={"media_label": "usb-root", "source_paths": "/mnt/usb"},
+        headers={"X-Requested-With": "XMLHttpRequest"},
+    )
+    body = response.get_data(as_text=True)
+
+    assert response.status_code == 200
+    assert (
+        "Created ingest job #11 with 3 discovered file(s). "
+        "Skipped 4 file(s) by the v1 ingest policy." in body
+    )
+    assert "Filtered files" in body
+    assert "/mnt/usb/.DS_Store: Excluded by ingest policy: file name .DS_Store" in body
+    assert "/mnt/usb/readme.txt: Skipped by ingest policy: unsupported file extension .txt" in body
+
+
 def test_network_page_and_errors_render() -> None:
     payloads = _overview_payloads()
 

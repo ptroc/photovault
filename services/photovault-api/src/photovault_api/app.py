@@ -77,11 +77,12 @@ def create_app(
     def metadata_handshake(payload: MetadataHandshakeRequest) -> MetadataHandshakeResponse:
         results: list[HandshakeFileResult] = []
         store: UploadStateStore = app.state.upload_state_store
+        known_shas = store.has_shas([file_item.sha256_hex for file_item in payload.files])
 
         for file_item in payload.files:
             decision = (
                 HandshakeDecision.ALREADY_EXISTS
-                if store.has_sha(file_item.sha256_hex)
+                if file_item.sha256_hex in known_shas
                 else HandshakeDecision.UPLOAD_REQUIRED
             )
             results.append(
