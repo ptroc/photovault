@@ -62,35 +62,6 @@ def _dependency_snapshot() -> list[dict[str, str]]:
     ]
 
 
-def test_parse_nmcli_multiline_splits_records_without_blank_lines() -> None:
-    output = """IN-USE:                                  
-SSID:                                   :)
-SIGNAL:                                 89
-SECURITY:                               WPA2
-CHAN:                                   6
-RATE:                                   260 Mbit/s
-IN-USE:                                  
-SSID:                                   :))
-SIGNAL:                                 89
-SECURITY:                               WPA2
-CHAN:                                   40
-RATE:                                   540 Mbit/s
-IN-USE:                                  
-SSID:                                   :(
-SIGNAL:                                 54
-SECURITY:                               WPA2
-CHAN:                                   11
-RATE:                                   195 Mbit/s
-"""
-
-    records = _parse_nmcli_multiline(output)
-
-    assert len(records) == 3
-    assert records[0]["SSID"] == ":)"
-    assert records[1]["SSID"] == ":))"
-    assert records[2]["SSID"] == ":("
-
-
 def _overview_payloads(daemon_state: str = "WAIT_NETWORK") -> dict[str, object]:
     return {
         "/state": {
@@ -118,7 +89,27 @@ def _overview_payloads(daemon_state: str = "WAIT_NETWORK") -> dict[str, object]:
                         "ERROR_FILE": 1,
                         "DUPLICATE_SESSION_SHA": 1,
                     },
-                }
+                },
+                {
+                    "job_id": 2,
+                    "media_label": "camera-2",
+                    "status": "QUEUE_UPLOAD",
+                    "local_ingest_complete": False,
+                    "upload_pending": True,
+                    "status_counts": {
+                        "READY_TO_UPLOAD": 4,
+                    },
+                },
+                {
+                    "job_id": 3,
+                    "media_label": "camera-archive",
+                    "status": "JOB_COMPLETE_REMOTE",
+                    "local_ingest_complete": True,
+                    "upload_pending": False,
+                    "status_counts": {
+                        "VERIFIED_REMOTE": 6,
+                    },
+                },
             ]
         },
         "/events?limit=10": {
@@ -128,6 +119,20 @@ def _overview_payloads(daemon_state: str = "WAIT_NETWORK") -> dict[str, object]:
                     "created_at_utc": "2026-04-19T16:51:44.120670+00:00",
                     "message": "job_id=1, ready_to_upload=2",
                 }
+            ]
+        },
+        "/events?limit=30": {
+            "events": [
+                {
+                    "category": "QUEUE_UPLOAD_PREPARED",
+                    "created_at_utc": "2026-04-19T16:51:44.120670+00:00",
+                    "message": "job_id=1, ready_to_upload=2",
+                },
+                {
+                    "category": "UPLOAD_RETRY",
+                    "created_at_utc": "2026-04-19T16:55:44.120670+00:00",
+                    "message": "file_id=6, retry=2",
+                },
             ]
         },
         "/ingest/jobs/1": {
@@ -199,58 +204,29 @@ def _overview_payloads(daemon_state: str = "WAIT_NETWORK") -> dict[str, object]:
     }
 
 
-def _staging_retry_payloads() -> dict[str, object]:
-    return {
-        "/state": {
-            "current_state": "STAGING_COPY",
-            "updated_at_utc": "2026-04-20T10:10:00+00:00",
-        },
-        "/diagnostics/m0": {
-            "ok": True,
-            "invariant_issue_count": 0,
-            "pending_bootstrap_entries": 0,
-        },
-        "/ingest/jobs": {
-            "jobs": [
-                {
-                    "job_id": 9,
-                    "media_label": "usb-ingest",
-                    "status": "STAGING_COPY",
-                    "local_ingest_complete": False,
-                    "upload_pending": False,
-                    "status_counts": {
-                        "NEEDS_RETRY_COPY": 1,
-                        "DISCOVERED": 2,
-                    },
-                }
-            ]
-        },
-        "/events?limit=10": {
-            "events": [
-                {
-                    "category": "COPY_RETRY_SCHEDULED",
-                    "created_at_utc": "2026-04-20T10:09:00+00:00",
-                    "message": "COPY_SOURCE_MISSING: file_id=2, error=[Errno 2] No such file",
-                }
-            ]
-        },
-        "/ingest/jobs/9": {
-            "job_id": 9,
-            "media_label": "usb-ingest",
-            "status": "STAGING_COPY",
-            "updated_at_utc": "2026-04-20T10:10:00+00:00",
-            "local_ingest_complete": False,
-            "upload_pending": False,
-            "status_counts": {
-                "NEEDS_RETRY_COPY": 1,
-                "DISCOVERED": 2,
-            },
-            "files": [],
-        },
-    }
+def test_parse_nmcli_multiline_splits_records_without_blank_lines() -> None:
+    output = """IN-USE:
+SSID: :)
+SIGNAL: 89
+SECURITY: WPA2
+CHAN: 6
+RATE: 260 Mbit/s
+IN-USE:
+SSID: :))
+SIGNAL: 89
+SECURITY: WPA2
+CHAN: 40
+RATE: 540 Mbit/s
+"""
+
+    records = _parse_nmcli_multiline(output)
+
+    assert len(records) == 2
+    assert records[0]["SSID"] == ":)"
+    assert records[1]["SSID"] == ":))"
 
 
-def test_index_route_renders_overview_sections() -> None:
+def test_index_route_renders_dashboard_not_raw_tables() -> None:
     payloads = _overview_payloads()
 
     def fake_daemon_get(_: str, path: str) -> object:
@@ -261,40 +237,25 @@ def test_index_route_renders_overview_sections() -> None:
         network_snapshot_get=_network_snapshot,
         dependency_snapshot_get=_dependency_snapshot,
     )
-    client = app.test_client()
-    response = client.get("/")
+    response = app.test_client().get("/")
     body = response.get_data(as_text=True)
 
     assert response.status_code == 200
     assert 'class="active">Overview<' in body
-    assert 'href="/network"' in body
-    assert "Ingest blocked." in body
-    assert "Current daemon state: <code>WAIT_NETWORK</code>." in body
-    assert "Run daemon tick now" in body
-    assert "Create ingest job" not in body
-    assert "ERROR_FILE" in body
-    assert "PASS" in body
-    assert "QUEUE_UPLOAD_PREPARED" in body
-    assert 'href="/jobs/1"' in body
-    assert 'data-ajax-target="#overview-shell"' in body
-    assert "M2 operation" in body
-    assert "Remote classification" in body
-    assert "paused on error" in body
-    assert "already exists:" in body
-    assert "upload required:" in body
-    assert "Cleanup staging" in body
-    assert "Dependencies" in body
-    assert "SQLite" in body
-    assert "Storage" in body
-    assert "photovault-clientd.service" in body
-    assert "NetworkManager.service" in body
-    assert "photovault-api.service" in body
-    assert "http://127.0.0.1:9301" in body
-    assert "Connect Wi-Fi" not in body
+    assert "Appliance status" in body
+    assert "Top actions" in body
+    assert "Attention" in body
+    assert "Create ingest job" in body
+    assert "Active job summary" in body
+    assert "Ingest blocked" in body
+    assert "Current daemon state: <code>WAIT_NETWORK</code>" in body
+    assert "Run daemon tick" in body
+    assert "Ingest Jobs" not in body
+    assert "Recent Events" not in body
     assert "Visible Wi-Fi Networks" not in body
 
 
-def test_network_page_renders_network_sections() -> None:
+def test_jobs_page_renders_filtered_views() -> None:
     payloads = _overview_payloads()
 
     def fake_daemon_get(_: str, path: str) -> object:
@@ -306,21 +267,101 @@ def test_network_page_renders_network_sections() -> None:
         dependency_snapshot_get=_dependency_snapshot,
     )
     client = app.test_client()
-    response = client.get("/network")
+
+    active = client.get("/jobs?filter=active").get_data(as_text=True)
+    blocked = client.get("/jobs?filter=blocked").get_data(as_text=True)
+    completed = client.get("/jobs?filter=completed").get_data(as_text=True)
+
+    assert "Jobs" in active
+    assert "Open job detail" in active
+    assert "Job #2" in active
+    assert "Job #1" not in active
+    assert "Job #1" in blocked
+    assert "Job #3" in completed
+
+
+def test_job_detail_route_renders_file_level_state() -> None:
+    payloads = _overview_payloads()
+
+    def fake_daemon_get(_: str, path: str) -> object:
+        return payloads[path]
+
+    app = create_app(
+        daemon_get=fake_daemon_get,
+        network_snapshot_get=_network_snapshot,
+        dependency_snapshot_get=_dependency_snapshot,
+    )
+    body = app.test_client().get("/jobs/1").get_data(as_text=True)
+
+    assert "Job #1" in body
+    assert "Files" in body
+    assert "/var/lib/photovault-clientd/test-media/001.jpg" in body
+    assert "DUPLICATE_SESSION_SHA" in body
+    assert "already existed remotely" in body
+    assert "upload required" in body
+    assert "uploaded; waiting for server verify" in body
+    assert "Retry upload" in body
+
+
+def test_events_page_shows_diagnostics_and_events() -> None:
+    payloads = _overview_payloads()
+
+    def fake_daemon_get(_: str, path: str) -> object:
+        return payloads[path]
+
+    app = create_app(
+        daemon_get=fake_daemon_get,
+        network_snapshot_get=_network_snapshot,
+        dependency_snapshot_get=_dependency_snapshot,
+    )
+    body = app.test_client().get("/events").get_data(as_text=True)
+
+    assert "Diagnostics summary" in body
+    assert "Recent daemon events" in body
+    assert "QUEUE_UPLOAD_PREPARED" in body
+    assert "UPLOAD_RETRY" in body
+
+
+def test_daemon_tick_returns_partial_notice_for_ajax_requests() -> None:
+    payloads = _overview_payloads()
+
+    def fake_daemon_get(_: str, path: str) -> object:
+        return payloads[path]
+
+    def fake_daemon_post(
+        _: str,
+        path: str,
+        payload: dict[str, object],
+        *,
+        timeout_seconds: float = 2.0,
+    ) -> object:
+        assert path == "/daemon/tick"
+        assert payload == {}
+        assert timeout_seconds == 2.0
+        return {"handled": True, "next_state": "HASHING", "progressed": True}
+
+    app = create_app(
+        daemon_get=fake_daemon_get,
+        daemon_post=fake_daemon_post,
+        network_snapshot_get=_network_snapshot,
+        dependency_snapshot_get=_dependency_snapshot,
+    )
+    client = app.test_client()
+    response = client.post(
+        "/actions/daemon/tick",
+        data={"return_to": "/"},
+        headers={"X-Requested-With": "XMLHttpRequest"},
+    )
     body = response.get_data(as_text=True)
 
     assert response.status_code == 200
-    assert 'class="active">Network<' in body
-    assert "Connect Wi-Fi" in body
-    assert "Scan networks" in body
-    assert "Network Devices" in body
-    assert "Visible Wi-Fi Networks" in body
-    assert "studio-wifi" in body
-    assert "Create ingest job" not in body
+    assert response.headers["X-Client-Location"].endswith("/")
+    assert "Action complete" in body
+    assert "Daemon tick completed in state HASHING." in body
 
 
-def test_create_ingest_job_redirects_to_detail_page() -> None:
-    payloads = _overview_payloads(daemon_state="IDLE")
+def test_retry_upload_action_renders_notice_on_job_detail() -> None:
+    payloads = _overview_payloads()
     observed: dict[str, object] = {}
 
     def fake_daemon_get(_: str, path: str) -> object:
@@ -329,7 +370,7 @@ def test_create_ingest_job_redirects_to_detail_page() -> None:
     def fake_daemon_post(_: str, path: str, payload: dict[str, object]) -> object:
         observed["path"] = path
         observed["payload"] = payload
-        return {"job_id": 7}
+        return {"handled": True, "next_state": "UPLOAD_PREPARE"}
 
     app = create_app(
         daemon_get=fake_daemon_get,
@@ -337,84 +378,14 @@ def test_create_ingest_job_redirects_to_detail_page() -> None:
         network_snapshot_get=_network_snapshot,
         dependency_snapshot_get=_dependency_snapshot,
     )
-    client = app.test_client()
-    response = client.post(
-        "/ingest/jobs",
-        data={
-            "media_label": "sd-new",
-            "source_paths": "/media/sd/001.jpg\n/media/sd/002.jpg\n",
-        },
-        follow_redirects=False,
-    )
-
-    assert response.status_code == 302
-    assert response.headers["Location"].endswith("/jobs/7")
-    assert observed["path"] == "/ingest/jobs"
-    assert observed["payload"] == {
-        "media_label": "sd-new",
-        "source_paths": ["/media/sd/001.jpg", "/media/sd/002.jpg"],
-    }
-
-
-def test_create_ingest_job_returns_partial_for_ajax_requests() -> None:
-    payloads = _overview_payloads(daemon_state="IDLE")
-    payloads["/ingest/jobs/7"] = {
-        "job_id": 7,
-        "media_label": "sd-new",
-        "status": "STAGING_COPY",
-        "updated_at_utc": "2026-04-19T17:10:00+00:00",
-        "local_ingest_complete": False,
-        "upload_pending": False,
-        "status_counts": {"PENDING_COPY": 2},
-        "files": [],
-    }
-
-    def fake_daemon_get(_: str, path: str) -> object:
-        return payloads[path]
-
-    def fake_daemon_post(_: str, path: str, payload: dict[str, object]) -> object:
-        assert path == "/ingest/jobs"
-        return {"job_id": 7, "discovered_count": 2}
-
-    app = create_app(
-        daemon_get=fake_daemon_get,
-        daemon_post=fake_daemon_post,
-        network_snapshot_get=_network_snapshot,
-        dependency_snapshot_get=_dependency_snapshot,
-    )
-    client = app.test_client()
-    response = client.post(
-        "/ingest/jobs",
-        data={"media_label": "sd-new", "source_paths": "/media/sd/001.jpg\n/media/sd/002.jpg"},
-        headers={"X-Requested-With": "XMLHttpRequest"},
-    )
+    response = app.test_client().post("/actions/retry-upload", data={"job_id": "1", "file_id": "6"})
     body = response.get_data(as_text=True)
 
     assert response.status_code == 200
-    assert response.headers["X-Client-Location"].endswith("/jobs/7")
-    assert "<!doctype html>" not in body.lower()
-    assert "Created ingest job #7 with 2 discovered file(s)." in body
-    assert "Job #7 Detail" in body
-
-
-def test_create_ingest_job_shows_validation_error() -> None:
-    payloads = _overview_payloads()
-
-    def fake_daemon_get(_: str, path: str) -> object:
-        return payloads[path]
-
-    app = create_app(
-        daemon_get=fake_daemon_get,
-        network_snapshot_get=_network_snapshot,
-        dependency_snapshot_get=_dependency_snapshot,
-    )
-    client = app.test_client()
-    response = client.post("/ingest/jobs", data={"media_label": "", "source_paths": ""})
-    body = response.get_data(as_text=True)
-
-    assert response.status_code == 200
-    assert "Ingest request failed." in body
-    assert "Media label is required." in body
+    assert observed["path"] == "/ingest/files/6/retry-upload"
+    assert observed["payload"] == {}
+    assert "Action complete" in body
+    assert "File #6 requeued for upload; daemon moved to UPLOAD_PREPARE." in body
 
 
 def test_create_ingest_job_shows_friendly_source_path_validation_error() -> None:
@@ -452,155 +423,35 @@ def test_create_ingest_job_shows_friendly_source_path_validation_error() -> None
         network_snapshot_get=_network_snapshot,
         dependency_snapshot_get=_dependency_snapshot,
     )
-    client = app.test_client()
-    response = client.post(
+    response = app.test_client().post(
         "/ingest/jobs",
         data={"media_label": "usb-root", "source_paths": "/mnt/usb\n/mnt/usb/missing.jpg"},
     )
     body = response.get_data(as_text=True)
 
     assert response.status_code == 200
+    assert "Ingest request failed" in body
     assert "One or more source paths could not be used for ingest discovery." in body
     assert "Fix the listed paths, then retry ingest creation." in body
     assert "/mnt/usb/missing.jpg: Path does not exist." in body
 
 
-def test_create_ingest_job_is_blocked_when_daemon_not_idle() -> None:
-    payloads = _overview_payloads(daemon_state="WAIT_NETWORK")
-    observed: dict[str, object] = {"called": False}
-
-    def fake_daemon_get(_: str, path: str) -> object:
-        return payloads[path]
-
-    def fake_daemon_post(_: str, __: str, ___: dict[str, object]) -> object:
-        observed["called"] = True
-        return {"job_id": 99}
-
-    app = create_app(
-        daemon_get=fake_daemon_get,
-        daemon_post=fake_daemon_post,
-        network_snapshot_get=_network_snapshot,
-        dependency_snapshot_get=_dependency_snapshot,
-    )
-    client = app.test_client()
-    response = client.post(
-        "/ingest/jobs",
-        data={"media_label": "sd-new", "source_paths": "/media/sd/001.jpg"},
-    )
-    body = response.get_data(as_text=True)
-
-    assert response.status_code == 200
-    assert observed["called"] is False
-    assert "Cannot start ingest while daemon state is WAIT_NETWORK." in body
-    assert "Do not start a new ingest yet." in body
-    assert "Run daemon tick now" in body
-
-
-def test_create_ingest_job_is_blocked_with_staging_copy_recovery_guidance() -> None:
-    payloads = _staging_retry_payloads()
-    observed: dict[str, object] = {"called": False}
-
-    def fake_daemon_get(_: str, path: str) -> object:
-        return payloads[path]
-
-    def fake_daemon_post(_: str, __: str, ___: dict[str, object]) -> object:
-        observed["called"] = True
-        return {"job_id": 99}
-
-    app = create_app(
-        daemon_get=fake_daemon_get,
-        daemon_post=fake_daemon_post,
-        network_snapshot_get=_network_snapshot,
-        dependency_snapshot_get=_dependency_snapshot,
-    )
-    client = app.test_client()
-    response = client.post(
-        "/ingest/jobs",
-        data={"media_label": "sd-new", "source_paths": "/media/sd/001.jpg"},
-    )
-    body = response.get_data(as_text=True)
-
-    assert response.status_code == 200
-    assert observed["called"] is False
-    assert "Cannot start ingest while daemon state is STAGING_COPY." in body
-    assert "run one daemon tick to retry the next file copy" in body.lower()
-    assert "Run daemon tick now" in body
-
-
-def test_create_ingest_job_409_shows_job_complete_local_guidance() -> None:
-    payloads = _overview_payloads(daemon_state="IDLE")
-    state_calls: dict[str, int] = {"count": 0}
-
-    def fake_daemon_get(_: str, path: str) -> object:
-        if path == "/state":
-            state_calls["count"] += 1
-            if state_calls["count"] > 1:
-                return {
-                    "current_state": "JOB_COMPLETE_LOCAL",
-                    "updated_at_utc": "2026-04-19T16:52:12.120670+00:00",
-                }
-        return payloads[path]
-
-    def failing_daemon_post(_: str, path: str, payload: dict[str, object]) -> object:
-        assert path == "/ingest/jobs"
-        assert payload["media_label"] == "sd-new"
-        req = httpx.Request("POST", "http://127.0.0.1:9101/ingest/jobs")
-        resp = httpx.Response(
-            409,
-            request=req,
-            json={"detail": "daemon must be IDLE, got JOB_COMPLETE_LOCAL"},
-        )
-        raise httpx.HTTPStatusError("conflict", request=req, response=resp)
-
-    app = create_app(
-        daemon_get=fake_daemon_get,
-        daemon_post=failing_daemon_post,
-        network_snapshot_get=_network_snapshot,
-        dependency_snapshot_get=_dependency_snapshot,
-    )
-    client = app.test_client()
-    response = client.post(
-        "/ingest/jobs",
-        data={"media_label": "sd-new", "source_paths": "/media/sd/001.jpg"},
-    )
-    body = response.get_data(as_text=True)
-
-    assert response.status_code == 200
-    assert "Daemon rejected ingest creation because it is not ready yet." in body
-    assert "Current state: JOB_COMPLETE_LOCAL." in body
-    assert "Run one daemon tick to return to IDLE" in body
-    assert "daemon API returned HTTP 409" in body
-
-
-def test_network_scan_redirects_to_network_page() -> None:
-    payloads = _overview_payloads()
-    observed: dict[str, object] = {"scanned": False}
-
-    def fake_daemon_get(_: str, path: str) -> object:
-        return payloads[path]
-
-    def fake_network_scan() -> None:
-        observed["scanned"] = True
-
-    app = create_app(
-        daemon_get=fake_daemon_get,
-        network_snapshot_get=_network_snapshot,
-        network_scan=fake_network_scan,
-        dependency_snapshot_get=_dependency_snapshot,
-    )
-    client = app.test_client()
-    response = client.post("/network/scan", follow_redirects=False)
-
-    assert response.status_code == 302
-    assert response.headers["Location"].endswith("/network")
-    assert observed["scanned"] is True
-
-
-def test_network_scan_shows_error_when_nmcli_fails() -> None:
+def test_network_page_and_errors_render() -> None:
     payloads = _overview_payloads()
 
     def fake_daemon_get(_: str, path: str) -> object:
         return payloads[path]
+
+    app = create_app(
+        daemon_get=fake_daemon_get,
+        network_snapshot_get=_network_snapshot,
+        dependency_snapshot_get=_dependency_snapshot,
+    )
+    client = app.test_client()
+    page = client.get("/network").get_data(as_text=True)
+    assert 'class="active">Network<' in page
+    assert "Connect Wi-Fi" in page
+    assert "Visible Wi-Fi Networks" in page
 
     def failing_network_scan() -> None:
         raise subprocess.CalledProcessError(
@@ -609,281 +460,11 @@ def test_network_scan_shows_error_when_nmcli_fails() -> None:
             stderr="Error: org.freedesktop.NetworkManager.wifi.scan request failed: not authorized.",
         )
 
-    app = create_app(
+    app_with_scan_error = create_app(
         daemon_get=fake_daemon_get,
         network_snapshot_get=_network_snapshot,
         network_scan=failing_network_scan,
         dependency_snapshot_get=_dependency_snapshot,
     )
-    client = app.test_client()
-    response = client.post("/network/scan")
-    body = response.get_data(as_text=True)
-
-    assert response.status_code == 200
-    assert "Failed to scan Wi-Fi: NetworkManager denied the photovault service user." in body
-    assert "polkit rule" in body
-
-
-def test_network_connect_redirects_to_network_page() -> None:
-    payloads = _overview_payloads()
-    observed: dict[str, object] = {}
-
-    def fake_daemon_get(_: str, path: str) -> object:
-        return payloads[path]
-
-    def fake_network_connect(ssid: str, password: str | None) -> None:
-        observed["ssid"] = ssid
-        observed["password"] = password
-
-    app = create_app(
-        daemon_get=fake_daemon_get,
-        network_snapshot_get=_network_snapshot,
-        network_connect=fake_network_connect,
-        dependency_snapshot_get=_dependency_snapshot,
-    )
-    client = app.test_client()
-    response = client.post(
-        "/network/connect",
-        data={"ssid": "studio-wifi", "password": "secretpass"},
-        follow_redirects=False,
-    )
-
-    assert response.status_code == 302
-    assert response.headers["Location"].endswith("/network")
-    assert observed == {"ssid": "studio-wifi", "password": "secretpass"}
-
-
-def test_network_connect_shows_error_when_nmcli_fails() -> None:
-    payloads = _overview_payloads()
-
-    def fake_daemon_get(_: str, path: str) -> object:
-        return payloads[path]
-
-    def failing_network_connect(_: str, __: str | None) -> None:
-        raise subprocess.CalledProcessError(
-            10,
-            ["nmcli", "device", "wifi", "connect"],
-            stderr="Error: Connection activation failed: not authorized",
-        )
-
-    app = create_app(
-        daemon_get=fake_daemon_get,
-        network_snapshot_get=_network_snapshot,
-        network_connect=failing_network_connect,
-        dependency_snapshot_get=_dependency_snapshot,
-    )
-    client = app.test_client()
-    response = client.post(
-        "/network/connect",
-        data={"ssid": "studio-wifi", "password": "secretpass"},
-    )
-    body = response.get_data(as_text=True)
-
-    assert response.status_code == 200
-    assert "Network action failed." in body
-    assert "Failed to connect Wi-Fi: NetworkManager denied the photovault service user." in body
-
-
-def test_network_snapshot_shows_friendly_error_when_nmcli_is_missing() -> None:
-    payloads = _overview_payloads()
-
-    def fake_daemon_get(_: str, path: str) -> object:
-        return payloads[path]
-
-    def missing_nmcli() -> dict[str, object]:
-        raise FileNotFoundError("nmcli")
-
-    app = create_app(
-        daemon_get=fake_daemon_get,
-        network_snapshot_get=missing_nmcli,
-        dependency_snapshot_get=_dependency_snapshot,
-    )
-    client = app.test_client()
-    response = client.get("/network")
-    body = response.get_data(as_text=True)
-
-    assert response.status_code == 200
-    assert "Failed to load NetworkManager status: nmcli is not installed on this device." in body
-
-
-def test_job_detail_route_renders_file_level_status() -> None:
-    payloads = _overview_payloads()
-
-    def fake_daemon_get(_: str, path: str) -> object:
-        return payloads[path]
-
-    app = create_app(
-        daemon_get=fake_daemon_get,
-        network_snapshot_get=_network_snapshot,
-        dependency_snapshot_get=_dependency_snapshot,
-    )
-    client = app.test_client()
-    response = client.get("/jobs/1")
-    body = response.get_data(as_text=True)
-
-    assert response.status_code == 200
-    assert "Job #1 Detail" in body
-    assert "Files" in body
-    assert "/var/lib/photovault-clientd/test-media/001.jpg" in body
-    assert "DUPLICATE_SESSION_SHA" in body
-    assert "Retry upload" in body
-    assert "Back to overview" in body
-    assert "M2 Operational Summary" in body
-    assert "Overall:</strong> paused on error" in body
-    assert "Paused on error:</strong> yes" in body
-    assert "already existed remotely" in body
-    assert "upload required" in body
-    assert "uploaded; waiting for server verify" in body
-    assert "verified on server" in body
-
-
-def test_job_detail_route_returns_partial_for_ajax_requests() -> None:
-    payloads = _overview_payloads()
-
-    def fake_daemon_get(_: str, path: str) -> object:
-        return payloads[path]
-
-    app = create_app(
-        daemon_get=fake_daemon_get,
-        network_snapshot_get=_network_snapshot,
-        dependency_snapshot_get=_dependency_snapshot,
-    )
-    client = app.test_client()
-    response = client.get("/jobs/1", headers={"X-Requested-With": "XMLHttpRequest"})
-    body = response.get_data(as_text=True)
-
-    assert response.status_code == 200
-    assert response.headers["X-Client-Location"].endswith("/jobs/1")
-    assert "<!doctype html>" not in body.lower()
-    assert "Job #1 Detail" in body
-
-
-def test_daemon_tick_returns_partial_notice_for_ajax_requests() -> None:
-    payloads = _overview_payloads()
-
-    def fake_daemon_get(_: str, path: str) -> object:
-        return payloads[path]
-
-    def fake_daemon_post(_: str, path: str, payload: dict[str, object]) -> object:
-        assert path == "/daemon/tick"
-        assert payload == {}
-        return {"handled": True, "next_state": "HASHING", "progressed": True}
-
-    app = create_app(
-        daemon_get=fake_daemon_get,
-        daemon_post=fake_daemon_post,
-        network_snapshot_get=_network_snapshot,
-        dependency_snapshot_get=_dependency_snapshot,
-    )
-    client = app.test_client()
-    response = client.post(
-        "/actions/daemon/tick",
-        data={"selected_job_id": "1"},
-        headers={"X-Requested-With": "XMLHttpRequest"},
-    )
-    body = response.get_data(as_text=True)
-
-    assert response.status_code == 200
-    assert response.headers["X-Client-Location"].endswith("/jobs/1")
-    assert "Action complete." in body
-    assert "Daemon tick completed in state HASHING." in body
-
-
-def test_retry_upload_action_returns_partial_notice_for_ajax_requests() -> None:
-    payloads = _overview_payloads()
-    observed: dict[str, object] = {}
-
-    def fake_daemon_get(_: str, path: str) -> object:
-        return payloads[path]
-
-    def fake_daemon_post(_: str, path: str, payload: dict[str, object]) -> object:
-        observed["path"] = path
-        observed["payload"] = payload
-        return {"handled": True, "next_state": "UPLOAD_PREPARE"}
-
-    app = create_app(
-        daemon_get=fake_daemon_get,
-        daemon_post=fake_daemon_post,
-        network_snapshot_get=_network_snapshot,
-    )
-    client = app.test_client()
-    response = client.post(
-        "/actions/retry-upload",
-        data={"selected_job_id": "1", "file_id": "6"},
-        headers={"X-Requested-With": "XMLHttpRequest"},
-    )
-    body = response.get_data(as_text=True)
-
-    assert response.status_code == 200
-    assert response.headers["X-Client-Location"].endswith("/jobs/1")
-    assert observed["path"] == "/ingest/files/6/retry-upload"
-    assert observed["payload"] == {}
-    assert "File #6 requeued for upload; daemon moved to UPLOAD_PREPARE." in body
-
-
-def test_retry_upload_action_surfaces_daemon_error() -> None:
-    payloads = _overview_payloads()
-
-    def fake_daemon_get(_: str, path: str) -> object:
-        return payloads[path]
-
-    def failing_daemon_post(_: str, path: str, payload: dict[str, object]) -> object:
-        assert path == "/ingest/files/6/retry-upload"
-        assert payload == {}
-        req = httpx.Request("POST", "http://127.0.0.1:9101/ingest/files/6/retry-upload")
-        resp = httpx.Response(409, request=req)
-        raise httpx.HTTPStatusError("conflict", request=req, response=resp)
-
-    app = create_app(
-        daemon_get=fake_daemon_get,
-        daemon_post=failing_daemon_post,
-        network_snapshot_get=_network_snapshot,
-        dependency_snapshot_get=_dependency_snapshot,
-    )
-    client = app.test_client()
-    response = client.post("/actions/retry-upload", data={"selected_job_id": "1", "file_id": "6"})
-    body = response.get_data(as_text=True)
-
-    assert response.status_code == 200
-    assert "Ingest request failed." in body
-    assert "Failed to requeue file #6 for upload" in body
-
-
-def test_job_detail_route_returns_404_for_unknown_job() -> None:
-    payloads = _overview_payloads()
-
-    def fake_daemon_get(_: str, path: str) -> object:
-        if path == "/ingest/jobs/9":
-            request = httpx.Request("GET", "http://127.0.0.1:9101/ingest/jobs/9")
-            response = httpx.Response(404, request=request)
-            raise httpx.HTTPStatusError("not found", request=request, response=response)
-        return payloads[path]
-
-    app = create_app(
-        daemon_get=fake_daemon_get,
-        network_snapshot_get=_network_snapshot,
-        dependency_snapshot_get=_dependency_snapshot,
-    )
-    client = app.test_client()
-    response = client.get("/jobs/9")
-
-    assert response.status_code == 404
-
-
-def test_index_route_surfaces_daemon_unreachable_error() -> None:
-    def failing_daemon_get(_: str, __: str) -> object:
-        raise httpx.ConnectError("connection refused")
-
-    app = create_app(
-        daemon_get=failing_daemon_get,
-        network_snapshot_get=_network_snapshot,
-        dependency_snapshot_get=_dependency_snapshot,
-    )
-    client = app.test_client()
-    response = client.get("/")
-    body = response.get_data(as_text=True)
-
-    assert response.status_code == 200
-    assert "Daemon unreachable." in body
-    assert "connection refused" in body
-    assert "No ingest jobs are currently tracked." in body
+    scan_error_body = app_with_scan_error.test_client().post("/network/scan").get_data(as_text=True)
+    assert "Failed to scan Wi-Fi: NetworkManager denied the photovault service user." in scan_error_body

@@ -1,0 +1,143 @@
+{% extends "_base.html" %}
+
+{% block content %}
+  <section class="section card stack">
+    <div class="section-title">
+      <h2>Job #{{ selected_job.job_id }}</h2>
+      <span class="muted">{{ selected_job.media_label }}</span>
+    </div>
+
+    {% if action_error %}
+      <div class="banner banner-critical">
+        <strong>Action failed</strong>
+        <span>{{ action_error }}</span>
+      </div>
+    {% endif %}
+    {% if action_notice %}
+      <div class="banner banner-success">
+        <strong>Action complete</strong>
+        <span>{{ action_notice }}</span>
+      </div>
+    {% endif %}
+
+    <div class="kpi-grid">
+      <div class="kpi-box">
+        <span class="muted">Job status</span>
+        <span class="kpi-value">{{ selected_job.status }}</span>
+      </div>
+      <div class="kpi-box">
+        <span class="muted">M2 operation</span>
+        <span class="kpi-value {% if selected_job.m2.paused_on_error %}status-error{% elif selected_job.m2.remote_complete %}status-ok{% else %}status-active{% endif %}">
+          {{ selected_job.m2.operation_state_label }}
+        </span>
+      </div>
+      <div class="kpi-box">
+        <span class="muted">Remote complete</span>
+        <span class="kpi-value {% if selected_job.m2.remote_complete %}status-ok{% else %}status-warn{% endif %}">
+          {% if selected_job.m2.remote_complete %}yes{% else %}no{% endif %}
+        </span>
+      </div>
+      <div class="kpi-box">
+        <span class="muted">Upload pending</span>
+        <span class="kpi-value {% if selected_job.upload_pending %}status-warn{% else %}status-ok{% endif %}">
+          {% if selected_job.upload_pending %}yes{% else %}no{% endif %}
+        </span>
+      </div>
+    </div>
+
+    <div class="action-row">
+      <form method="post" action="/actions/daemon/tick">
+        <input type="hidden" name="return_to" value="/jobs/{{ selected_job.job_id }}">
+        <button type="submit">Run daemon tick</button>
+      </form>
+      <a class="button-link" href="/jobs?filter=active">Back to jobs</a>
+    </div>
+  </section>
+
+  <section class="section card stack">
+    <h2>Status counts</h2>
+    {% if selected_job.status_counts %}
+      <div class="kpi-grid">
+        {% for status, count in selected_job.status_counts.items() %}
+          <div class="kpi-box">
+            <span class="muted"><code>{{ status }}</code></span>
+            <span class="kpi-value">{{ count }}</span>
+          </div>
+        {% endfor %}
+      </div>
+    {% else %}
+      <p class="muted">No status counters available.</p>
+    {% endif %}
+  </section>
+
+  <section class="section card stack">
+    <h2>Files</h2>
+    {% if selected_job.files %}
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>File</th>
+              <th>Status</th>
+              <th>SHA</th>
+              <th>Remote class</th>
+              <th>Upload/verify phase</th>
+              <th>Retries</th>
+              <th>Last error</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for file in selected_job.files %}
+              <tr>
+                <td>
+                  <strong>#{{ file.file_id }}</strong><br>
+                  <span class="muted">{{ file.source_path }}</span>
+                </td>
+                <td><code>{{ file.status }}</code></td>
+                <td>
+                  {% if file.sha256_hex %}
+                    <code>{{ file.sha256_hex }}</code>
+                  {% else %}
+                    <span class="muted">pending</span>
+                  {% endif %}
+                </td>
+                <td>
+                  {% if file.m2.classification_key == "REMOTE_ALREADY_EXISTS" %}
+                    <span class="status-ok">{{ file.m2.classification_label }}</span>
+                  {% elif file.m2.classification_key == "UPLOAD_REQUIRED" %}
+                    <span class="status-warn">{{ file.m2.classification_label }}</span>
+                  {% else %}
+                    <span class="muted">{{ file.m2.classification_label }}</span>
+                  {% endif %}
+                </td>
+                <td>{{ file.m2.phase_label }}</td>
+                <td>{{ file.retry_count }}</td>
+                <td>
+                  {% if file.last_error %}
+                    <span class="status-error">{{ file.last_error }}</span>
+                  {% else %}
+                    <span class="muted">none</span>
+                  {% endif %}
+                </td>
+                <td>
+                  {% if file.status == "ERROR_FILE" %}
+                    <form method="post" action="/actions/retry-upload">
+                      <input type="hidden" name="job_id" value="{{ selected_job.job_id }}">
+                      <input type="hidden" name="file_id" value="{{ file.file_id }}">
+                      <button type="submit">Retry upload</button>
+                    </form>
+                  {% else %}
+                    <span class="muted">n/a</span>
+                  {% endif %}
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% else %}
+      <p class="muted">No file records for this job yet.</p>
+    {% endif %}
+  </section>
+{% endblock %}

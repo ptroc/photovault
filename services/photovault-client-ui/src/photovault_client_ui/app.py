@@ -12,6 +12,8 @@ from flask import Flask, Response, abort, make_response, redirect, render_templa
 
 DEFAULT_DAEMON_BASE_URL = "http://127.0.0.1:9101"
 DEFAULT_HTTP_TIMEOUT_SECONDS = 2.0
+DEFAULT_TICK_TIMEOUT_SECONDS = 2.0
+DEFAULT_TICK_STATUS_REFRESH_MS = 1500
 DEFAULT_CLIENT_DB_PATH = Path("/var/lib/photovault-clientd/state.sqlite3")
 DEFAULT_STAGING_ROOT = Path("/var/lib/photovault-clientd/staging")
 DEFAULT_SERVER_API_URL = "http://127.0.0.1:9301"
@@ -27,6 +29,21 @@ _UPLOAD_REQUIRED_STATUSES = {
 _REMOTE_TERMINAL_STATUSES = {"VERIFIED_REMOTE", "DUPLICATE_SHA_GLOBAL"}
 _PAUSED_ERROR_JOB_STATUSES = {"ERROR_FILE", "ERROR_JOB", "PAUSED_STORAGE"}
 _REMOTE_COMPLETE_JOB_STATUSES = {"JOB_COMPLETE_REMOTE", "JOB_COMPLETE_LOCAL"}
+_ACTIVE_DAEMON_STATES = {
+    "STAGING_COPY",
+    "HASHING",
+    "DEDUP_SESSION_SHA",
+    "DEDUP_LOCAL_SHA",
+    "QUEUE_UPLOAD",
+    "UPLOAD_PREPARE",
+    "UPLOAD_FILE",
+    "SERVER_VERIFY",
+    "REUPLOAD_OR_QUARANTINE",
+    "POST_UPLOAD_VERIFY",
+    "CLEANUP_STAGING",
+    "VERIFY_IDLE",
+    "VERIFY_HASH",
+}
 
 _M2_PHASE_LABELS = {
     "READY_TO_UPLOAD": "queued for upload",
@@ -282,6 +299,134 @@ def _annotate_job_record(job: dict[str, Any]) -> dict[str, Any]:
     return annotated
 
 
+def _job_filter_key(job: dict[str, Any]) -> str:
+    status = str(job.get("status", ""))
+    m2 = job.get("m2", {})
+    paused_on_error = bool(m2.get("paused_on_error"))
+    remote_complete = bool(m2.get("remote_complete")) or status in _REMOTE_COMPLETE_JOB_STATUSES
+    if remote_complete:
+        return "completed"
+    if paused_on_error or status in _PAUSED_ERROR_JOB_STATUSES:
+        return "blocked"
+    return "active"
+
+
+def _filter_jobs(jobs: list[dict[str, Any]], selected_filter: str) -> list[dict[str, Any]]:
+    if selected_filter == "all":
+        return jobs
+    return [job for job in jobs if _job_filter_key(job) == selected_filter]
+
+
+def _daemon_health_label(state: dict[str, Any] | None, daemon_error: str | None) -> tuple[str, str]:
+    if daemon_error:
+        return "critical", "Daemon API unreachable"
+    if not state:
+        return "warning", "State unavailable"
+    current_state = str(state.get("current_state", "UNKNOWN"))
+    if current_state in {"ERROR_DAEMON", "ERROR_JOB", "PAUSED_STORAGE"}:
+        return "critical", "Blocked by daemon or storage error"
+    if current_state in {"WAIT_NETWORK", "WAIT_MEDIA"}:
+        return "warning", "Waiting for external dependency"
+    if current_state == "IDLE":
+        return "ok", "Idle and ready"
+    if current_state in _ACTIVE_DAEMON_STATES:
+        return "active", "Processing workload"
+    return "warning", "Unknown daemon state"
+
+
+def _dependency_health_label(dependencies: list[dict[str, str]]) -> tuple[str, int]:
+    degraded_count = 0
+    for dependency in dependencies:
+        status = str(dependency.get("status", ""))
+        if status not in {"ready", "active"}:
+            degraded_count += 1
+    if degraded_count == 0:
+        return "ok", 0
+    return "warning", degraded_count
+
+
+def _build_overview_metrics(
+    *,
+    jobs: list[dict[str, Any]],
+    state: dict[str, Any] | None,
+    daemon_error: str | None,
+    diagnostics: dict[str, Any] | None,
+    dependencies: list[dict[str, str]],
+) -> dict[str, Any]:
+    active_jobs = [job for job in jobs if _job_filter_key(job) == "active"]
+    blocked_jobs = [job for job in jobs if _job_filter_key(job) == "blocked"]
+    completed_jobs = [job for job in jobs if _job_filter_key(job) == "completed"]
+    upload_pending_jobs = [job for job in jobs if bool(job.get("upload_pending"))]
+
+    daemon_health_level, daemon_health_label = _daemon_health_label(state, daemon_error)
+    dependency_health_level, dependency_degraded_count = _dependency_health_label(dependencies)
+
+    alerts: list[dict[str, str]] = []
+    if daemon_error:
+        alerts.append(
+            {
+                "severity": "critical",
+                "title": "Daemon API unavailable",
+                "message": "Control surface cannot refresh state; check photovault-clientd.service first.",
+            }
+        )
+    if blocked_jobs:
+        alerts.append(
+            {
+                "severity": "critical",
+                "title": f"{len(blocked_jobs)} blocked job(s)",
+                "message": "Open Jobs and resolve upload/verify/storage errors before starting new ingest work.",
+            }
+        )
+    current_state = str((state or {}).get("current_state", "UNKNOWN"))
+    if current_state == "WAIT_NETWORK":
+        alerts.append(
+            {
+                "severity": "warning",
+                "title": "Waiting for network",
+                "message": "Upload and verify progression is gated until connectivity returns.",
+            }
+        )
+    if dependency_degraded_count > 0:
+        alerts.append(
+            {
+                "severity": "warning",
+                "title": f"{dependency_degraded_count} degraded dependency",
+                "message": "Review dependency health panel for service/storage readiness issues.",
+            }
+        )
+    if diagnostics and int(diagnostics.get("invariant_issue_count", 0)) > 0:
+        alerts.append(
+            {
+                "severity": "critical",
+                "title": "Invariant issues detected",
+                "message": "Open diagnostics and inspect daemon events before continuing normal operations.",
+            }
+        )
+
+    if alerts:
+        next_action = "Address alerts first, then run one daemon tick to confirm recovery."
+    elif current_state == "IDLE":
+        next_action = "Create the next ingest job when new media is ready."
+    elif current_state in _TICK_ACTION_STATES:
+        next_action = "Run one daemon tick to advance current state-machine work."
+    else:
+        next_action = "Monitor current work and use Jobs for detailed progress."
+
+    return {
+        "daemon_health_level": daemon_health_level,
+        "daemon_health_label": daemon_health_label,
+        "dependency_health_level": dependency_health_level,
+        "active_jobs_count": len(active_jobs),
+        "blocked_jobs_count": len(blocked_jobs),
+        "completed_jobs_count": len(completed_jobs),
+        "upload_pending_jobs_count": len(upload_pending_jobs),
+        "alerts": alerts,
+        "highlight_jobs": (blocked_jobs + active_jobs)[:3],
+        "next_action": next_action,
+    }
+
+
 def _daemon_get(daemon_base_url: str, path: str) -> Any:
     with httpx.Client(base_url=daemon_base_url, timeout=DEFAULT_HTTP_TIMEOUT_SECONDS) as client:
         response = client.get(path)
@@ -289,8 +434,14 @@ def _daemon_get(daemon_base_url: str, path: str) -> Any:
         return response.json()
 
 
-def _daemon_post(daemon_base_url: str, path: str, payload: dict[str, Any]) -> Any:
-    with httpx.Client(base_url=daemon_base_url, timeout=DEFAULT_HTTP_TIMEOUT_SECONDS) as client:
+def _daemon_post(
+    daemon_base_url: str,
+    path: str,
+    payload: dict[str, Any],
+    *,
+    timeout_seconds: float = DEFAULT_HTTP_TIMEOUT_SECONDS,
+) -> Any:
+    with httpx.Client(base_url=daemon_base_url, timeout=timeout_seconds) as client:
         response = client.post(path, json=payload)
         response.raise_for_status()
         return response.json()
@@ -492,7 +643,7 @@ def create_app(
     def _is_ajax_request() -> bool:
         return request.headers.get("X-Requested-With") == "XMLHttpRequest"
 
-    def _load_daemon_context() -> dict[str, Any]:
+    def _load_daemon_context(*, events_limit: int = 10) -> dict[str, Any]:
         context: dict[str, Any] = {
             "daemon_error": None,
             "daemon_error_detail": None,
@@ -505,7 +656,7 @@ def create_app(
             context["state"] = daemon_get(daemon_base_url, "/state")
             context["diagnostics"] = daemon_get(daemon_base_url, "/diagnostics/m0")
             jobs_payload = daemon_get(daemon_base_url, "/ingest/jobs")
-            events_payload = daemon_get(daemon_base_url, "/events?limit=10")
+            events_payload = daemon_get(daemon_base_url, f"/events?limit={events_limit}")
             context["jobs"] = list(jobs_payload.get("jobs", []))
             context["events"] = list(events_payload.get("events", []))
         except httpx.HTTPError as exc:
@@ -547,34 +698,40 @@ def create_app(
 
     def _render_overview(
         *,
-        selected_job_id: int | None = None,
         ingest_error: str | None = None,
         ingest_error_detail: str | None = None,
         ingest_notice: str | None = None,
         operator_notice: str | None = None,
+        operator_notice_pending: bool = False,
+        auto_refresh_ms: int | None = None,
         form_data: dict[str, str] | None = None,
-    ) -> Response | str:
+    ) -> Response:
         ingest_form = {"media_label": "", "source_paths": ""}
         if form_data:
             ingest_form.update(form_data)
         context = _load_daemon_context()
         context["jobs"] = [_annotate_job_record(job) for job in context["jobs"]]
-        selected_job, selected_job_error = _load_selected_job(selected_job_id)
-        if selected_job_error and context["daemon_error"] is None:
-            context["daemon_error"] = selected_job_error
-        if selected_job is not None:
-            selected_job = _annotate_job_record(selected_job)
+        dependencies = dependency_snapshot_get()
         ingest_gate = _build_ingest_gate(context["state"])
+        overview_metrics = _build_overview_metrics(
+            jobs=context["jobs"],
+            state=context["state"],
+            daemon_error=context["daemon_error"],
+            diagnostics=context["diagnostics"],
+            dependencies=dependencies,
+        )
         context.update(
             {
-                "dependencies": dependency_snapshot_get(),
+                "dependencies": dependencies,
+                "overview_metrics": overview_metrics,
                 "daemon_base_url": daemon_base_url,
-                "selected_job": selected_job,
-                "selected_job_id": selected_job_id,
                 "ingest_error": ingest_error,
                 "ingest_error_detail": ingest_error_detail,
                 "ingest_notice": ingest_notice,
                 "operator_notice": operator_notice,
+                "operator_notice_pending": operator_notice_pending,
+                "auto_refresh_ms": auto_refresh_ms,
+                "auto_refresh_path": url_for("index"),
                 "ingest_form": ingest_form,
                 "ingest_gate": ingest_gate,
                 "active_page": "overview",
@@ -582,11 +739,61 @@ def create_app(
         )
         template_name = "_overview_content.html" if _is_ajax_request() else "overview.html"
         response = make_response(render_template(template_name, **context))
-        if selected_job_id is not None:
-            response.headers["X-Client-Location"] = url_for("job_detail", job_id=selected_job_id)
-        else:
-            response.headers["X-Client-Location"] = url_for("index")
+        response.headers["X-Client-Location"] = url_for("index")
         return response
+
+    def _render_jobs(*, selected_filter: str = "active") -> str:
+        context = _load_daemon_context()
+        jobs = [_annotate_job_record(job) for job in context["jobs"]]
+        effective_filter = selected_filter if selected_filter in {"active", "blocked", "completed", "all"} else "active"
+        filtered_jobs = _filter_jobs(jobs, effective_filter)
+        context.update(
+            {
+                "daemon_base_url": daemon_base_url,
+                "jobs": filtered_jobs,
+                "job_filter": effective_filter,
+                "job_filter_counts": {
+                    "active": len(_filter_jobs(jobs, "active")),
+                    "blocked": len(_filter_jobs(jobs, "blocked")),
+                    "completed": len(_filter_jobs(jobs, "completed")),
+                    "all": len(jobs),
+                },
+                "active_page": "jobs",
+            }
+        )
+        return render_template("jobs.html", **context)
+
+    def _render_job_detail(job_id: int, *, action_error: str | None = None, action_notice: str | None = None) -> str:
+        context = _load_daemon_context()
+        selected_job, selected_job_error = _load_selected_job(job_id)
+        if selected_job is None:
+            if selected_job_error == f"job_id {job_id} not found":
+                abort(404, description=selected_job_error)
+            if context["daemon_error"] is None:
+                context["daemon_error"] = selected_job_error
+            return _render_jobs(selected_filter="all")
+
+        selected_job = _annotate_job_record(selected_job)
+        context.update(
+            {
+                "daemon_base_url": daemon_base_url,
+                "selected_job": selected_job,
+                "active_page": "jobs",
+                "action_error": action_error,
+                "action_notice": action_notice,
+            }
+        )
+        return render_template("job_detail.html", **context)
+
+    def _render_events() -> str:
+        context = _load_daemon_context(events_limit=30)
+        context.update(
+            {
+                "daemon_base_url": daemon_base_url,
+                "active_page": "events",
+            }
+        )
+        return render_template("events.html", **context)
 
     def _render_network(
         *,
@@ -609,8 +816,16 @@ def create_app(
         return render_template("network.html", **context)
 
     @app.get("/")
-    def index() -> str:
+    def index() -> Response:
         return _render_overview()
+
+    @app.get("/jobs")
+    def jobs_page() -> str:
+        return _render_jobs(selected_filter=request.args.get("filter", "active"))
+
+    @app.get("/events")
+    def events_page() -> str:
+        return _render_events()
 
     @app.get("/network")
     def network_page() -> str:
@@ -697,20 +912,43 @@ def create_app(
         else:
             notice = f"Created ingest job #{created['job_id']} with {discovered_count} discovered file(s)."
         if _is_ajax_request():
-            return _render_overview(
-                selected_job_id=created["job_id"],
-                ingest_notice=notice,
-            )
+            return _render_overview(ingest_notice=notice)
         return redirect(url_for("job_detail", job_id=created["job_id"]))
 
     @app.post("/actions/daemon/tick")
-    def tick_daemon() -> Response | str:
-        selected_job_id = request.form.get("selected_job_id", type=int)
+    def tick_daemon() -> Response:
+        return_to = request.form.get("return_to", "").strip()
         try:
-            outcome = daemon_post(daemon_base_url, "/daemon/tick", {})
-        except httpx.HTTPError as exc:
+            outcome = daemon_post(
+                daemon_base_url,
+                "/daemon/tick",
+                {},
+                timeout_seconds=DEFAULT_TICK_TIMEOUT_SECONDS,
+            )
+        except httpx.TimeoutException:
+            if return_to and return_to.startswith("/jobs/"):
+                return redirect(return_to)
             return _render_overview(
-                selected_job_id=selected_job_id,
+                operator_notice="Daemon action is still running. Refreshing status...",
+                operator_notice_pending=True,
+                auto_refresh_ms=DEFAULT_TICK_STATUS_REFRESH_MS,
+            )
+        except httpx.HTTPError as exc:
+            if return_to and return_to.startswith("/jobs/"):
+                try:
+                    job_id = int(return_to.rsplit("/", 1)[-1])
+                except ValueError:
+                    return _render_overview(
+                        ingest_error="Failed to run daemon tick.",
+                        ingest_error_detail=_describe_http_error(exc),
+                    )
+                return make_response(
+                    _render_job_detail(
+                        job_id,
+                        action_error=f"Failed to run daemon tick: {_describe_http_error(exc)}",
+                    )
+                )
+            return _render_overview(
                 ingest_error="Failed to run daemon tick.",
                 ingest_error_detail=_describe_http_error(exc),
             )
@@ -720,35 +958,41 @@ def create_app(
             message = f"Daemon tick completed in state {next_state}."
         else:
             message = f"Daemon tick was a no-op in state {outcome.get('state', 'UNKNOWN')}."
-        return _render_overview(
-            selected_job_id=selected_job_id,
-            operator_notice=message,
-        )
+
+        if return_to and return_to.startswith("/jobs/"):
+            try:
+                job_id = int(return_to.rsplit("/", 1)[-1])
+            except ValueError:
+                return _render_overview(operator_notice=message)
+            return make_response(_render_job_detail(job_id, action_notice=message))
+        return _render_overview(operator_notice=message)
 
     @app.post("/actions/retry-upload")
-    def retry_error_upload() -> Response | str:
-        selected_job_id = request.form.get("selected_job_id", type=int)
+    def retry_error_upload() -> Response:
         file_id = request.form.get("file_id", type=int)
+        job_id = request.form.get("job_id", type=int)
         if file_id is None:
-            return _render_overview(
-                selected_job_id=selected_job_id,
-                ingest_error="Missing file_id for retry action.",
-            )
+            if job_id is not None:
+                return make_response(_render_job_detail(job_id, action_error="Missing file_id for retry action."))
+            return _render_overview(ingest_error="Missing file_id for retry action.")
         try:
             outcome = daemon_post(daemon_base_url, f"/ingest/files/{file_id}/retry-upload", {})
         except httpx.HTTPError as exc:
+            detail = _describe_http_error(exc)
+            if job_id is not None:
+                return make_response(
+                    _render_job_detail(job_id, action_error=f"Failed to requeue file #{file_id} for upload: {detail}")
+                )
             return _render_overview(
-                selected_job_id=selected_job_id,
                 ingest_error=f"Failed to requeue file #{file_id} for upload.",
-                ingest_error_detail=_describe_http_error(exc),
+                ingest_error_detail=detail,
             )
 
         next_state = outcome.get("next_state", "UPLOAD_PREPARE")
         message = f"File #{file_id} requeued for upload; daemon moved to {next_state}."
-        return _render_overview(
-            selected_job_id=selected_job_id,
-            operator_notice=message,
-        )
+        if job_id is not None:
+            return make_response(_render_job_detail(job_id, action_notice=message))
+        return _render_overview(operator_notice=message)
 
     @app.post("/network/scan")
     def scan_wifi() -> Any:
@@ -782,11 +1026,6 @@ def create_app(
 
     @app.get("/jobs/<int:job_id>")
     def job_detail(job_id: int) -> str:
-        selected_job, selected_job_error = _load_selected_job(job_id)
-        if selected_job is None:
-            if selected_job_error == f"job_id {job_id} not found":
-                abort(404, description=selected_job_error)
-            return _render_overview()
-        return _render_overview(selected_job_id=job_id)
+        return _render_job_detail(job_id)
 
     return app

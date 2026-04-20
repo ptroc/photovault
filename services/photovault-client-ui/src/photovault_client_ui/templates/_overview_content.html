@@ -1,10 +1,133 @@
-<section id="overview-shell">
-  <section class="overview-top">
-    <article class="card">
-      <h2>Start Ingest</h2>
+<section
+  id="overview-shell"
+  {% if auto_refresh_ms and auto_refresh_path %}
+    data-auto-refresh-ms="{{ auto_refresh_ms }}"
+    data-auto-refresh-path="{{ auto_refresh_path }}"
+  {% endif %}
+>
+  <section class="section dashboard-grid">
+    <article class="card stack">
+      <div class="section-title">
+        <h2>Appliance status</h2>
+        {% if state %}
+          <span class="pill active">{{ state.current_state }}</span>
+        {% endif %}
+      </div>
+      <div class="kpi-grid">
+        <div class="kpi-box">
+          <span class="muted">Daemon health</span>
+          <span class="kpi-value {% if overview_metrics.daemon_health_level == 'critical' %}status-error{% elif overview_metrics.daemon_health_level == 'warning' %}status-warn{% elif overview_metrics.daemon_health_level == 'active' %}status-active{% else %}status-ok{% endif %}">
+            {{ overview_metrics.daemon_health_label }}
+          </span>
+        </div>
+        <div class="kpi-box">
+          <span class="muted">Ingest/upload activity</span>
+          <span class="kpi-value status-active">{{ overview_metrics.active_jobs_count }}</span>
+          <span class="muted">active jobs</span>
+        </div>
+        <div class="kpi-box">
+          <span class="muted">Blocked work</span>
+          <span class="kpi-value {% if overview_metrics.blocked_jobs_count > 0 %}status-error{% else %}status-ok{% endif %}">
+            {{ overview_metrics.blocked_jobs_count }}
+          </span>
+          <span class="muted">jobs need attention</span>
+        </div>
+        <div class="kpi-box">
+          <span class="muted">Upload pending</span>
+          <span class="kpi-value {% if overview_metrics.upload_pending_jobs_count > 0 %}status-warn{% else %}status-ok{% endif %}">
+            {{ overview_metrics.upload_pending_jobs_count }}
+          </span>
+          <span class="muted">jobs still uploading</span>
+        </div>
+      </div>
+      <p class="muted">
+        Next operator action: <strong>{{ overview_metrics.next_action }}</strong>
+      </p>
+      {% if state %}
+        <p class="muted">Last state update: {{ state.updated_at_utc }}</p>
+      {% endif %}
+    </article>
+
+    <article class="card stack">
+      <h2>Top actions</h2>
+      {% if operator_notice %}
+        <div class="banner {% if operator_notice_pending %}banner-warning{% else %}banner-success{% endif %}">
+          <strong>{% if operator_notice_pending %}Action in progress{% else %}Action complete{% endif %}</strong>
+          <span>{{ operator_notice }}</span>
+        </div>
+      {% endif %}
+      <div class="action-row">
+        <form method="post" action="/actions/daemon/tick" data-ajax-target="#overview-shell">
+          <input type="hidden" name="return_to" value="/">
+          <button
+            type="submit"
+            data-idle-label="Run daemon tick"
+            data-busy-label="Running daemon tick..."
+          >Run daemon tick</button>
+        </form>
+        <a class="button-link" href="/jobs">Open jobs</a>
+        <a class="button-link" href="/network">Open network</a>
+      </div>
+      {% if ingest_gate.can_start %}
+        <div class="banner banner-success">
+          <strong>Ingest ready</strong>
+          <span>{{ ingest_gate.summary }}</span>
+        </div>
+      {% else %}
+        <div class="banner banner-warning">
+          <strong>Ingest blocked</strong>
+          <span>Current daemon state: <code>{{ ingest_gate.current_state }}</code></span>
+          <span>{{ ingest_gate.summary }}</span>
+          <span>{{ ingest_gate.operator_action }}</span>
+        </div>
+      {% endif %}
+    </article>
+  </section>
+
+  <section class="section dashboard-grid">
+    <article class="card stack">
+      <h2>Attention</h2>
+      {% if overview_metrics.alerts %}
+        {% for alert in overview_metrics.alerts %}
+          <div class="banner {% if alert.severity == 'critical' %}banner-critical{% else %}banner-warning{% endif %}">
+            <strong>{{ alert.title }}</strong>
+            <span>{{ alert.message }}</span>
+          </div>
+        {% endfor %}
+      {% else %}
+        <div class="banner banner-success">
+          <strong>No immediate alerts</strong>
+          <span>Ingest, upload, and dependencies are currently healthy.</span>
+        </div>
+      {% endif %}
+    </article>
+
+    <article class="card stack">
+      <h2>Dependency health</h2>
+      {% if dependencies %}
+        <ul class="list-inline">
+          {% for dependency in dependencies %}
+            <li>
+              <strong>{{ dependency.name }}</strong>
+              <span class="pill {% if dependency.status in ['ready', 'active'] %}completed{% elif dependency.status in ['provisionable', 'activating', 'reloading'] %}active{% else %}blocked{% endif %}">
+                {{ dependency.status }}
+              </span><br>
+              <span class="muted">{{ dependency.detail }}</span>
+            </li>
+          {% endfor %}
+        </ul>
+      {% else %}
+        <p class="muted">No dependency status is available.</p>
+      {% endif %}
+    </article>
+  </section>
+
+  <section class="section dashboard-grid">
+    <article class="card stack">
+      <h2>Create ingest job</h2>
       {% if ingest_error %}
-        <div class="banner banner-error">
-          <strong>Ingest request failed.</strong>
+        <div class="banner banner-critical">
+          <strong>Ingest request failed</strong>
           <span>{{ ingest_error }}</span>
           {% if ingest_error_detail %}
             <details class="meta-details">
@@ -16,336 +139,56 @@
       {% endif %}
       {% if ingest_notice %}
         <div class="banner banner-success">
-          <strong>Ingest queued.</strong>
+          <strong>Ingest queued</strong>
           <span>{{ ingest_notice }}</span>
         </div>
       {% endif %}
-      {% if ingest_gate.can_start %}
-        <div class="banner banner-success">
-          <strong>Daemon ready.</strong>
-          <span>{{ ingest_gate.summary }}</span>
+      <form class="form-grid" method="post" action="/ingest/jobs" data-ajax-target="#overview-shell">
+        <div>
+          <label for="media_label">Media label</label>
+          <input id="media_label" name="media_label" value="{{ ingest_form.media_label }}" required>
         </div>
-        <form class="form-grid" method="post" action="/ingest/jobs" data-ajax-target="#overview-shell">
-          <div>
-            <label for="media_label">Media label</label>
-            <input id="media_label" name="media_label" value="{{ ingest_form.media_label }}" required>
-          </div>
-          <div>
-            <label for="source_paths">Source paths</label>
-            <textarea id="source_paths" name="source_paths" required>{{ ingest_form.source_paths }}</textarea>
-            <p class="muted">
-              Enter one absolute path per line. File paths are ingested directly. Directory paths (for example a
-              mounted media root) are enumerated recursively.
-            </p>
-          </div>
-          <div class="button-row">
-            <button type="submit">Create ingest job</button>
-          </div>
-        </form>
-      {% else %}
-        <div class="banner banner-warning">
-          <strong>Ingest blocked.</strong>
-          <span>Current daemon state: <code>{{ ingest_gate.current_state }}</code>.</span>
-          <span>{{ ingest_gate.summary }}</span>
-          <span>{{ ingest_gate.operator_action }}</span>
+        <div>
+          <label for="source_paths">Source paths</label>
+          <textarea id="source_paths" name="source_paths" required>{{ ingest_form.source_paths }}</textarea>
+          <p class="muted">One absolute file or directory path per line.</p>
         </div>
-        {% if ingest_gate.show_tick_action %}
-          <p class="muted">Next step</p>
-          <form method="post" action="/actions/daemon/tick" data-ajax-target="#overview-shell">
-            {% if selected_job_id %}
-              <input type="hidden" name="selected_job_id" value="{{ selected_job_id }}">
-            {% endif %}
-            <button type="submit">Run daemon tick now</button>
-          </form>
-        {% endif %}
-      {% endif %}
+        <div class="action-row">
+          <button type="submit">Create ingest job</button>
+        </div>
+      </form>
     </article>
 
-    <section class="status-stack">
-      <article class="card">
-        <h2>System Status</h2>
-        {% if state %}
-          <div class="kpi kpi-state status-active">{{ state.current_state }}</div>
-          <p class="muted">Updated: {{ state.updated_at_utc }}</p>
-        {% else %}
-          <p class="status-error">Unavailable</p>
-        {% endif %}
-        {% if diagnostics %}
-          <div class="status-metrics">
-            <div class="metric-item">
-              <strong class="{% if diagnostics.ok %}status-ok{% else %}status-error{% endif %}">
-                {% if diagnostics.ok %}M0 PASS{% else %}M0 FAIL{% endif %}
-              </strong>
-              <span class="muted">Foundation checks</span>
-            </div>
-            <div class="metric-item">
-              <strong>{{ diagnostics.invariant_issue_count }}</strong>
-              <span class="muted">Invariant issues</span>
-            </div>
-            <div class="metric-item">
-              <strong>{{ diagnostics.pending_bootstrap_entries }}</strong>
-              <span class="muted">Bootstrap pending</span>
-            </div>
-          </div>
-        {% endif %}
-      </article>
-
-      <article class="card">
-        <h2>Operator Actions</h2>
-        {% if operator_notice %}
-          <div class="banner banner-success">
-            <strong>Action complete.</strong>
-            <span>{{ operator_notice }}</span>
-          </div>
-        {% endif %}
-        <ul class="action-list">
-          <li class="muted">Use tick to advance daemon state-machine work.</li>
-          <li class="muted">Use refresh to reload this panel without leaving overview.</li>
-        </ul>
-        <div class="button-row">
-          <form method="post" action="/actions/daemon/tick" data-ajax-target="#overview-shell">
-            {% if selected_job_id %}
-              <input type="hidden" name="selected_job_id" value="{{ selected_job_id }}">
-            {% endif %}
-            <button type="submit">Run daemon tick</button>
-          </form>
-          <a
-            href="{% if selected_job_id %}/jobs/{{ selected_job_id }}{% else %}/{% endif %}"
-            class="button-link secondary"
-            data-ajax-target="#overview-shell"
-          >Refresh status</a>
+    <article class="card stack">
+      <h2>Active job summary</h2>
+      {% if overview_metrics.highlight_jobs %}
+        <div class="jobs-list">
+          {% for job in overview_metrics.highlight_jobs %}
+            <article class="job-card">
+              <div class="job-card-head">
+                <div>
+                  <strong><a href="/jobs/{{ job.job_id }}">Job #{{ job.job_id }}</a></strong>
+                  <div class="muted">{{ job.media_label }}</div>
+                </div>
+                <span class="pill {% if job.m2.paused_on_error %}blocked{% elif job.m2.remote_complete %}completed{% else %}active{% endif %}">
+                  {{ job.m2.operation_state_label }}
+                </span>
+              </div>
+              <div class="muted">
+                status={{ job.status }},
+                upload required={{ job.m2.upload_required_count }},
+                already exists={{ job.m2.remote_already_exists_count }}
+              </div>
+            </article>
+          {% endfor %}
         </div>
-      </article>
-    </section>
-  </section>
-
-  <section class="section">
-    <article class="card">
-      <h2>Dependencies</h2>
-      {% if dependencies %}
-        <table>
-          <thead>
-            <tr>
-              <th>Dependency</th>
-              <th>Status</th>
-              <th>Detail</th>
-            </tr>
-          </thead>
-          <tbody>
-            {% for dependency in dependencies %}
-              <tr>
-                <td><code>{{ dependency.name }}</code></td>
-                <td>
-                  {% if dependency.status in ["ready", "active"] %}
-                    <span class="status-ok">{{ dependency.status }}</span>
-                  {% elif dependency.status in ["provisionable", "activating", "reloading"] %}
-                    <span class="status-warn">{{ dependency.status }}</span>
-                  {% else %}
-                    <span class="status-error">{{ dependency.status }}</span>
-                  {% endif %}
-                </td>
-                <td><span class="muted">{{ dependency.detail }}</span></td>
-              </tr>
-            {% endfor %}
-          </tbody>
-        </table>
       {% else %}
-        <p class="muted">No dependency status is available.</p>
+        <p class="muted">No jobs are currently active or blocked.</p>
       {% endif %}
-    </article>
-  </section>
-
-  <section class="section">
-    <article class="card">
-      <div class="section-head">
-        <h2>Ingest Jobs</h2>
-        {% if selected_job %}
-          <a href="/" data-ajax-target="#overview-shell">Back to overview</a>
-        {% endif %}
+      <div class="action-row">
+        <a class="button-link" href="/jobs?filter=active">Active jobs</a>
+        <a class="button-link" href="/jobs?filter=blocked">Blocked jobs</a>
       </div>
-      {% if jobs %}
-        <table>
-          <thead>
-            <tr>
-              <th>Job</th>
-              <th>Status</th>
-              <th>M2 operation</th>
-              <th>Remote classification</th>
-              <th>Cleanup staging</th>
-            </tr>
-          </thead>
-          <tbody>
-            {% for job in jobs %}
-              <tr>
-                <td>
-                  <a href="/jobs/{{ job.job_id }}" data-ajax-target="#overview-shell"><strong>#{{ job.job_id }}</strong></a><br>
-                  <span class="muted">{{ job.media_label }}</span>
-                </td>
-                <td>{{ job.status }}</td>
-                <td>
-                  {% if job.m2.operation_state_label == "remote complete" %}
-                    <span class="status-ok">{{ job.m2.operation_state_label }}</span>
-                  {% elif job.m2.operation_state_label == "paused on error" %}
-                    <span class="status-error">{{ job.m2.operation_state_label }}</span>
-                  {% elif job.m2.operation_state_label == "local complete" %}
-                    <span class="status-warn">{{ job.m2.operation_state_label }}</span>
-                  {% else %}
-                    <span class="status-warn">{{ job.m2.operation_state_label }}</span>
-                  {% endif %}
-                  <div class="muted">local ingest: {% if job.local_ingest_complete %}complete{% else %}active{% endif %}</div>
-                </td>
-                <td>
-                  <div><span class="status-ok">already exists:</span> {{ job.m2.remote_already_exists_count }}</div>
-                  <div><span class="status-warn">upload required:</span> {{ job.m2.upload_required_count }}</div>
-                  {% if job.upload_pending %}
-                    <div class="muted">pending upload work: yes</div>
-                  {% else %}
-                    <div class="muted">pending upload work: no</div>
-                  {% endif %}
-                </td>
-                <td>
-                  {% if job.m2.cleanup_label == "complete" %}
-                    <span class="status-ok">{{ job.m2.cleanup_label }}</span>
-                  {% elif job.m2.cleanup_label == "blocked by error" %}
-                    <span class="status-error">{{ job.m2.cleanup_label }}</span>
-                  {% else %}
-                    <span class="status-warn">{{ job.m2.cleanup_label }}</span>
-                  {% endif %}
-                </td>
-              </tr>
-            {% endfor %}
-          </tbody>
-        </table>
-      {% else %}
-        <p class="muted">No ingest jobs are currently tracked.</p>
-      {% endif %}
-    </article>
-  </section>
-
-  {% if selected_job %}
-    <section class="section">
-      <article class="card">
-        <div class="section-head">
-          <h2>Job #{{ selected_job.job_id }} Detail</h2>
-          <span class="muted">{{ selected_job.media_label }}</span>
-        </div>
-
-        <div class="grid">
-          <div>
-            <div class="kpi status-active">{{ selected_job.status }}</div>
-            <p class="muted">Updated: {{ selected_job.updated_at_utc }}</p>
-          </div>
-          <div>
-            <div class="kpi {% if selected_job.local_ingest_complete %}status-ok{% else %}status-warn{% endif %}">
-              {% if selected_job.local_ingest_complete %}Local Complete{% else %}Local Active{% endif %}
-            </div>
-            <p class="muted">
-              Upload pending:
-              {% if selected_job.upload_pending %}yes{% else %}no{% endif %}
-            </p>
-          </div>
-        </div>
-        <div class="section">
-          <h3>M2 Operational Summary</h3>
-          <div><strong>Overall:</strong> {{ selected_job.m2.operation_state_label }}</div>
-          <div><strong>Remote complete:</strong> {% if selected_job.m2.remote_complete %}yes{% else %}no{% endif %}</div>
-          <div><strong>Paused on error:</strong> {% if selected_job.m2.paused_on_error %}yes{% else %}no{% endif %}</div>
-          <div><strong>Cleanup staging:</strong> {{ selected_job.m2.cleanup_label }}</div>
-          <div><strong>Remote already exists:</strong> {{ selected_job.m2.remote_already_exists_count }}</div>
-          <div><strong>Upload required:</strong> {{ selected_job.m2.upload_required_count }}</div>
-        </div>
-
-        <div class="section">
-          <h3>Status Counts</h3>
-          {% for status, count in selected_job.status_counts.items() %}
-            <div><code>{{ status }}</code>: {{ count }}</div>
-          {% endfor %}
-        </div>
-
-        <div class="section">
-          <h3>Files</h3>
-          <table>
-            <thead>
-              <tr>
-                <th>File</th>
-                <th>Status</th>
-                <th>SHA</th>
-                <th>Remote class</th>
-                <th>Upload/verify phase</th>
-                <th>Retries</th>
-                <th>Last error</th>
-                <th>Action</th>
-              </tr>
-            </thead>
-            <tbody>
-              {% for file in selected_job.files %}
-                <tr>
-                  <td>
-                    <strong>#{{ file.file_id }}</strong><br>
-                    <span class="muted">{{ file.source_path }}</span>
-                  </td>
-                  <td><code>{{ file.status }}</code></td>
-                  <td>
-                    {% if file.sha256_hex %}
-                      <code>{{ file.sha256_hex }}</code>
-                    {% else %}
-                      <span class="muted">pending</span>
-                    {% endif %}
-                  </td>
-                  <td>
-                    {% if file.m2.classification_key == "REMOTE_ALREADY_EXISTS" %}
-                      <span class="status-ok">{{ file.m2.classification_label }}</span>
-                    {% elif file.m2.classification_key == "UPLOAD_REQUIRED" %}
-                      <span class="status-warn">{{ file.m2.classification_label }}</span>
-                    {% else %}
-                      <span class="muted">{{ file.m2.classification_label }}</span>
-                    {% endif %}
-                  </td>
-                  <td>{{ file.m2.phase_label }}</td>
-                  <td>{{ file.retry_count }}</td>
-                  <td>
-                    {% if file.last_error %}
-                      <span class="status-error">{{ file.last_error }}</span>
-                    {% else %}
-                      <span class="muted">none</span>
-                    {% endif %}
-                  </td>
-                  <td>
-                    {% if file.status == "ERROR_FILE" %}
-                      <form method="post" action="/actions/retry-upload" data-ajax-target="#overview-shell">
-                        <input type="hidden" name="selected_job_id" value="{{ selected_job.job_id }}">
-                        <input type="hidden" name="file_id" value="{{ file.file_id }}">
-                        <button type="submit">Retry upload</button>
-                      </form>
-                    {% else %}
-                      <span class="muted">n/a</span>
-                    {% endif %}
-                  </td>
-                </tr>
-              {% endfor %}
-            </tbody>
-          </table>
-        </div>
-      </article>
-    </section>
-  {% endif %}
-
-  <section class="section">
-    <article class="card">
-      <h2>Recent Events</h2>
-      {% if events %}
-        <ul class="list-inline">
-          {% for event in events %}
-            <li>
-              <strong>{{ event.category }}</strong>
-              <span class="muted">({{ event.created_at_utc }})</span><br>
-              <span>{{ event.message }}</span>
-            </li>
-          {% endfor %}
-        </ul>
-      {% else %}
-        <p class="muted">No daemon events are available.</p>
-      {% endif %}
     </article>
   </section>
 </section>

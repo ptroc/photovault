@@ -1,0 +1,69 @@
+{% extends "_base.html" %}
+
+{% block content %}
+  <section class="section card stack">
+    <div class="section-title">
+      <h2>Jobs</h2>
+      <span class="muted">Use filters to focus on current operator workload.</span>
+    </div>
+    <div class="filters">
+      <a class="filter-link {% if job_filter == 'active' %}active{% endif %}" href="/jobs?filter=active">
+        Active ({{ job_filter_counts.active }})
+      </a>
+      <a class="filter-link {% if job_filter == 'blocked' %}active{% endif %}" href="/jobs?filter=blocked">
+        Blocked ({{ job_filter_counts.blocked }})
+      </a>
+      <a class="filter-link {% if job_filter == 'completed' %}active{% endif %}" href="/jobs?filter=completed">
+        Completed ({{ job_filter_counts.completed }})
+      </a>
+      <a class="filter-link {% if job_filter == 'all' %}active{% endif %}" href="/jobs?filter=all">
+        All ({{ job_filter_counts.all }})
+      </a>
+    </div>
+  </section>
+
+  <section class="section card">
+    {% if jobs %}
+      <div class="jobs-list">
+        {% for job in jobs %}
+          <article class="job-card">
+            <div class="job-card-head">
+              <div>
+                <strong><a href="/jobs/{{ job.job_id }}">Job #{{ job.job_id }}</a></strong>
+                <div class="muted">{{ job.media_label }}</div>
+              </div>
+              <span class="pill {% if job.m2.paused_on_error %}blocked{% elif job.m2.remote_complete %}completed{% else %}active{% endif %}">
+                {{ job.m2.operation_state_label }}
+              </span>
+            </div>
+            <div class="kpi-grid section">
+              <div class="kpi-box">
+                <span class="muted">Daemon status</span>
+                <span class="kpi-value">{{ job.status }}</span>
+              </div>
+              <div class="kpi-box">
+                <span class="muted">Upload required</span>
+                <span class="kpi-value status-warn">{{ job.m2.upload_required_count }}</span>
+              </div>
+              <div class="kpi-box">
+                <span class="muted">Already existed</span>
+                <span class="kpi-value status-ok">{{ job.m2.remote_already_exists_count }}</span>
+              </div>
+              <div class="kpi-box">
+                <span class="muted">Cleanup staging</span>
+                <span class="kpi-value {% if job.m2.cleanup_label == 'complete' %}status-ok{% elif job.m2.cleanup_label == 'blocked by error' %}status-error{% else %}status-warn{% endif %}">
+                  {{ job.m2.cleanup_label }}
+                </span>
+              </div>
+            </div>
+            <div class="action-row">
+              <a class="button-link" href="/jobs/{{ job.job_id }}">Open job detail</a>
+            </div>
+          </article>
+        {% endfor %}
+      </div>
+    {% else %}
+      <p class="muted">No jobs match this filter.</p>
+    {% endif %}
+  </section>
+{% endblock %}

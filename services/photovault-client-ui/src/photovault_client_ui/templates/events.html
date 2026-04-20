@@ -1,0 +1,59 @@
+{% extends "_base.html" %}
+
+{% block content %}
+  <section class="section dashboard-grid">
+    <article class="card stack">
+      <h2>Diagnostics summary</h2>
+      {% if diagnostics %}
+        <div class="kpi-grid">
+          <div class="kpi-box">
+            <span class="muted">M0 foundation checks</span>
+            <span class="kpi-value {% if diagnostics.ok %}status-ok{% else %}status-error{% endif %}">
+              {% if diagnostics.ok %}PASS{% else %}FAIL{% endif %}
+            </span>
+          </div>
+          <div class="kpi-box">
+            <span class="muted">Invariant issues</span>
+            <span class="kpi-value {% if diagnostics.invariant_issue_count > 0 %}status-error{% else %}status-ok{% endif %}">
+              {{ diagnostics.invariant_issue_count }}
+            </span>
+          </div>
+          <div class="kpi-box">
+            <span class="muted">Bootstrap pending entries</span>
+            <span class="kpi-value {% if diagnostics.pending_bootstrap_entries > 0 %}status-warn{% else %}status-ok{% endif %}">
+              {{ diagnostics.pending_bootstrap_entries }}
+            </span>
+          </div>
+        </div>
+      {% else %}
+        <p class="muted">No diagnostics are available.</p>
+      {% endif %}
+    </article>
+
+    <article class="card stack">
+      <h2>How to use this page</h2>
+      <ul class="list-inline">
+        <li>Review this page when overview shows alerts or blocked work.</li>
+        <li>Use events below to understand what changed most recently.</li>
+        <li>Use Jobs for file-level state and retry actions.</li>
+      </ul>
+    </article>
+  </section>
+
+  <section class="section card stack">
+    <h2>Recent daemon events</h2>
+    {% if events %}
+      <ul class="list-inline">
+        {% for event in events %}
+          <li class="job-card">
+            <strong>{{ event.category }}</strong>
+            <span class="muted">({{ event.created_at_utc }})</span><br>
+            <span>{{ event.message }}</span>
+          </li>
+        {% endfor %}
+      </ul>
+    {% else %}
+      <p class="muted">No daemon events are available.</p>
+    {% endif %}
+  </section>
+{% endblock %}
