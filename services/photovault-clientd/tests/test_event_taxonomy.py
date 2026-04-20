@@ -19,6 +19,8 @@ def test_m2_handshake_event_categories_exist() -> None:
     assert EventCategory.POST_UPLOAD_VERIFY_COMPLETED == "POST_UPLOAD_VERIFY_COMPLETED"
     assert EventCategory.CLEANUP_STAGING_APPLIED == "CLEANUP_STAGING_APPLIED"
     assert EventCategory.JOB_REMOTE_COMPLETED == "JOB_REMOTE_COMPLETED"
+    assert EventCategory.AUTO_PROGRESS_APPLIED == "AUTO_PROGRESS_APPLIED"
+    assert EventCategory.AUTO_PROGRESS_FAILURE == "AUTO_PROGRESS_FAILURE"
 
 
 def test_classify_copy_error_for_missing_source() -> None:

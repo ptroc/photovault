@@ -67,6 +67,14 @@ DEFAULT_HANDSHAKE_TIMEOUT_SECONDS = 5.0
 DEFAULT_RETAIN_STAGED_FILES = True
 DEFAULT_MAX_UPLOAD_RETRIES = 3
 DEFAULT_RETRY_BACKOFF_MAX_SECONDS = 30
+DEFAULT_AUTO_PROGRESS_MAX_STEPS = 32
+
+AUTO_PROGRESS_SAFE_STATES = {
+    ClientState.POST_UPLOAD_VERIFY,
+    ClientState.CLEANUP_STAGING,
+    ClientState.JOB_COMPLETE_REMOTE,
+    ClientState.JOB_COMPLETE_LOCAL,
+}
 
 
 def _copy_phase_next_state(pending_copy: int, hash_pending: int) -> ClientState:
@@ -1966,4 +1974,59 @@ def run_recovery_dispatch(
         "progressed_steps": progressed_steps,
         "errored": errored,
         "final_state": get_daemon_state(conn).value if get_daemon_state(conn) else None,
+    }
+
+
+def run_auto_progress_dispatch(
+    conn,
+    staging_root: Path,
+    *,
+    server_base_url: str = DEFAULT_SERVER_BASE_URL,
+    retain_staged_files: bool = DEFAULT_RETAIN_STAGED_FILES,
+    max_upload_retries: int = DEFAULT_MAX_UPLOAD_RETRIES,
+    max_steps: int = DEFAULT_AUTO_PROGRESS_MAX_STEPS,
+) -> dict[str, object]:
+    """Bounded auto-drain for deterministic completion follow-up states."""
+    steps = 0
+    progressed_steps = 0
+    errored = False
+    initial_state = get_daemon_state(conn)
+    stop_reason = "boundary_state"
+
+    while steps < max_steps:
+        state = get_daemon_state(conn)
+        if state not in AUTO_PROGRESS_SAFE_STATES:
+            break
+
+        outcome = run_daemon_tick(
+            conn,
+            staging_root,
+            server_base_url=server_base_url,
+            retain_staged_files=retain_staged_files,
+            max_upload_retries=max_upload_retries,
+        )
+        steps += 1
+        if outcome.get("progressed"):
+            progressed_steps += 1
+
+        if outcome.get("errored"):
+            stop_reason = "error"
+            errored = True
+            break
+
+        if not outcome.get("progressed"):
+            stop_reason = "no_progress"
+            break
+
+    if steps >= max_steps:
+        stop_reason = "max_steps"
+
+    final_state = get_daemon_state(conn)
+    return {
+        "steps": steps,
+        "progressed_steps": progressed_steps,
+        "errored": errored,
+        "initial_state": initial_state.value if initial_state else None,
+        "final_state": final_state.value if final_state else None,
+        "stop_reason": stop_reason,
     }

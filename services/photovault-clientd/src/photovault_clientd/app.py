@@ -1,5 +1,6 @@
 """Local control-plane API exposed by photovault-clientd."""
 
+import asyncio
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -36,8 +37,10 @@ from photovault_clientd.db import (
     transition_daemon_state,
 )
 from photovault_clientd.engine import (
+    DEFAULT_AUTO_PROGRESS_MAX_STEPS,
     DEFAULT_RETAIN_STAGED_FILES,
     DEFAULT_SERVER_BASE_URL,
+    run_auto_progress_dispatch,
     run_daemon_tick,
     run_error_file_requeue,
     run_recovery_dispatch,
@@ -49,6 +52,7 @@ from photovault_clientd.storage import build_staged_path, copy_with_fsync
 
 DEFAULT_DB_PATH = Path("/var/lib/photovault-clientd/state.sqlite3")
 DEFAULT_STAGING_ROOT = Path("/var/lib/photovault-clientd/staging")
+DEFAULT_AUTO_PROGRESS_INTERVAL_SECONDS = 2.0
 
 
 class IngestJobCreateRequest(BaseModel):
@@ -161,6 +165,8 @@ def create_app(
     staging_root: Path = DEFAULT_STAGING_ROOT,
     server_base_url: str = DEFAULT_SERVER_BASE_URL,
     retain_staged_files: bool = DEFAULT_RETAIN_STAGED_FILES,
+    auto_progress_interval_seconds: float = DEFAULT_AUTO_PROGRESS_INTERVAL_SECONDS,
+    auto_progress_max_steps: int = DEFAULT_AUTO_PROGRESS_MAX_STEPS,
 ) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -211,7 +217,62 @@ def create_app(
             conn.close()
             raise
         conn.close()
-        yield
+
+        stop_event = asyncio.Event()
+
+        async def _run_auto_progress_loop() -> None:
+            while not stop_event.is_set():
+                await asyncio.sleep(max(auto_progress_interval_seconds, 0.1))
+                conn_loop = open_db(db_path)
+                cycle_now = datetime.now(UTC).isoformat()
+                try:
+                    outcome = run_auto_progress_dispatch(
+                        conn_loop,
+                        staging_root,
+                        server_base_url=server_base_url,
+                        retain_staged_files=retain_staged_files,
+                        max_steps=auto_progress_max_steps,
+                    )
+                    if outcome["steps"] > 0:
+                        append_daemon_event(
+                            conn_loop,
+                            level=EventLevel.INFO,
+                            category=EventCategory.AUTO_PROGRESS_APPLIED,
+                            message=(
+                                f"auto progression cycle: initial_state={outcome['initial_state']}, "
+                                f"final_state={outcome['final_state']}, steps={outcome['steps']}, "
+                                f"progressed={outcome['progressed_steps']}, "
+                                f"stop_reason={outcome['stop_reason']}, errored={outcome['errored']}"
+                            ),
+                            created_at_utc=cycle_now,
+                            from_state=get_daemon_state_safe(conn_loop),
+                            to_state=get_daemon_state_safe(conn_loop),
+                        )
+                        conn_loop.commit()
+                except Exception as exc:
+                    append_daemon_event(
+                        conn_loop,
+                        level=EventLevel.ERROR,
+                        category=EventCategory.AUTO_PROGRESS_FAILURE,
+                        message=f"auto progression loop failed: {exc}",
+                        created_at_utc=cycle_now,
+                        from_state=get_daemon_state_safe(conn_loop),
+                        to_state=get_daemon_state_safe(conn_loop),
+                    )
+                    conn_loop.commit()
+                finally:
+                    conn_loop.close()
+
+        auto_progress_task = asyncio.create_task(_run_auto_progress_loop())
+        try:
+            yield
+        finally:
+            stop_event.set()
+            auto_progress_task.cancel()
+            try:
+                await auto_progress_task
+            except asyncio.CancelledError:
+                pass
 
     app = FastAPI(title="photovault-clientd", version="0.1.0", lifespan=lifespan)
 
