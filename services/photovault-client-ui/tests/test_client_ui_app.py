@@ -124,6 +124,14 @@ def _overview_payloads() -> dict[str, object]:
                     "retry_count": 0,
                     "last_error": None,
                 },
+                {
+                    "file_id": 3,
+                    "source_path": "/var/lib/photovault-clientd/test-media/003.jpg",
+                    "status": "ERROR_FILE",
+                    "sha256_hex": "deadbeef",
+                    "retry_count": 3,
+                    "last_error": "server verification failed retries exhausted",
+                },
             ],
         },
     }
@@ -420,6 +428,7 @@ def test_job_detail_route_renders_file_level_status() -> None:
     assert "Files" in body
     assert "/var/lib/photovault-clientd/test-media/001.jpg" in body
     assert "DUPLICATE_SESSION_SHA" in body
+    assert "Retry upload" in body
     assert "Back to overview" in body
 
 
@@ -471,6 +480,65 @@ def test_daemon_tick_returns_partial_notice_for_ajax_requests() -> None:
     assert response.headers["X-Client-Location"].endswith("/jobs/1")
     assert "Action complete." in body
     assert "Daemon tick completed in state HASHING." in body
+
+
+def test_retry_upload_action_returns_partial_notice_for_ajax_requests() -> None:
+    payloads = _overview_payloads()
+    observed: dict[str, object] = {}
+
+    def fake_daemon_get(_: str, path: str) -> object:
+        return payloads[path]
+
+    def fake_daemon_post(_: str, path: str, payload: dict[str, object]) -> object:
+        observed["path"] = path
+        observed["payload"] = payload
+        return {"handled": True, "next_state": "UPLOAD_PREPARE"}
+
+    app = create_app(
+        daemon_get=fake_daemon_get,
+        daemon_post=fake_daemon_post,
+        network_snapshot_get=_network_snapshot,
+    )
+    client = app.test_client()
+    response = client.post(
+        "/actions/retry-upload",
+        data={"selected_job_id": "1", "file_id": "3"},
+        headers={"X-Requested-With": "XMLHttpRequest"},
+    )
+    body = response.get_data(as_text=True)
+
+    assert response.status_code == 200
+    assert response.headers["X-Client-Location"].endswith("/jobs/1")
+    assert observed["path"] == "/ingest/files/3/retry-upload"
+    assert observed["payload"] == {}
+    assert "File #3 requeued for upload; daemon moved to UPLOAD_PREPARE." in body
+
+
+def test_retry_upload_action_surfaces_daemon_error() -> None:
+    payloads = _overview_payloads()
+
+    def fake_daemon_get(_: str, path: str) -> object:
+        return payloads[path]
+
+    def failing_daemon_post(_: str, path: str, payload: dict[str, object]) -> object:
+        assert path == "/ingest/files/3/retry-upload"
+        assert payload == {}
+        req = httpx.Request("POST", "http://127.0.0.1:9101/ingest/files/3/retry-upload")
+        resp = httpx.Response(409, request=req)
+        raise httpx.HTTPStatusError("conflict", request=req, response=resp)
+
+    app = create_app(
+        daemon_get=fake_daemon_get,
+        daemon_post=failing_daemon_post,
+        network_snapshot_get=_network_snapshot,
+    )
+    client = app.test_client()
+    response = client.post("/actions/retry-upload", data={"selected_job_id": "1", "file_id": "3"})
+    body = response.get_data(as_text=True)
+
+    assert response.status_code == 200
+    assert "Ingest request failed." in body
+    assert "Failed to requeue file #3 for upload" in body
 
 
 def test_job_detail_route_returns_404_for_unknown_job() -> None:

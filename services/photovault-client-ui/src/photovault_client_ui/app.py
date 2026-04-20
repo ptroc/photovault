@@ -319,6 +319,30 @@ def create_app(
             operator_notice=message,
         )
 
+    @app.post("/actions/retry-upload")
+    def retry_error_upload() -> Response | str:
+        selected_job_id = request.form.get("selected_job_id", type=int)
+        file_id = request.form.get("file_id", type=int)
+        if file_id is None:
+            return _render_overview(
+                selected_job_id=selected_job_id,
+                ingest_error="Missing file_id for retry action.",
+            )
+        try:
+            outcome = daemon_post(daemon_base_url, f"/ingest/files/{file_id}/retry-upload", {})
+        except httpx.HTTPError as exc:
+            return _render_overview(
+                selected_job_id=selected_job_id,
+                ingest_error=f"Failed to requeue file #{file_id} for upload: {exc}",
+            )
+
+        next_state = outcome.get("next_state", "UPLOAD_PREPARE")
+        message = f"File #{file_id} requeued for upload; daemon moved to {next_state}."
+        return _render_overview(
+            selected_job_id=selected_job_id,
+            operator_notice=message,
+        )
+
     @app.post("/network/scan")
     def scan_wifi() -> Any:
         try:

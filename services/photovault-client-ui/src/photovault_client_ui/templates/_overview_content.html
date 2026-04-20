@@ -175,6 +175,7 @@
                 <th>SHA</th>
                 <th>Retries</th>
                 <th>Last error</th>
+                <th>Action</th>
               </tr>
             </thead>
             <tbody>
@@ -198,6 +199,17 @@
                       <span class="status-error">{{ file.last_error }}</span>
                     {% else %}
                       <span class="muted">none</span>
+                    {% endif %}
+                  </td>
+                  <td>
+                    {% if file.status == "ERROR_FILE" %}
+                      <form method="post" action="/actions/retry-upload" data-ajax-target="#overview-shell">
+                        <input type="hidden" name="selected_job_id" value="{{ selected_job.job_id }}">
+                        <input type="hidden" name="file_id" value="{{ file.file_id }}">
+                        <button type="submit">Retry upload</button>
+                      </form>
+                    {% else %}
+                      <span class="muted">n/a</span>
                     {% endif %}
                   </td>
                 </tr>
