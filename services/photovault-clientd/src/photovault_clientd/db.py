@@ -728,10 +728,13 @@ def fetch_ready_to_upload_files_global(conn: sqlite3.Connection) -> list[dict[st
 def fetch_next_ready_to_upload_file(conn: sqlite3.Connection) -> dict[str, object] | None:
     row = conn.execute(
         """
-        SELECT id, job_id, staged_path, sha256_hex, size_bytes, retry_count
-        FROM ingest_files
-        WHERE status = ?
-        ORDER BY id ASC
+        SELECT
+            f.id, f.job_id, f.staged_path, f.sha256_hex,
+            f.size_bytes, f.retry_count, f.source_path, j.media_label
+        FROM ingest_files f
+        JOIN ingest_jobs j ON j.id = f.job_id
+        WHERE f.status = ?
+        ORDER BY f.id ASC
         LIMIT 1;
         """,
         (FileStatus.READY_TO_UPLOAD.value,),
@@ -745,6 +748,8 @@ def fetch_next_ready_to_upload_file(conn: sqlite3.Connection) -> dict[str, objec
         "sha256_hex": row[3],
         "size_bytes": row[4],
         "retry_count": int(row[5]),
+        "source_path": row[6],
+        "job_name": row[7],
     }
 
 

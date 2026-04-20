@@ -34,8 +34,11 @@ sudo useradd --system --gid photovault --no-create-home --shell /usr/sbin/nologi
 
 sudo mkdir -p /opt/photovault
 sudo mkdir -p /etc/photovault
+sudo mkdir -p /var/storage/photovault
 sudo chmod 0750 /etc/photovault
 sudo chown root:photovault /etc/photovault
+sudo chown -R photovault:photovault /var/storage/photovault
+sudo chmod 0750 /var/storage/photovault
 ```
 
 ## 3. Place project code on host
@@ -91,6 +94,7 @@ Create `/etc/photovault/photovault-api.env`:
 ```bash
 sudo tee /etc/photovault/photovault-api.env >/dev/null <<'ENV'
 PHOTOVAULT_API_DATABASE_URL=postgresql://photovault_api:change-me-strong-password@127.0.0.1:5432/photovault
+PHOTOVAULT_API_STORAGE_ROOT=/var/storage/photovault
 ENV
 ```
 
@@ -170,7 +174,10 @@ sudo journalctl -u photovault-server-ui.service -f
 
 ## Troubleshooting quick checks
 
-- If API fails on boot, verify `PHOTOVAULT_API_DATABASE_URL` is set and valid.
+- If API fails on boot, verify both `PHOTOVAULT_API_DATABASE_URL` and
+  `PHOTOVAULT_API_STORAGE_ROOT` are set and valid.
+- If API logs show storage permission errors, verify `/var/storage/photovault` is writable by the
+  `photovault` service user.
 - If DB connection fails, test login with `psql` using the same credentials/host.
 - If units fail to start, confirm `/opt/photovault/.venv/bin/python` exists.
 - If ports are unreachable remotely, check host firewall for `9301` and `9401`.

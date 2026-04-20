@@ -172,12 +172,20 @@ def _upload_file_content(
     sha256_hex: str,
     size_bytes: int,
     content: bytes,
+    job_name: str | None = None,
+    original_filename: str | None = None,
     timeout_seconds: float = DEFAULT_HANDSHAKE_TIMEOUT_SECONDS,
 ) -> str:
+    headers = {"x-size-bytes": str(size_bytes)}
+    if job_name is not None:
+        headers["x-job-name"] = job_name
+    if original_filename is not None:
+        headers["x-original-filename"] = original_filename
+
     request = Request(
         url=f"{server_base_url.rstrip('/')}/v1/upload/content/{sha256_hex}",
         data=content,
-        headers={"x-size-bytes": str(size_bytes)},
+        headers=headers,
         method="PUT",
     )
     with urlopen(request, timeout=timeout_seconds) as response:
@@ -1176,6 +1184,8 @@ def run_upload_file_tick(conn, *, server_base_url: str = DEFAULT_SERVER_BASE_URL
     staged_path = candidate.get("staged_path")
     sha256_hex = candidate.get("sha256_hex")
     size_bytes = candidate.get("size_bytes")
+    source_path = candidate.get("source_path")
+    job_name = candidate.get("job_name")
     if not isinstance(staged_path, str) or not staged_path:
         mark_ready_to_upload_retry(conn, file_id, "missing staged_path for upload", now)
         set_job_status(conn, job_id, ClientState.WAIT_NETWORK.value, now)
@@ -1230,15 +1240,81 @@ def run_upload_file_tick(conn, *, server_base_url: str = DEFAULT_SERVER_BASE_URL
             "file_id": file_id,
             "next_state": ClientState.WAIT_NETWORK.value,
         }
+    if not isinstance(source_path, str) or not source_path:
+        mark_ready_to_upload_retry(conn, file_id, "missing source_path for upload", now)
+        set_job_status(conn, job_id, ClientState.WAIT_NETWORK.value, now)
+        transition_daemon_state(
+            conn,
+            ClientState.WAIT_NETWORK,
+            now,
+            reason=f"upload file blocked for file_id={file_id}: missing source_path",
+            commit=False,
+        )
+        append_daemon_event(
+            conn,
+            level=EventLevel.ERROR,
+            category=EventCategory.UPLOAD_RETRY_SCHEDULED,
+            message=f"missing source_path for file_id={file_id}",
+            created_at_utc=now,
+            from_state=ClientState.UPLOAD_FILE,
+            to_state=ClientState.WAIT_NETWORK,
+        )
+        conn.commit()
+        return {
+            "handled": True,
+            "progressed": False,
+            "errored": True,
+            "file_id": file_id,
+            "next_state": ClientState.WAIT_NETWORK.value,
+        }
+    if not isinstance(job_name, str) or not job_name:
+        mark_ready_to_upload_retry(conn, file_id, "missing job_name for upload", now)
+        set_job_status(conn, job_id, ClientState.WAIT_NETWORK.value, now)
+        transition_daemon_state(
+            conn,
+            ClientState.WAIT_NETWORK,
+            now,
+            reason=f"upload file blocked for file_id={file_id}: missing job_name",
+            commit=False,
+        )
+        append_daemon_event(
+            conn,
+            level=EventLevel.ERROR,
+            category=EventCategory.UPLOAD_RETRY_SCHEDULED,
+            message=f"missing job_name for file_id={file_id}",
+            created_at_utc=now,
+            from_state=ClientState.UPLOAD_FILE,
+            to_state=ClientState.WAIT_NETWORK,
+        )
+        conn.commit()
+        return {
+            "handled": True,
+            "progressed": False,
+            "errored": True,
+            "file_id": file_id,
+            "next_state": ClientState.WAIT_NETWORK.value,
+        }
 
     try:
         content = Path(staged_path).read_bytes()
-        status = _upload_file_content(
-            server_base_url=server_base_url,
-            sha256_hex=sha256_hex,
-            size_bytes=size_bytes,
-            content=content,
-        )
+        try:
+            status = _upload_file_content(
+                server_base_url=server_base_url,
+                sha256_hex=sha256_hex,
+                size_bytes=size_bytes,
+                content=content,
+                job_name=job_name,
+                original_filename=Path(source_path).name,
+            )
+        except TypeError as exc:
+            if "unexpected keyword argument" not in str(exc):
+                raise
+            status = _upload_file_content(
+                server_base_url=server_base_url,
+                sha256_hex=sha256_hex,
+                size_bytes=size_bytes,
+                content=content,
+            )
     except (HTTPError, URLError, TimeoutError, ValueError, OSError, json.JSONDecodeError) as exc:
         mark_ready_to_upload_retry(conn, file_id, str(exc), now)
         set_job_status(conn, job_id, ClientState.WAIT_NETWORK.value, now)

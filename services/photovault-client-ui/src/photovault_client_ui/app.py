@@ -27,6 +27,16 @@ _UPLOAD_REQUIRED_STATUSES = {
     "ERROR_FILE",
 }
 _REMOTE_TERMINAL_STATUSES = {"VERIFIED_REMOTE", "DUPLICATE_SHA_GLOBAL"}
+_FILE_TERMINAL_STATUSES = {
+    "VERIFIED_REMOTE",
+    "DUPLICATE_SHA_GLOBAL",
+    "DUPLICATE_SHA_LOCAL",
+    "DUPLICATE_SESSION_SHA",
+    "ERROR_FILE",
+    "QUARANTINED_LOCAL",
+}
+_IGNORED_FILE_STATUSES = {"DUPLICATE_SHA_GLOBAL", "DUPLICATE_SHA_LOCAL", "DUPLICATE_SESSION_SHA"}
+_ERROR_FILE_STATUSES = {"ERROR_FILE", "QUARANTINED_LOCAL"}
 _PAUSED_ERROR_JOB_STATUSES = {"ERROR_FILE", "ERROR_JOB", "PAUSED_STORAGE"}
 _REMOTE_COMPLETE_JOB_STATUSES = {"JOB_COMPLETE_REMOTE", "JOB_COMPLETE_LOCAL"}
 _ACTIVE_DAEMON_STATES = {
@@ -419,6 +429,23 @@ def _derive_job_operator_view(job: dict[str, Any]) -> dict[str, Any]:
     upload_required_count = int(
         sum(status_counts.get(file_status, 0) for file_status in _UPLOAD_REQUIRED_STATUSES)
     )
+    total_file_count = int(sum(int(count) for count in status_counts.values()))
+    terminal_file_count = int(
+        sum(status_counts.get(file_status, 0) for file_status in _FILE_TERMINAL_STATUSES)
+    )
+    transferred_file_count = int(status_counts.get("VERIFIED_REMOTE", 0))
+    ignored_file_count = int(sum(status_counts.get(file_status, 0) for file_status in _IGNORED_FILE_STATUSES))
+    failed_file_count = int(sum(status_counts.get(file_status, 0) for file_status in _ERROR_FILE_STATUSES))
+    pending_file_count = max(
+        total_file_count - transferred_file_count - ignored_file_count - failed_file_count,
+        0,
+    )
+
+    def _segment_percent(count: int, total: int) -> float:
+        if total <= 0 or count <= 0:
+            return 0.0
+        return (float(count) / float(total)) * 100.0
+
     waiting_on_network = status == "WAIT_NETWORK"
     retry_backoff_active = waiting_on_network and (len(retrying_files) > 0 or upload_required_count > 0)
     requires_operator_action = status in _BLOCKED_DAEMON_STATES or len(error_files) > 0
@@ -436,6 +463,15 @@ def _derive_job_operator_view(job: dict[str, Any]) -> dict[str, Any]:
         "error_file_count": int(status_counts.get("ERROR_FILE", 0)),
         "upload_required_count": upload_required_count,
         "verified_remote_count": int(status_counts.get("VERIFIED_REMOTE", 0)),
+        "transferred_file_count": transferred_file_count,
+        "ignored_file_count": ignored_file_count,
+        "failed_file_count": failed_file_count,
+        "pending_file_count": pending_file_count,
+        "total_file_count": total_file_count,
+        "uploaded_percent": _segment_percent(transferred_file_count, total_file_count),
+        "ignored_percent": _segment_percent(ignored_file_count, total_file_count),
+        "failed_percent": _segment_percent(failed_file_count, total_file_count),
+        "pending_percent": _segment_percent(pending_file_count, total_file_count),
         "retrying_file_count": len(retrying_files),
         "max_retry_count": max_retry_count,
         "retry_backoff_active": retry_backoff_active,

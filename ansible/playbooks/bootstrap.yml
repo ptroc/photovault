@@ -68,6 +68,13 @@
         line: "PHOTOVAULT_API_DATABASE_URL="
         insertafter: EOF
 
+    - name: Ensure photovault-api storage root variable exists in env file
+      ansible.builtin.lineinfile:
+        path: "{{ photovault_env_dir }}/photovault-api.env"
+        regexp: "^PHOTOVAULT_API_STORAGE_ROOT="
+        line: "PHOTOVAULT_API_STORAGE_ROOT="
+        insertafter: EOF
+
     - name: Install systemd unit files
       ansible.builtin.copy:
         src: "{{ playbook_dir }}/../../deploy/systemd/{{ item }}"

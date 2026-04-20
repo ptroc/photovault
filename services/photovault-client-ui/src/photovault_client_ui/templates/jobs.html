@@ -39,18 +39,71 @@
                 {{ job.m2.operation_state_label }}
               </span>
             </div>
+            <div class="job-progress">
+              <div class="job-progress-head">
+                <span>Transfer progress</span>
+                <strong>{{ job.operator_view.transferred_file_count }} transferred / {{ job.operator_view.total_file_count }} total</strong>
+              </div>
+              <div class="progress-track" aria-label="transfer progress">
+                {% if job.operator_view.uploaded_percent > 0 %}
+                  <span
+                    class="progress-segment progress-uploaded"
+                    style="width: {{ '%.2f'|format(job.operator_view.uploaded_percent) }}%;"
+                    title="Uploaded"
+                  ></span>
+                {% endif %}
+                {% if job.operator_view.ignored_percent > 0 %}
+                  <span
+                    class="progress-segment progress-ignored"
+                    style="width: {{ '%.2f'|format(job.operator_view.ignored_percent) }}%;"
+                    title="Ignored"
+                  ></span>
+                {% endif %}
+                {% if job.operator_view.failed_percent > 0 %}
+                  <span
+                    class="progress-segment progress-failed"
+                    style="width: {{ '%.2f'|format(job.operator_view.failed_percent) }}%;"
+                    title="Errors"
+                  ></span>
+                {% endif %}
+                {% if job.operator_view.pending_percent > 0 %}
+                  <span
+                    class="progress-segment progress-pending"
+                    style="width: {{ '%.2f'|format(job.operator_view.pending_percent) }}%;"
+                    title="Pending"
+                  ></span>
+                {% endif %}
+                {% if job.operator_view.total_file_count == 0 %}
+                  <span class="progress-segment progress-pending" style="width: 100%;"></span>
+                {% endif %}
+              </div>
+              <div class="progress-legend muted">
+                uploaded {{ job.operator_view.transferred_file_count }}
+                | ignored {{ job.operator_view.ignored_file_count }}
+                | errors {{ job.operator_view.failed_file_count }}
+                | pending {{ job.operator_view.pending_file_count }}
+              </div>
+            </div>
             <div class="kpi-grid section">
               <div class="kpi-box">
                 <span class="muted">Daemon status</span>
-                <span class="kpi-value">{{ job.status }}</span>
+                <span class="kpi-value">{{ job.status|replace('_', ' ')|lower|capitalize }}</span>
               </div>
               <div class="kpi-box">
                 <span class="muted">Current phase</span>
                 <span class="kpi-value">{{ job.operator_view.phase_label }}</span>
               </div>
               <div class="kpi-box">
-                <span class="muted">Upload required</span>
-                <span class="kpi-value status-warn">{{ job.operator_view.upload_required_count }}</span>
+                <span class="muted">Transferred files</span>
+                <span class="kpi-value {% if job.operator_view.transferred_file_count > 0 %}status-ok{% else %}muted{% endif %}">
+                  {{ job.operator_view.transferred_file_count }}
+                </span>
+              </div>
+              <div class="kpi-box">
+                <span class="muted">Pending files</span>
+                <span class="kpi-value {% if job.operator_view.pending_file_count > 0 %}status-warn{% else %}status-ok{% endif %}">
+                  {{ job.operator_view.pending_file_count }}
+                </span>
               </div>
               <div class="kpi-box">
                 <span class="muted">Retrying files</span>

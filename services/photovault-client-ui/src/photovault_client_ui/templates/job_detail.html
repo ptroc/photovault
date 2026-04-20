@@ -23,7 +23,7 @@
     <div class="kpi-grid">
       <div class="kpi-box">
         <span class="muted">Job status</span>
-        <span class="kpi-value">{{ selected_job.status }}</span>
+        <span class="kpi-value">{{ selected_job.status|replace('_', ' ')|lower|capitalize }}</span>
       </div>
       <div class="kpi-box">
         <span class="muted">Current phase</span>

@@ -1,7 +1,7 @@
 import subprocess
 
 import httpx
-from photovault_client_ui.app import _parse_nmcli_multiline, create_app
+from photovault_client_ui.app import _derive_job_operator_view, _parse_nmcli_multiline, create_app
 
 
 def _network_snapshot() -> dict[str, object]:
@@ -310,6 +310,9 @@ def test_jobs_page_renders_filtered_views() -> None:
 
     assert "Jobs" in active
     assert "Open job detail" in active
+    assert "Transfer progress" in active
+    assert "Transferred files" in active
+    assert "Pending files" in active
     assert "Job #4" in active
     assert "Job #2" not in active
     assert "Job #2" in waiting
@@ -317,6 +320,26 @@ def test_jobs_page_renders_filtered_views() -> None:
     assert "Job #1" not in active
     assert "Job #1" in blocked
     assert "Job #3" in completed
+
+
+def test_derive_job_operator_view_reports_transferred_and_pending_file_counts() -> None:
+    operator_view = _derive_job_operator_view(
+        {
+            "status": "WAIT_NETWORK",
+            "status_counts": {
+                "READY_TO_UPLOAD": 2,
+                "UPLOADED": 1,
+                "VERIFIED_REMOTE": 3,
+                "DUPLICATE_SHA_GLOBAL": 2,
+                "DUPLICATE_SESSION_SHA": 1,
+            },
+            "files": [],
+        }
+    )
+
+    assert operator_view["transferred_file_count"] == 3
+    assert operator_view["total_file_count"] == 9
+    assert operator_view["pending_file_count"] == 3
 
 
 def test_job_detail_route_renders_file_level_state() -> None:

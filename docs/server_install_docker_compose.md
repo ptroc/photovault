@@ -47,6 +47,7 @@ sudo git pull --ff-only
 
 ```bash
 sudo mkdir -p /var/storage
+sudo mkdir -p /var/storage/photovault
 ```
 
 Note: this mount is provided to both containers as a fixed bind mount (`/var/storage:/var/storage`).
@@ -60,6 +61,7 @@ sudo tee /opt/photovault/deploy/docker/.env >/dev/null <<'ENV'
 # External PostgreSQL connection for photovault-api.
 # If PostgreSQL runs on the Docker host, use host.docker.internal.
 PHOTOVAULT_API_DATABASE_URL=postgresql://photovault_api:change-me-strong-password@host.docker.internal:5432/photovault
+PHOTOVAULT_API_STORAGE_ROOT=/var/storage/photovault
 ENV
 ```
 
@@ -121,7 +123,8 @@ sudo docker compose --env-file .env -f docker-compose.server.yml up -d --force-r
 
 ## Troubleshooting quick checks
 
-- If API exits immediately, verify `PHOTOVAULT_API_DATABASE_URL` in `.env`.
+- If API exits immediately, verify both `PHOTOVAULT_API_DATABASE_URL` and
+  `PHOTOVAULT_API_STORAGE_ROOT` in `.env`.
 - If DB connection fails and DB is on host, confirm PostgreSQL listens on an interface reachable from Docker and permits your user/password.
 - If health checks stay unhealthy, inspect logs with `docker compose logs` and test DB connectivity separately.
 - If remote access fails, verify host firewall allows `9301` and `9401`.

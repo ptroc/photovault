@@ -2,7 +2,10 @@
 
 import hashlib
 import os
+import re
+from datetime import UTC, datetime
 from enum import StrEnum
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -51,12 +54,52 @@ class VerifyResponse(BaseModel):
     status: str
 
 
+class IndexStorageResponse(BaseModel):
+    scanned_files: int
+    indexed_files: int
+    new_sha_entries: int
+    existing_sha_matches: int
+    path_conflicts: int
+    errors: int
+
+
+def _sanitize_component(raw_value: str, *, default_value: str) -> str:
+    normalized = raw_value.strip()
+    if not normalized:
+        return default_value
+    normalized = normalized.replace("\\", "_").replace("/", "_")
+    normalized = re.sub(r"[^A-Za-z0-9._ -]+", "_", normalized)
+    normalized = normalized.replace(" ", "_")
+    normalized = re.sub(r"_+", "_", normalized)
+    normalized = normalized.strip("._-")
+    return normalized or default_value
+
+
+def _compute_sha256(path: Path) -> str:
+    hasher = hashlib.sha256()
+    with path.open("rb") as handle:
+        while True:
+            chunk = handle.read(1024 * 1024)
+            if not chunk:
+                break
+            hasher.update(chunk)
+    return hasher.hexdigest()
+
+
 def create_app(
     initial_known_sha256: set[str] | None = None,
     *,
     state_store: UploadStateStore | None = None,
     database_url: str | None = None,
+    storage_root: str | Path | None = None,
 ) -> FastAPI:
+    resolved_storage_root = storage_root or os.getenv("PHOTOVAULT_API_STORAGE_ROOT")
+    if not resolved_storage_root:
+        raise RuntimeError("PHOTOVAULT_API_STORAGE_ROOT must be set")
+    storage_root_path = Path(resolved_storage_root).expanduser().resolve()
+    temp_root = storage_root_path / ".temp_uploads"
+    temp_root.mkdir(parents=True, exist_ok=True)
+
     app = FastAPI(title="photovault-api", version="0.1.0")
     if state_store is not None:
         store = state_store
@@ -68,6 +111,8 @@ def create_app(
             store = InMemoryUploadStateStore(known_sha256=set(initial_known_sha256 or set()))
     store.initialize()
     app.state.upload_state_store = store
+    app.state.storage_root = storage_root_path
+    app.state.storage_temp_root = temp_root
 
     @app.get("/healthz")
     def healthz() -> dict[str, str]:
@@ -113,6 +158,13 @@ def create_app(
         if expected_size < 0:
             raise HTTPException(status_code=400, detail="x-size-bytes must be non-negative")
 
+        raw_job_name = request.headers.get("x-job-name")
+        if raw_job_name is None or not raw_job_name.strip():
+            raise HTTPException(status_code=400, detail="missing x-job-name header")
+        raw_original_filename = request.headers.get("x-original-filename")
+        if raw_original_filename is None or not raw_original_filename.strip():
+            raise HTTPException(status_code=400, detail="missing x-original-filename header")
+
         content = await request.body()
         if len(content) != expected_size:
             raise HTTPException(status_code=400, detail="payload size does not match x-size-bytes")
@@ -121,7 +173,19 @@ def create_app(
         if observed_sha != sha256_hex:
             raise HTTPException(status_code=400, detail="payload sha256 mismatch")
 
-        store.upsert_temp_upload(sha256_hex, expected_size, content)
+        temp_relative_path = f".temp_uploads/{sha256_hex}.upload"
+        temp_path = storage_root_path / temp_relative_path
+        temp_path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path.write_bytes(content)
+        received_at_utc = datetime.now(UTC).isoformat()
+        store.upsert_temp_upload(
+            sha256_hex=sha256_hex,
+            size_bytes=expected_size,
+            temp_relative_path=temp_relative_path,
+            job_name=raw_job_name,
+            original_filename=raw_original_filename,
+            received_at_utc=received_at_utc,
+        )
         return UploadContentResponse(status="STORED_TEMP")
 
     @app.post("/v1/upload/verify", response_model=VerifyResponse)
@@ -134,14 +198,103 @@ def create_app(
         upload_row = store.get_temp_upload(payload.sha256_hex)
         if upload_row is None:
             return VerifyResponse(status="VERIFY_FAILED")
-        stored_size, content = upload_row
-        if stored_size != payload.size_bytes:
+
+        temp_path = storage_root_path / upload_row.temp_relative_path
+        if not temp_path.is_file():
             return VerifyResponse(status="VERIFY_FAILED")
-        if hashlib.sha256(content).hexdigest() != payload.sha256_hex:
+        observed_size = temp_path.stat().st_size
+        if upload_row.size_bytes != payload.size_bytes or observed_size != payload.size_bytes:
+            return VerifyResponse(status="VERIFY_FAILED")
+        if _compute_sha256(temp_path) != payload.sha256_hex:
             return VerifyResponse(status="VERIFY_FAILED")
 
+        received_at = datetime.fromisoformat(upload_row.received_at_utc)
+        year_part = f"{received_at.year:04d}"
+        month_part = f"{received_at.month:02d}"
+        job_part = _sanitize_component(upload_row.job_name, default_value="unknown_job")
+        original_name = _sanitize_component(
+            upload_row.original_filename,
+            default_value=f"{payload.sha256_hex}.bin",
+        )
+        base_relative_path = Path(year_part) / month_part / job_part / original_name
+
+        target_relative_path = base_relative_path
+        target_path = storage_root_path / target_relative_path
+        if target_path.exists():
+            existing_sha = _compute_sha256(target_path)
+            if existing_sha != payload.sha256_hex:
+                base_stem = Path(original_name).stem
+                suffix = Path(original_name).suffix
+                fallback_name = f"{base_stem}__{payload.sha256_hex[:12]}{suffix}"
+                target_relative_path = Path(year_part) / month_part / job_part / fallback_name
+                target_path = storage_root_path / target_relative_path
+                if target_path.exists() and _compute_sha256(target_path) != payload.sha256_hex:
+                    return VerifyResponse(status="VERIFY_FAILED")
+
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        if not target_path.exists():
+            os.replace(temp_path, target_path)
+        else:
+            temp_path.unlink(missing_ok=True)
+
+        now = datetime.now(UTC).isoformat()
         store.mark_sha_verified(payload.sha256_hex)
+        store.upsert_stored_file(
+            relative_path=str(target_relative_path.as_posix()),
+            sha256_hex=payload.sha256_hex,
+            size_bytes=payload.size_bytes,
+            source_kind="upload_verify",
+            seen_at_utc=now,
+        )
         store.remove_temp_upload(payload.sha256_hex)
         return VerifyResponse(status="VERIFIED")
+
+    @app.post("/v1/storage/index", response_model=IndexStorageResponse)
+    def index_storage() -> IndexStorageResponse:
+        store: UploadStateStore = app.state.upload_state_store
+        scanned_files = 0
+        indexed_files = 0
+        new_sha_entries = 0
+        existing_sha_matches = 0
+        path_conflicts = 0
+        errors = 0
+        now = datetime.now(UTC).isoformat()
+
+        for candidate in storage_root_path.rglob("*"):
+            if not candidate.is_file():
+                continue
+            relative_path = candidate.relative_to(storage_root_path)
+            if relative_path.parts and relative_path.parts[0] == ".temp_uploads":
+                continue
+            scanned_files += 1
+            try:
+                observed_sha = _compute_sha256(candidate)
+                size_bytes = candidate.stat().st_size
+                existing = store.get_stored_file_by_path(str(relative_path.as_posix()))
+                if existing is not None and existing.sha256_hex != observed_sha:
+                    path_conflicts += 1
+                if store.mark_sha_verified(observed_sha):
+                    new_sha_entries += 1
+                else:
+                    existing_sha_matches += 1
+                store.upsert_stored_file(
+                    relative_path=str(relative_path.as_posix()),
+                    sha256_hex=observed_sha,
+                    size_bytes=size_bytes,
+                    source_kind="index_scan",
+                    seen_at_utc=now,
+                )
+                indexed_files += 1
+            except OSError:
+                errors += 1
+
+        return IndexStorageResponse(
+            scanned_files=scanned_files,
+            indexed_files=indexed_files,
+            new_sha_entries=new_sha_entries,
+            existing_sha_matches=existing_sha_matches,
+            path_conflicts=path_conflicts,
+            errors=errors,
+        )
 
     return app
