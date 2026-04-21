@@ -157,6 +157,19 @@ Expected:
 - API health returns JSON like `{"status":"ok"}`
 - Server UI request succeeds
 
+Run the explicit M4 smoke check:
+
+```bash
+cd /opt/photovault
+sudo -u photovault ./.venv/bin/python scripts/m4_smoke_check.py --storage-root /var/storage/photovault
+```
+
+Expected:
+
+- output includes `m4-smoke: ok`
+- the deterministic smoke fixture is indexed under `_photovault_smoke/m4/manual-smoke.txt`
+- metadata handshake for that SHA is reported as already existing after the index run
+
 ## 10. Day-2 operations
 
 Restart after config or code change:
@@ -178,6 +191,8 @@ sudo journalctl -u photovault-server-ui.service -f
   `PHOTOVAULT_API_STORAGE_ROOT` are set and valid.
 - If API logs show storage permission errors, verify `/var/storage/photovault` is writable by the
   `photovault` service user.
+- If health checks pass but M4 smoke fails, confirm the configured storage root is the same path
+  exposed to `PHOTOVAULT_API_STORAGE_ROOT` and that the API can write and re-index within it.
 - If DB connection fails, test login with `psql` using the same credentials/host.
 - If units fail to start, confirm `/opt/photovault/.venv/bin/python` exists.
 - If ports are unreachable remotely, check host firewall for `9301` and `9401`.

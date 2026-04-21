@@ -42,15 +42,30 @@
         </span>
       </div>
       <div class="kpi-box">
+        <span class="muted">Local ingest complete</span>
+        <span class="kpi-value {% if selected_job.local_ingest_complete %}status-ok{% else %}status-active{% endif %}">
+          {% if selected_job.local_ingest_complete %}yes{% else %}no{% endif %}
+        </span>
+      </div>
+      <div class="kpi-box">
         <span class="muted">Retrying files</span>
         <span class="kpi-value {% if selected_job.operator_view.retrying_file_count > 0 %}status-warn{% else %}status-ok{% endif %}">
           {{ selected_job.operator_view.retrying_file_count }}
+        </span>
+      </div>
+      <div class="kpi-box">
+        <span class="muted">Retry exhausted files</span>
+        <span class="kpi-value {% if selected_job.operator_view.retry_exhausted_file_count > 0 %}status-error{% else %}status-ok{% endif %}">
+          {{ selected_job.operator_view.retry_exhausted_file_count }}
         </span>
       </div>
     </div>
     <div class="banner {% if selected_job.operator_view.requires_operator_action %}banner-critical{% elif selected_job.status == 'WAIT_NETWORK' %}banner-warning{% else %}banner-success{% endif %}">
       <strong>Operator guidance</strong>
       <span>{{ selected_job.operator_view.next_action }}</span>
+      <span>{{ selected_job.operator_view.completion_summary }}</span>
+      <span>{{ selected_job.operator_view.wait_summary }}</span>
+      <span>{{ selected_job.operator_view.retry_summary }}</span>
       {% if selected_job.operator_view.retry_backoff_active %}
         <span>Retry backoff is active: daemon is waiting in <code>WAIT_NETWORK</code> after prior failures.</span>
       {% endif %}
@@ -101,6 +116,11 @@
           {{ selected_job.operator_view.max_retry_count }}
         </span>
       </div>
+    </div>
+    <div class="banner {% if selected_job.operator_view.requires_operator_action %}banner-critical{% elif selected_job.operator_view.retry_backoff_active or selected_job.status == 'WAIT_NETWORK' %}banner-warning{% else %}banner-success{% endif %}">
+      <strong>Completion posture</strong>
+      <span>{{ selected_job.operator_view.completion_summary }}</span>
+      <span>{{ selected_job.operator_view.retry_summary }}</span>
     </div>
   </section>
 

@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 from photovault_api.state_store import (
     InMemoryUploadStateStore,
     PostgresUploadStateStore,
+    StorageIndexRunRecord,
     StorageSummary,
     UploadStateStore,
 )
@@ -92,6 +93,49 @@ class AdminFileListResponse(BaseModel):
     items: list[AdminFileItem]
 
 
+class LatestIndexRunResponse(BaseModel):
+    scanned_files: int
+    indexed_files: int
+    new_sha_entries: int
+    existing_sha_matches: int
+    path_conflicts: int
+    errors: int
+    completed_at_utc: str
+
+
+class LatestIndexRunEnvelope(BaseModel):
+    latest_run: LatestIndexRunResponse | None
+
+
+class DuplicateShaGroupItem(BaseModel):
+    sha256_hex: str
+    file_count: int
+    first_seen_at_utc: str
+    last_seen_at_utc: str
+    relative_paths: list[str]
+
+
+class DuplicateShaGroupListResponse(BaseModel):
+    total: int
+    limit: int
+    offset: int
+    items: list[DuplicateShaGroupItem]
+
+
+class PathConflictItem(BaseModel):
+    relative_path: str
+    previous_sha256_hex: str
+    current_sha256_hex: str
+    detected_at_utc: str
+
+
+class PathConflictListResponse(BaseModel):
+    total: int
+    limit: int
+    offset: int
+    items: list[PathConflictItem]
+
+
 def _sanitize_component(raw_value: str, *, default_value: str) -> str:
     normalized = raw_value.strip()
     if not normalized:
@@ -113,6 +157,18 @@ def _compute_sha256(path: Path) -> str:
                 break
             hasher.update(chunk)
     return hasher.hexdigest()
+
+
+def _iter_storage_files(storage_root_path: Path) -> list[Path]:
+    candidates = [
+        candidate
+        for candidate in storage_root_path.rglob("*")
+        if candidate.is_file() and ".temp_uploads" not in candidate.parts
+    ]
+    return sorted(
+        candidates,
+        key=lambda candidate: candidate.relative_to(storage_root_path).as_posix(),
+    )
 
 
 def create_app(
@@ -289,12 +345,8 @@ def create_app(
         errors = 0
         now = datetime.now(UTC).isoformat()
 
-        for candidate in storage_root_path.rglob("*"):
-            if not candidate.is_file():
-                continue
+        for candidate in _iter_storage_files(storage_root_path):
             relative_path = candidate.relative_to(storage_root_path)
-            if relative_path.parts and relative_path.parts[0] == ".temp_uploads":
-                continue
             scanned_files += 1
             try:
                 observed_sha = _compute_sha256(candidate)
@@ -302,6 +354,12 @@ def create_app(
                 existing = store.get_stored_file_by_path(str(relative_path.as_posix()))
                 if existing is not None and existing.sha256_hex != observed_sha:
                     path_conflicts += 1
+                    store.record_path_conflict(
+                        relative_path=str(relative_path.as_posix()),
+                        previous_sha256_hex=existing.sha256_hex,
+                        current_sha256_hex=observed_sha,
+                        detected_at_utc=now,
+                    )
                 if store.mark_sha_verified(observed_sha):
                     new_sha_entries += 1
                 else:
@@ -317,7 +375,7 @@ def create_app(
             except OSError:
                 errors += 1
 
-        return IndexStorageResponse(
+        result = IndexStorageResponse(
             scanned_files=scanned_files,
             indexed_files=indexed_files,
             new_sha_entries=new_sha_entries,
@@ -325,6 +383,18 @@ def create_app(
             path_conflicts=path_conflicts,
             errors=errors,
         )
+        store.record_storage_index_run(
+            StorageIndexRunRecord(
+                scanned_files=result.scanned_files,
+                indexed_files=result.indexed_files,
+                new_sha_entries=result.new_sha_entries,
+                existing_sha_matches=result.existing_sha_matches,
+                path_conflicts=result.path_conflicts,
+                errors=result.errors,
+                completed_at_utc=now,
+            )
+        )
+        return result
 
     @app.get("/v1/admin/overview", response_model=AdminOverviewResponse)
     def admin_overview() -> AdminOverviewResponse:
@@ -364,6 +434,69 @@ def create_app(
                 )
                 for record in records
             ],
+        )
+
+    @app.get("/v1/admin/duplicates", response_model=DuplicateShaGroupListResponse)
+    def admin_duplicates(
+        limit: int = Query(default=25, ge=1, le=100),
+        offset: int = Query(default=0, ge=0),
+    ) -> DuplicateShaGroupListResponse:
+        store: UploadStateStore = app.state.upload_state_store
+        total, groups = store.list_duplicate_sha_groups(limit=limit, offset=offset)
+        return DuplicateShaGroupListResponse(
+            total=total,
+            limit=limit,
+            offset=offset,
+            items=[
+                DuplicateShaGroupItem(
+                    sha256_hex=group.sha256_hex,
+                    file_count=group.file_count,
+                    first_seen_at_utc=group.first_seen_at_utc,
+                    last_seen_at_utc=group.last_seen_at_utc,
+                    relative_paths=list(group.relative_paths),
+                )
+                for group in groups
+            ],
+        )
+
+    @app.get("/v1/admin/path-conflicts", response_model=PathConflictListResponse)
+    def admin_path_conflicts(
+        limit: int = Query(default=25, ge=1, le=100),
+        offset: int = Query(default=0, ge=0),
+    ) -> PathConflictListResponse:
+        store: UploadStateStore = app.state.upload_state_store
+        total, records = store.list_path_conflicts(limit=limit, offset=offset)
+        return PathConflictListResponse(
+            total=total,
+            limit=limit,
+            offset=offset,
+            items=[
+                PathConflictItem(
+                    relative_path=record.relative_path,
+                    previous_sha256_hex=record.previous_sha256_hex,
+                    current_sha256_hex=record.current_sha256_hex,
+                    detected_at_utc=record.detected_at_utc,
+                )
+                for record in records
+            ],
+        )
+
+    @app.get("/v1/admin/latest-index-run", response_model=LatestIndexRunEnvelope)
+    def admin_latest_index_run() -> LatestIndexRunEnvelope:
+        store: UploadStateStore = app.state.upload_state_store
+        latest_run = store.get_latest_storage_index_run()
+        if latest_run is None:
+            return LatestIndexRunEnvelope(latest_run=None)
+        return LatestIndexRunEnvelope(
+            latest_run=LatestIndexRunResponse(
+                scanned_files=latest_run.scanned_files,
+                indexed_files=latest_run.indexed_files,
+                new_sha_entries=latest_run.new_sha_entries,
+                existing_sha_matches=latest_run.existing_sha_matches,
+                path_conflicts=latest_run.path_conflicts,
+                errors=latest_run.errors,
+                completed_at_utc=latest_run.completed_at_utc,
+            )
         )
 
     return app

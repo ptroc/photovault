@@ -57,4 +57,59 @@
     </tbody>
   </table>
 </section>
+
+<section class="panel" style="margin-top: 0.9rem;">
+  <h2 style="margin-top: 0;">Latest Index Run</h2>
+  {% if latest_run %}
+  <table>
+    <thead>
+      <tr>
+        <th>Signal</th>
+        <th>Value</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Completed at</td>
+        <td class="mono">{{ latest_run.completed_at_utc }}</td>
+      </tr>
+      <tr>
+        <td>Scanned files</td>
+        <td>{{ latest_run.scanned_files }}</td>
+      </tr>
+      <tr>
+        <td>Indexed files</td>
+        <td>{{ latest_run.indexed_files }}</td>
+      </tr>
+      <tr>
+        <td>New SHA entries</td>
+        <td>{{ latest_run.new_sha_entries }}</td>
+      </tr>
+      <tr>
+        <td>Existing SHA matches</td>
+        <td>{{ latest_run.existing_sha_matches }}</td>
+      </tr>
+      <tr>
+        <td>Path conflicts</td>
+        <td>{{ latest_run.path_conflicts }}</td>
+      </tr>
+      <tr>
+        <td>Errors</td>
+        <td>{{ latest_run.errors }}</td>
+      </tr>
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">No storage index run has been recorded yet.</p>
+  {% endif %}
+</section>
+
+<section class="panel" style="margin-top: 0.9rem;">
+  <h2 style="margin-top: 0;">Inspection Shortcuts</h2>
+  <p class="muted">Use the focused views below for duplicate SHA groups and changed-content path conflicts.</p>
+  <div class="pager">
+    <a href="/duplicates">Open duplicate SHA groups</a>
+    <a href="/conflicts">Open path conflict history</a>
+  </div>
+</section>
 {% endblock %}

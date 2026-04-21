@@ -104,6 +104,20 @@ Expected:
 - Server UI responds on `/`
 - Server UI proxies its overview/files data from `http://photovault-api:9301` inside Compose
 
+Run the explicit M4 smoke check inside the API container:
+
+```bash
+cd /opt/photovault
+sudo docker compose -f deploy/docker/docker-compose.server.yml exec photovault-api \
+  python scripts/m4_smoke_check.py --storage-root "${PHOTOVAULT_API_STORAGE_ROOT:-/var/storage}"
+```
+
+Expected:
+
+- output includes `m4-smoke: ok`
+- the deterministic smoke fixture is indexed under `_photovault_smoke/m4/manual-smoke.txt`
+- metadata handshake for that SHA is reported as already existing after the index run
+
 ## 7. Day-2 operations
 
 Restart:
@@ -133,4 +147,6 @@ sudo docker compose --env-file .env -f docker-compose.server.yml up -d --build -
   `PHOTOVAULT_API_STORAGE_ROOT` in `.env`.
 - If DB connection fails and DB is on host, confirm PostgreSQL listens on an interface reachable from Docker and permits your user/password.
 - If health checks stay unhealthy, inspect logs with `docker compose logs` and test DB connectivity separately.
+- If container health is green but M4 smoke fails, verify the bind-mounted storage path is the
+  same path configured in `PHOTOVAULT_API_STORAGE_ROOT` and is writable inside the container.
 - If remote access fails, verify host firewall allows `9301` and `9401`.

@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% set title = "Duplicates" %}
+{% block content %}
+<section>
+  <h1>Duplicate SHA Groups</h1>
+  <p class="muted">Stored paths that currently reconcile to the same SHA256.</p>
+</section>
+
+<section class="panel">
+  {% if groups %}
+  <p class="muted">Showing {{ groups|length }} duplicate groups out of {{ total }}.</p>
+  <table>
+    <thead>
+      <tr>
+        <th>SHA256</th>
+        <th>Paths</th>
+        <th>Last Seen (UTC)</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for group in groups %}
+      <tr>
+        <td class="mono">{{ group.sha256_hex }}</td>
+        <td>
+          <div>{{ group.file_count }} path(s)</div>
+          {% for relative_path in group.relative_paths %}
+          <div class="mono">{{ relative_path }}</div>
+          {% endfor %}
+        </td>
+        <td class="mono">{{ group.last_seen_at_utc }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">No duplicate SHA groups are currently recorded.</p>
+  {% endif %}
+</section>
+{% endblock %}

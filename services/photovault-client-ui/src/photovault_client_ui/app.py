@@ -430,9 +430,6 @@ def _derive_job_operator_view(job: dict[str, Any]) -> dict[str, Any]:
         sum(status_counts.get(file_status, 0) for file_status in _UPLOAD_REQUIRED_STATUSES)
     )
     total_file_count = int(sum(int(count) for count in status_counts.values()))
-    terminal_file_count = int(
-        sum(status_counts.get(file_status, 0) for file_status in _FILE_TERMINAL_STATUSES)
-    )
     transferred_file_count = int(status_counts.get("VERIFIED_REMOTE", 0))
     ignored_file_count = int(sum(status_counts.get(file_status, 0) for file_status in _IGNORED_FILE_STATUSES))
     failed_file_count = int(sum(status_counts.get(file_status, 0) for file_status in _ERROR_FILE_STATUSES))
@@ -449,6 +446,10 @@ def _derive_job_operator_view(job: dict[str, Any]) -> dict[str, Any]:
     waiting_on_network = status == "WAIT_NETWORK"
     retry_backoff_active = waiting_on_network and (len(retrying_files) > 0 or upload_required_count > 0)
     requires_operator_action = status in _BLOCKED_DAEMON_STATES or len(error_files) > 0
+    local_ingest_complete = bool(job.get("local_ingest_complete"))
+    remote_complete = bool(job.get("m2", {}).get("remote_complete"))
+    retry_exhausted_file_count = max(len(error_files), int(status_counts.get("ERROR_FILE", 0)))
+
     if requires_operator_action:
         next_action = "Open job detail and resolve failed files before new ingest."
     elif waiting_on_network:
@@ -457,6 +458,38 @@ def _derive_job_operator_view(job: dict[str, Any]) -> dict[str, Any]:
         next_action = "Wait for auto-progression and refresh."
     else:
         next_action = "Monitor progress; run one manual tick only for explicit recovery."
+
+    if remote_complete:
+        completion_summary = "Remote upload and cleanup are complete for all remote-targeted files."
+    elif local_ingest_complete and upload_required_count > 0:
+        completion_summary = "Local ingest is complete; only remote upload, verify, or cleanup work remains."
+    elif local_ingest_complete:
+        completion_summary = "Local ingest is complete; remaining work is limited to job finalization."
+    else:
+        completion_summary = "Local ingest is still in progress before remote completion can finish."
+
+    if retry_exhausted_file_count > 0:
+        retry_summary = (
+            f"{retry_exhausted_file_count} file(s) need manual retry or isolation "
+            "after upload/verify failure."
+        )
+    elif retry_backoff_active:
+        retry_summary = "Retry backoff is active while the daemon waits in WAIT_NETWORK."
+    elif len(retrying_files) > 0:
+        retry_summary = "Retry history exists, but the daemon is currently progressing normally."
+    else:
+        retry_summary = "No file is currently paused on upload retry handling."
+
+    if waiting_on_network and upload_required_count > 0:
+        wait_summary = (
+            f"{upload_required_count} file(s) are queued for remote upload/verify once connectivity returns."
+        )
+    elif waiting_on_network:
+        wait_summary = "The daemon is waiting for network before remote progression can continue."
+    elif requires_operator_action:
+        wait_summary = "Operator action is required before this job can continue remote progression."
+    else:
+        wait_summary = "No external dependency is currently blocking this job."
 
     return {
         "phase_label": _job_phase_label(status),
@@ -473,10 +506,14 @@ def _derive_job_operator_view(job: dict[str, Any]) -> dict[str, Any]:
         "failed_percent": _segment_percent(failed_file_count, total_file_count),
         "pending_percent": _segment_percent(pending_file_count, total_file_count),
         "retrying_file_count": len(retrying_files),
+        "retry_exhausted_file_count": retry_exhausted_file_count,
         "max_retry_count": max_retry_count,
         "retry_backoff_active": retry_backoff_active,
         "requires_operator_action": requires_operator_action,
         "next_action": next_action,
+        "completion_summary": completion_summary,
+        "retry_summary": retry_summary,
+        "wait_summary": wait_summary,
         "error_files": error_files,
     }
 

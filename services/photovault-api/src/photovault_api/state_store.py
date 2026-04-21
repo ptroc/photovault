@@ -29,6 +29,34 @@ class StoredFileRecord:
 
 
 @dataclass(frozen=True)
+class DuplicateShaGroup:
+    sha256_hex: str
+    file_count: int
+    first_seen_at_utc: str
+    last_seen_at_utc: str
+    relative_paths: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class PathConflictRecord:
+    relative_path: str
+    previous_sha256_hex: str
+    current_sha256_hex: str
+    detected_at_utc: str
+
+
+@dataclass(frozen=True)
+class StorageIndexRunRecord:
+    scanned_files: int
+    indexed_files: int
+    new_sha_entries: int
+    existing_sha_matches: int
+    path_conflicts: int
+    errors: int
+    completed_at_utc: str
+
+
+@dataclass(frozen=True)
 class StorageSummary:
     total_known_sha256: int
     total_stored_files: int
@@ -77,6 +105,25 @@ class UploadStateStore(Protocol):
 
     def list_stored_files(self, *, limit: int, offset: int) -> tuple[int, list[StoredFileRecord]]: ...
 
+    def list_duplicate_sha_groups(
+        self, *, limit: int, offset: int
+    ) -> tuple[int, list[DuplicateShaGroup]]: ...
+
+    def record_path_conflict(
+        self,
+        *,
+        relative_path: str,
+        previous_sha256_hex: str,
+        current_sha256_hex: str,
+        detected_at_utc: str,
+    ) -> None: ...
+
+    def list_path_conflicts(self, *, limit: int, offset: int) -> tuple[int, list[PathConflictRecord]]: ...
+
+    def record_storage_index_run(self, record: StorageIndexRunRecord) -> None: ...
+
+    def get_latest_storage_index_run(self) -> StorageIndexRunRecord | None: ...
+
     def summarize_storage(self) -> StorageSummary: ...
 
     def remove_temp_upload(self, sha256_hex: str) -> None: ...
@@ -89,6 +136,8 @@ class InMemoryUploadStateStore:
     known_sha256: set[str] = field(default_factory=set)
     upload_temp: dict[str, TempUploadRecord] = field(default_factory=dict)
     stored_files: dict[str, StoredFileRecord] = field(default_factory=dict)
+    path_conflicts: list[PathConflictRecord] = field(default_factory=list)
+    latest_index_run: StorageIndexRunRecord | None = None
     _lock: Lock = field(default_factory=Lock)
 
     def initialize(self) -> None:
@@ -163,6 +212,68 @@ class InMemoryUploadStateStore:
             ordered = sorted(ordered, key=lambda item: item.last_seen_at_utc, reverse=True)
             total = len(ordered)
             return total, ordered[offset : offset + limit]
+
+    def list_duplicate_sha_groups(
+        self, *, limit: int, offset: int
+    ) -> tuple[int, list[DuplicateShaGroup]]:
+        with self._lock:
+            grouped: dict[str, list[StoredFileRecord]] = {}
+            for record in self.stored_files.values():
+                grouped.setdefault(record.sha256_hex, []).append(record)
+            groups = [
+                DuplicateShaGroup(
+                    sha256_hex=sha256_hex,
+                    file_count=len(records),
+                    first_seen_at_utc=min(record.first_seen_at_utc for record in records),
+                    last_seen_at_utc=max(record.last_seen_at_utc for record in records),
+                    relative_paths=tuple(sorted(record.relative_path for record in records)),
+                )
+                for sha256_hex, records in grouped.items()
+                if len(records) > 1
+            ]
+            ordered = sorted(
+                groups,
+                key=lambda item: (-item.file_count, item.last_seen_at_utc, item.sha256_hex),
+                reverse=False,
+            )
+            total = len(ordered)
+            return total, ordered[offset : offset + limit]
+
+    def record_path_conflict(
+        self,
+        *,
+        relative_path: str,
+        previous_sha256_hex: str,
+        current_sha256_hex: str,
+        detected_at_utc: str,
+    ) -> None:
+        with self._lock:
+            self.path_conflicts.append(
+                PathConflictRecord(
+                    relative_path=relative_path,
+                    previous_sha256_hex=previous_sha256_hex,
+                    current_sha256_hex=current_sha256_hex,
+                    detected_at_utc=detected_at_utc,
+                )
+            )
+
+    def list_path_conflicts(self, *, limit: int, offset: int) -> tuple[int, list[PathConflictRecord]]:
+        with self._lock:
+            ordered = sorted(
+                self.path_conflicts,
+                key=lambda item: (item.detected_at_utc, item.relative_path),
+                reverse=True,
+            )
+            total = len(ordered)
+            return total, ordered[offset : offset + limit]
+
+    def record_storage_index_run(self, record: StorageIndexRunRecord) -> None:
+        with self._lock:
+            self.latest_index_run = record
+
+    def get_latest_storage_index_run(self) -> StorageIndexRunRecord | None:
+        with self._lock:
+            return self.latest_index_run
 
     def summarize_storage(self) -> StorageSummary:
         now = datetime.now(UTC)
@@ -282,6 +393,31 @@ class PostgresUploadStateStore:
                         source_kind TEXT NOT NULL,
                         first_seen_at_utc TEXT NOT NULL,
                         last_seen_at_utc TEXT NOT NULL
+                    );
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS api_storage_path_conflicts (
+                        id BIGSERIAL PRIMARY KEY,
+                        relative_path TEXT NOT NULL,
+                        previous_sha256_hex TEXT NOT NULL,
+                        current_sha256_hex TEXT NOT NULL,
+                        detected_at_utc TEXT NOT NULL
+                    );
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS api_storage_index_runs (
+                        singleton_key BOOLEAN PRIMARY KEY DEFAULT TRUE,
+                        scanned_files INTEGER NOT NULL,
+                        indexed_files INTEGER NOT NULL,
+                        new_sha_entries INTEGER NOT NULL,
+                        existing_sha_matches INTEGER NOT NULL,
+                        path_conflicts INTEGER NOT NULL,
+                        errors INTEGER NOT NULL,
+                        completed_at_utc TEXT NOT NULL
                     );
                     """
                 )
@@ -487,6 +623,178 @@ class PostgresUploadStateStore:
                     for row in rows
                 ]
                 return total, records
+
+    def list_duplicate_sha_groups(
+        self, *, limit: int, offset: int
+    ) -> tuple[int, list[DuplicateShaGroup]]:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    WITH duplicate_groups AS (
+                        SELECT
+                            sha256_hex,
+                            COUNT(*) AS file_count,
+                            MIN(first_seen_at_utc) AS first_seen_at_utc,
+                            MAX(last_seen_at_utc) AS last_seen_at_utc,
+                            ARRAY_AGG(relative_path ORDER BY relative_path ASC) AS relative_paths
+                        FROM api_stored_files
+                        GROUP BY sha256_hex
+                        HAVING COUNT(*) > 1
+                    )
+                    SELECT COUNT(*) FROM duplicate_groups;
+                    """
+                )
+                count_row = cur.fetchone()
+                total = int(count_row[0]) if count_row is not None else 0
+                cur.execute(
+                    """
+                    SELECT
+                        sha256_hex,
+                        file_count,
+                        first_seen_at_utc,
+                        last_seen_at_utc,
+                        relative_paths
+                    FROM (
+                        SELECT
+                            sha256_hex,
+                            COUNT(*) AS file_count,
+                            MIN(first_seen_at_utc) AS first_seen_at_utc,
+                            MAX(last_seen_at_utc) AS last_seen_at_utc,
+                            ARRAY_AGG(relative_path ORDER BY relative_path ASC) AS relative_paths
+                        FROM api_stored_files
+                        GROUP BY sha256_hex
+                        HAVING COUNT(*) > 1
+                    ) duplicate_groups
+                    ORDER BY file_count DESC, last_seen_at_utc DESC, sha256_hex ASC
+                    LIMIT %s
+                    OFFSET %s;
+                    """,
+                    (limit, offset),
+                )
+                rows = cur.fetchall()
+                groups = [
+                    DuplicateShaGroup(
+                        sha256_hex=str(row[0]),
+                        file_count=int(row[1]),
+                        first_seen_at_utc=str(row[2]),
+                        last_seen_at_utc=str(row[3]),
+                        relative_paths=tuple(str(path) for path in row[4]),
+                    )
+                    for row in rows
+                ]
+                return total, groups
+
+    def record_path_conflict(
+        self,
+        *,
+        relative_path: str,
+        previous_sha256_hex: str,
+        current_sha256_hex: str,
+        detected_at_utc: str,
+    ) -> None:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO api_storage_path_conflicts (
+                        relative_path, previous_sha256_hex, current_sha256_hex, detected_at_utc
+                    )
+                    VALUES (%s, %s, %s, %s);
+                    """,
+                    (relative_path, previous_sha256_hex, current_sha256_hex, detected_at_utc),
+                )
+            conn.commit()
+
+    def list_path_conflicts(self, *, limit: int, offset: int) -> tuple[int, list[PathConflictRecord]]:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) FROM api_storage_path_conflicts;")
+                count_row = cur.fetchone()
+                total = int(count_row[0]) if count_row is not None else 0
+                cur.execute(
+                    """
+                    SELECT relative_path, previous_sha256_hex, current_sha256_hex, detected_at_utc
+                    FROM api_storage_path_conflicts
+                    ORDER BY detected_at_utc DESC, relative_path ASC
+                    LIMIT %s
+                    OFFSET %s;
+                    """,
+                    (limit, offset),
+                )
+                rows = cur.fetchall()
+                records = [
+                    PathConflictRecord(
+                        relative_path=str(row[0]),
+                        previous_sha256_hex=str(row[1]),
+                        current_sha256_hex=str(row[2]),
+                        detected_at_utc=str(row[3]),
+                    )
+                    for row in rows
+                ]
+                return total, records
+
+    def record_storage_index_run(self, record: StorageIndexRunRecord) -> None:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO api_storage_index_runs (
+                        singleton_key, scanned_files, indexed_files, new_sha_entries,
+                        existing_sha_matches, path_conflicts, errors, completed_at_utc
+                    )
+                    VALUES (TRUE, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (singleton_key) DO UPDATE
+                    SET scanned_files = EXCLUDED.scanned_files,
+                        indexed_files = EXCLUDED.indexed_files,
+                        new_sha_entries = EXCLUDED.new_sha_entries,
+                        existing_sha_matches = EXCLUDED.existing_sha_matches,
+                        path_conflicts = EXCLUDED.path_conflicts,
+                        errors = EXCLUDED.errors,
+                        completed_at_utc = EXCLUDED.completed_at_utc;
+                    """,
+                    (
+                        record.scanned_files,
+                        record.indexed_files,
+                        record.new_sha_entries,
+                        record.existing_sha_matches,
+                        record.path_conflicts,
+                        record.errors,
+                        record.completed_at_utc,
+                    ),
+                )
+            conn.commit()
+
+    def get_latest_storage_index_run(self) -> StorageIndexRunRecord | None:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        scanned_files,
+                        indexed_files,
+                        new_sha_entries,
+                        existing_sha_matches,
+                        path_conflicts,
+                        errors,
+                        completed_at_utc
+                    FROM api_storage_index_runs
+                    WHERE singleton_key = TRUE
+                    LIMIT 1;
+                    """
+                )
+                row = cur.fetchone()
+                if row is None:
+                    return None
+                return StorageIndexRunRecord(
+                    scanned_files=int(row[0]),
+                    indexed_files=int(row[1]),
+                    new_sha_entries=int(row[2]),
+                    existing_sha_matches=int(row[3]),
+                    path_conflicts=int(row[4]),
+                    errors=int(row[5]),
+                    completed_at_utc=str(row[6]),
+                )
 
     def summarize_storage(self) -> StorageSummary:
         with self._connect() as conn:

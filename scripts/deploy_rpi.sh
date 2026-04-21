@@ -6,7 +6,8 @@ usage() {
 Usage: scripts/deploy_rpi.sh [options]
 
 Deploy the current photovault workspace to a Raspberry Pi using rsync,
-refresh the remote virtualenv dependencies, and restart photovault services.
+refresh the remote virtualenv dependencies, restart photovault services,
+and run explicit M4 storage/index smoke validation.
 
 Options:
   --host <host>            Remote host (default: 10.100.1.95)
@@ -19,6 +20,7 @@ Options:
   --skip-install           Skip remote pip install/upgrade
   --skip-restart           Skip service restart
   --skip-health            Skip post-deploy health checks
+  --skip-smoke             Skip post-deploy M4 storage/index smoke checks
   --dry-run                Show rsync changes without applying them
   -h, --help               Show this help
 
@@ -51,6 +53,7 @@ DRY_RUN=0
 SKIP_INSTALL=0
 SKIP_RESTART=0
 SKIP_HEALTH=0
+SKIP_SMOKE=0
 SERVICES=()
 
 while (($# > 0)); do
@@ -89,6 +92,10 @@ while (($# > 0)); do
       ;;
     --skip-health)
       SKIP_HEALTH=1
+      shift
+      ;;
+    --skip-smoke)
+      SKIP_SMOKE=1
       shift
       ;;
     --dry-run)
@@ -144,6 +151,47 @@ remote() {
   ssh "${SSH_OPTS[@]}" "${USER_NAME}@${HOST}" "$@"
 }
 
+preflight_remote_storage() {
+  remote "set -euo pipefail
+API_ENV='/etc/photovault/photovault-api.env'
+if [[ ! -f \"\$API_ENV\" ]]; then
+  echo 'missing /etc/photovault/photovault-api.env' >&2
+  exit 1
+fi
+STORAGE_ROOT=\$(grep '^PHOTOVAULT_API_STORAGE_ROOT=' \"\$API_ENV\" | tail -n 1 | cut -d= -f2-)
+if [[ -z \"\${STORAGE_ROOT:-}\" ]]; then
+  echo 'PHOTOVAULT_API_STORAGE_ROOT is not set in /etc/photovault/photovault-api.env' >&2
+  exit 1
+fi
+if [[ ! -d \"\$STORAGE_ROOT\" ]]; then
+  echo \"storage root does not exist: \$STORAGE_ROOT\" >&2
+  exit 1
+fi
+if ! su -s /bin/sh photovault -c \"test -w '\$STORAGE_ROOT'\"; then
+  echo \"storage root is not writable by photovault: \$STORAGE_ROOT\" >&2
+  exit 1
+fi
+printf 'storage-root=%s\n' \"\$STORAGE_ROOT\""
+}
+
+run_remote_health_checks() {
+  remote "set -euo pipefail
+curl -fsS http://127.0.0.1:9101/healthz
+echo
+curl -fsS http://127.0.0.1:9201/ >/dev/null && echo 'client-ui: ok'
+curl -fsS http://127.0.0.1:9301/healthz
+echo
+curl -fsS http://127.0.0.1:9401/ >/dev/null && echo 'server-ui: ok'"
+}
+
+run_remote_m4_smoke() {
+  remote "set -euo pipefail
+API_ENV='/etc/photovault/photovault-api.env'
+STORAGE_ROOT=\$(grep '^PHOTOVAULT_API_STORAGE_ROOT=' \"\$API_ENV\" | tail -n 1 | cut -d= -f2-)
+cd '${TARGET_DIR}'
+'${VENV_DIR}/bin/python' scripts/m4_smoke_check.py --storage-root \"\$STORAGE_ROOT\""
+}
+
 echo "==> Ensuring target directory exists on ${HOST}"
 remote "mkdir -p '${TARGET_DIR}'"
 
@@ -154,6 +202,9 @@ if ((DRY_RUN)); then
   echo "==> Dry run complete; no remote changes applied"
   exit 0
 fi
+
+echo "==> Running remote storage/config preflight"
+preflight_remote_storage
 
 if ((SKIP_INSTALL == 0)); then
   echo "==> Refreshing remote virtualenv and dependencies"
@@ -168,7 +219,12 @@ fi
 
 if ((SKIP_HEALTH == 0)); then
   echo "==> Running remote health checks"
-  remote "curl -fsS http://127.0.0.1:9101/healthz && echo && curl -fsS http://127.0.0.1:9201/ >/dev/null && echo 'client-ui: ok' && curl -fsS http://127.0.0.1:9301/healthz && echo && curl -fsS http://127.0.0.1:9401/ >/dev/null && echo 'server-ui: ok'"
+  run_remote_health_checks
+fi
+
+if ((SKIP_SMOKE == 0)); then
+  echo "==> Running remote M4 smoke checks"
+  run_remote_m4_smoke
 fi
 
 echo "==> Deploy complete"

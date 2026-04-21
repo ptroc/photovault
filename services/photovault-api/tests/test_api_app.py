@@ -81,6 +81,21 @@ def test_metadata_handshake_classifies_mixed_batch_with_single_lookup(tmp_path: 
         def list_stored_files(self, *, limit: int, offset: int):
             return 0, []
 
+        def list_duplicate_sha_groups(self, *, limit: int, offset: int):
+            return 0, []
+
+        def record_path_conflict(self, **kwargs) -> None:
+            return None
+
+        def list_path_conflicts(self, *, limit: int, offset: int):
+            return 0, []
+
+        def record_storage_index_run(self, record) -> None:
+            return None
+
+        def get_latest_storage_index_run(self):
+            return None
+
         def summarize_storage(self):
             return {
                 "total_known_sha256": 0,
@@ -230,6 +245,199 @@ def test_storage_index_registers_existing_files_and_reindex_is_idempotent(tmp_pa
         "path_conflicts": 0,
         "errors": 0,
     }
+
+
+def test_storage_index_counts_same_path_conflict_and_updates_metadata(tmp_path: Path) -> None:
+    original_content = b"original"
+    replacement_content = b"replacement"
+    original_sha = hashlib.sha256(original_content).hexdigest()
+    replacement_sha = hashlib.sha256(replacement_content).hexdigest()
+    target = tmp_path / "2026" / "04" / "Job_A" / "photo.jpg"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(original_content)
+
+    store = InMemoryUploadStateStore()
+    client = TestClient(create_app(state_store=store, storage_root=tmp_path))
+
+    first_index = client.post("/v1/storage/index")
+    assert first_index.status_code == 200
+    assert first_index.json() == {
+        "scanned_files": 1,
+        "indexed_files": 1,
+        "new_sha_entries": 1,
+        "existing_sha_matches": 0,
+        "path_conflicts": 0,
+        "errors": 0,
+    }
+    assert store.get_stored_file_by_path("2026/04/Job_A/photo.jpg") is not None
+    assert store.get_stored_file_by_path("2026/04/Job_A/photo.jpg").sha256_hex == original_sha
+
+    target.write_bytes(replacement_content)
+
+    second_index = client.post("/v1/storage/index")
+    assert second_index.status_code == 200
+    assert second_index.json() == {
+        "scanned_files": 1,
+        "indexed_files": 1,
+        "new_sha_entries": 1,
+        "existing_sha_matches": 0,
+        "path_conflicts": 1,
+        "errors": 0,
+    }
+
+    updated_record = store.get_stored_file_by_path("2026/04/Job_A/photo.jpg")
+    assert updated_record is not None
+    assert updated_record.sha256_hex == replacement_sha
+    assert updated_record.size_bytes == len(replacement_content)
+
+
+def test_storage_index_ignores_temp_uploads_content(tmp_path: Path) -> None:
+    stored_content = b"persisted"
+    temp_content = b"temporary"
+    stored_sha = hashlib.sha256(stored_content).hexdigest()
+    real_file = tmp_path / "2026" / "04" / "Job_A" / "a.jpg"
+    temp_file = tmp_path / ".temp_uploads" / "ignored.upload"
+    real_file.parent.mkdir(parents=True, exist_ok=True)
+    temp_file.parent.mkdir(parents=True, exist_ok=True)
+    real_file.write_bytes(stored_content)
+    temp_file.write_bytes(temp_content)
+
+    client = TestClient(create_app(storage_root=tmp_path))
+    response = client.post("/v1/storage/index")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "scanned_files": 1,
+        "indexed_files": 1,
+        "new_sha_entries": 1,
+        "existing_sha_matches": 0,
+        "path_conflicts": 0,
+        "errors": 0,
+    }
+
+    handshake_response = client.post(
+        "/v1/upload/metadata-handshake",
+        json={"files": [{"client_file_id": 9, "sha256_hex": stored_sha, "size_bytes": len(stored_content)}]},
+    )
+    assert handshake_response.status_code == 200
+    assert handshake_response.json()["results"][0]["decision"] == "ALREADY_EXISTS"
+
+
+def test_storage_index_records_partial_scan_errors_without_aborting(tmp_path: Path, monkeypatch) -> None:
+    good_content = b"good"
+    bad_content = b"bad"
+    good_file = tmp_path / "2026" / "04" / "Job_A" / "good.jpg"
+    bad_file = tmp_path / "2026" / "04" / "Job_A" / "bad.jpg"
+    good_file.parent.mkdir(parents=True, exist_ok=True)
+    good_file.write_bytes(good_content)
+    bad_file.write_bytes(bad_content)
+
+    original_compute_sha256 = app_module._compute_sha256
+
+    def _flaky_compute_sha256(path: Path) -> str:
+        if path.name == "bad.jpg":
+            raise OSError("simulated read failure")
+        return original_compute_sha256(path)
+
+    monkeypatch.setattr(app_module, "_compute_sha256", _flaky_compute_sha256)
+
+    client = TestClient(create_app(storage_root=tmp_path))
+    response = client.post("/v1/storage/index")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "scanned_files": 2,
+        "indexed_files": 1,
+        "new_sha_entries": 1,
+        "existing_sha_matches": 0,
+        "path_conflicts": 0,
+        "errors": 1,
+    }
+
+
+def test_admin_duplicates_returns_duplicate_sha_groups(tmp_path: Path) -> None:
+    store = InMemoryUploadStateStore()
+    now = "2026-04-21T08:00:00+00:00"
+    later = "2026-04-21T09:00:00+00:00"
+    store.upsert_stored_file(
+        relative_path="2026/04/Job_A/a.jpg",
+        sha256_hex="a" * 64,
+        size_bytes=10,
+        source_kind="index_scan",
+        seen_at_utc=now,
+    )
+    store.upsert_stored_file(
+        relative_path="2026/04/Job_B/b.jpg",
+        sha256_hex="a" * 64,
+        size_bytes=10,
+        source_kind="upload_verify",
+        seen_at_utc=later,
+    )
+    store.upsert_stored_file(
+        relative_path="2026/04/Job_C/c.jpg",
+        sha256_hex="b" * 64,
+        size_bytes=11,
+        source_kind="index_scan",
+        seen_at_utc=later,
+    )
+
+    client = TestClient(create_app(state_store=store, storage_root=tmp_path))
+    response = client.get("/v1/admin/duplicates")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "total": 1,
+        "limit": 25,
+        "offset": 0,
+        "items": [
+            {
+                "sha256_hex": "a" * 64,
+                "file_count": 2,
+                "first_seen_at_utc": now,
+                "last_seen_at_utc": later,
+                "relative_paths": ["2026/04/Job_A/a.jpg", "2026/04/Job_B/b.jpg"],
+            }
+        ],
+    }
+
+
+def test_admin_path_conflicts_and_latest_run_reflect_index_activity(tmp_path: Path) -> None:
+    target = tmp_path / "2026" / "04" / "Job_A" / "photo.jpg"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(b"first")
+    client = TestClient(create_app(storage_root=tmp_path))
+
+    first_index = client.post("/v1/storage/index")
+    assert first_index.status_code == 200
+
+    target.write_bytes(b"second")
+    second_index = client.post("/v1/storage/index")
+    assert second_index.status_code == 200
+    assert second_index.json()["path_conflicts"] == 1
+
+    conflict_response = client.get("/v1/admin/path-conflicts")
+    assert conflict_response.status_code == 200
+    conflict_payload = conflict_response.json()
+    assert conflict_payload["total"] == 1
+    assert conflict_payload["items"][0]["relative_path"] == "2026/04/Job_A/photo.jpg"
+    assert conflict_payload["items"][0]["previous_sha256_hex"] == hashlib.sha256(b"first").hexdigest()
+    assert conflict_payload["items"][0]["current_sha256_hex"] == hashlib.sha256(b"second").hexdigest()
+
+    latest_run_response = client.get("/v1/admin/latest-index-run")
+    assert latest_run_response.status_code == 200
+    latest_run = latest_run_response.json()["latest_run"]
+    assert latest_run is not None
+    assert latest_run["scanned_files"] == 1
+    assert latest_run["indexed_files"] == 1
+    assert latest_run["path_conflicts"] == 1
+    assert latest_run["errors"] == 0
+
+
+def test_admin_latest_index_run_is_none_before_any_scan(tmp_path: Path) -> None:
+    client = TestClient(create_app(storage_root=tmp_path))
+    response = client.get("/v1/admin/latest-index-run")
+    assert response.status_code == 200
+    assert response.json() == {"latest_run": None}
 
 
 def test_verify_returns_verify_failed_when_content_not_uploaded(tmp_path: Path) -> None:
@@ -388,6 +596,21 @@ def test_create_app_uses_postgres_store_when_database_url_env_set(monkeypatch, t
 
         def list_stored_files(self, *, limit: int, offset: int):
             return 0, []
+
+        def list_duplicate_sha_groups(self, *, limit: int, offset: int):
+            return 0, []
+
+        def record_path_conflict(self, **kwargs) -> None:
+            return None
+
+        def list_path_conflicts(self, *, limit: int, offset: int):
+            return 0, []
+
+        def record_storage_index_run(self, record) -> None:
+            return None
+
+        def get_latest_storage_index_run(self):
+            return None
 
         def summarize_storage(self):
             class _Summary:

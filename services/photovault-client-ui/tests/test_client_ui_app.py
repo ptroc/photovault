@@ -247,7 +247,9 @@ def _overview_payloads(daemon_state: str = "WAIT_NETWORK") -> dict[str, object]:
                     "key_mgmt": "wpa-psk",
                 },
                 "sta_connected": True,
-                "next_operator_action": "Upstream network is connected. Verify AP settings and continue operations.",
+                "next_operator_action": (
+                    "Upstream network is connected. Verify AP settings and continue operations."
+                ),
             },
             "ap_config": {
                 "profile_name": "photovault-ap",
@@ -368,9 +370,12 @@ def test_jobs_page_renders_filtered_views() -> None:
     assert "Job #4" in active
     assert "Job #2" not in active
     assert "Job #2" in waiting
-    assert "Retry backoff is active while the daemon remains in WAIT_NETWORK." in waiting
+    assert "Retry backoff is active while the daemon waits in WAIT_NETWORK." in waiting
+    assert "Local ingest is still in progress before remote completion can finish." in waiting
+    assert "4 file(s) are queued for remote upload/verify once connectivity returns." in waiting
     assert "Job #1" not in active
     assert "Job #1" in blocked
+    assert "manual retry or isolation" in blocked
     assert "Job #3" in completed
 
 
@@ -392,6 +397,10 @@ def test_derive_job_operator_view_reports_transferred_and_pending_file_counts() 
     assert operator_view["transferred_file_count"] == 3
     assert operator_view["total_file_count"] == 9
     assert operator_view["pending_file_count"] == 3
+    assert operator_view["wait_summary"] == (
+        "6 file(s) are queued for remote upload/verify once connectivity returns."
+    )
+    assert operator_view["retry_summary"] == "Retry backoff is active while the daemon waits in WAIT_NETWORK."
 
 
 def test_job_detail_route_renders_file_level_state() -> None:
@@ -416,7 +425,12 @@ def test_job_detail_route_renders_file_level_state() -> None:
     assert "uploaded; waiting for server verify" in body
     assert "Retry upload" in body
     assert "Upload and retry posture" in body
+    assert "Local ingest complete" in body
+    assert "Retry exhausted files" in body
     assert "Files needing attention" in body
+    assert "Local ingest is complete; only remote upload, verify, or cleanup work remains." in body
+    assert "Operator action is required before this job can continue remote progression." in body
+    assert "1 file(s) need manual retry or isolation after upload/verify failure." in body
 
 
 def test_events_page_shows_diagnostics_and_events() -> None:
@@ -683,7 +697,10 @@ def test_network_page_and_errors_render() -> None:
             json={
                 "detail": {
                     "code": "NM_PERMISSION_DENIED",
-                    "message": "Failed to trigger Wi-Fi scan: NetworkManager denied the photovault service user.",
+                    "message": (
+                        "Failed to trigger Wi-Fi scan: NetworkManager denied the photovault "
+                        "service user."
+                    ),
                     "suggestion": "configure polkit",
                 }
             },

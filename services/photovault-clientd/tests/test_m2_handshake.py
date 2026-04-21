@@ -1,3 +1,4 @@
+import hashlib
 import sqlite3
 import subprocess
 from datetime import UTC, datetime, timedelta
@@ -6,6 +7,8 @@ from urllib.error import URLError
 
 import pytest
 from fastapi.testclient import TestClient
+from photovault_api.app import create_app as create_api_app
+from photovault_api.state_store import InMemoryUploadStateStore
 from photovault_clientd import engine
 from photovault_clientd.app import create_app
 
@@ -974,6 +977,188 @@ def test_cleanup_staging_retains_files_when_policy_true(tmp_path: Path, monkeypa
         assert cleanup_tick.json()["deleted_count"] == 0
         assert staged_path.exists()
 
+
+def test_m4_end_to_end_acceptance_path_upload_finalize_index_and_admin_visibility(
+    tmp_path: Path, monkeypatch
+) -> None:
+    client_db_path = tmp_path / "client-state.sqlite3"
+    client_staging_root = tmp_path / "client-staging"
+    server_storage_root = tmp_path / "server-storage"
+    source = tmp_path / "media" / "sd" / "capture-001.jpg"
+    _write_source_file(source, b"uploaded-from-client")
+
+    api_store = InMemoryUploadStateStore()
+    api_app = create_api_app(state_store=api_store, storage_root=server_storage_root)
+
+    with TestClient(api_app) as api_client:
+        def _api_handshake(
+            *, server_base_url: str, files: list[dict[str, object]], timeout_seconds: float = 5.0
+        ) -> dict[int, str]:
+            response = api_client.post(
+                "/v1/upload/metadata-handshake",
+                json={
+                    "files": [
+                        {
+                            "client_file_id": int(item["file_id"]),
+                            "sha256_hex": str(item["sha256_hex"]),
+                            "size_bytes": int(item["size_bytes"]),
+                        }
+                        for item in files
+                    ]
+                },
+            )
+            assert response.status_code == 200
+            return {
+                int(item["client_file_id"]): str(item["decision"])
+                for item in response.json()["results"]
+            }
+
+        def _api_upload(
+            *,
+            server_base_url: str,
+            sha256_hex: str,
+            size_bytes: int,
+            content: bytes,
+            job_name: str | None = None,
+            original_filename: str | None = None,
+            timeout_seconds: float = 5.0,
+        ) -> str:
+            response = api_client.put(
+                f"/v1/upload/content/{sha256_hex}",
+                content=content,
+                headers={
+                    "x-size-bytes": str(size_bytes),
+                    "x-job-name": job_name or "unknown-job",
+                    "x-original-filename": original_filename or "unknown.bin",
+                },
+            )
+            assert response.status_code == 200
+            return str(response.json()["status"])
+
+        def _api_verify(
+            *, server_base_url: str, sha256_hex: str, size_bytes: int, timeout_seconds: float = 5.0
+        ) -> str:
+            response = api_client.post(
+                "/v1/upload/verify",
+                json={"sha256_hex": sha256_hex, "size_bytes": size_bytes},
+            )
+            assert response.status_code == 200
+            return str(response.json()["status"])
+
+        monkeypatch.setattr(engine, "_post_metadata_handshake", _api_handshake)
+        monkeypatch.setattr(engine, "_upload_file_content", _api_upload)
+        monkeypatch.setattr(engine, "_post_server_verify", _api_verify)
+
+        clientd_app = create_app(
+            db_path=client_db_path,
+            staging_root=client_staging_root,
+            server_base_url="http://photovault-api.test",
+        )
+        with TestClient(clientd_app) as client:
+            create_response = client.post(
+                "/ingest/jobs",
+                json={"media_label": "m4-e2e-job", "source_paths": [str(source)]},
+            )
+            assert create_response.status_code == 200
+            job_id = int(create_response.json()["job_id"])
+
+            _tick_until_state(client, "WAIT_NETWORK")
+            _advance_to_upload_file(client)
+
+            assert client.post("/daemon/tick").json()["next_state"] == "SERVER_VERIFY"
+            verify_tick = client.post("/daemon/tick")
+            assert verify_tick.status_code == 200
+            assert verify_tick.json()["verify_status"] == "VERIFIED"
+            assert verify_tick.json()["next_state"] == "POST_UPLOAD_VERIFY"
+            _drain_ticks_until_state(client, "IDLE")
+
+            detail_response = client.get(f"/ingest/jobs/{job_id}")
+            assert detail_response.status_code == 200
+            detail = detail_response.json()
+            assert detail["status"] == "JOB_COMPLETE_LOCAL"
+            uploaded_file = detail["files"][0]
+            assert uploaded_file["status"] == "VERIFIED_REMOTE"
+
+            uploaded_sha = str(uploaded_file["sha256_hex"])
+            uploaded_size = int(source.stat().st_size)
+            uploaded_paths = list(server_storage_root.rglob("capture-001.jpg"))
+            assert len(uploaded_paths) == 1
+            assert uploaded_paths[0].read_bytes() == b"uploaded-from-client"
+
+            out_of_band = server_storage_root / "2026" / "04" / "Imported_Archive" / "manual-drop.jpg"
+            out_of_band.parent.mkdir(parents=True, exist_ok=True)
+            out_of_band.write_bytes(b"manual-server-import")
+            out_of_band_sha = hashlib.sha256(b"manual-server-import").hexdigest()
+
+            index_response = api_client.post("/v1/storage/index")
+            assert index_response.status_code == 200
+            index_payload = index_response.json()
+            assert index_payload["scanned_files"] == 2
+            assert index_payload["indexed_files"] == 2
+            assert index_payload["new_sha_entries"] == 1
+            assert index_payload["existing_sha_matches"] == 1
+            assert index_payload["path_conflicts"] == 0
+            assert index_payload["errors"] == 0
+
+            uploaded_handshake = api_client.post(
+                "/v1/upload/metadata-handshake",
+                json={
+                    "files": [
+                        {
+                            "client_file_id": 1,
+                            "sha256_hex": uploaded_sha,
+                            "size_bytes": uploaded_size,
+                        }
+                    ]
+                },
+            )
+            assert uploaded_handshake.status_code == 200
+            assert uploaded_handshake.json()["results"][0]["decision"] == "ALREADY_EXISTS"
+
+            indexed_handshake = api_client.post(
+                "/v1/upload/metadata-handshake",
+                json={
+                    "files": [
+                        {
+                            "client_file_id": 2,
+                            "sha256_hex": out_of_band_sha,
+                            "size_bytes": len(b"manual-server-import"),
+                        }
+                    ]
+                },
+            )
+            assert indexed_handshake.status_code == 200
+            assert indexed_handshake.json()["results"][0]["decision"] == "ALREADY_EXISTS"
+
+            overview_response = api_client.get("/v1/admin/overview")
+            assert overview_response.status_code == 200
+            overview_payload = overview_response.json()
+            assert overview_payload["total_known_sha256"] == 2
+            assert overview_payload["total_stored_files"] == 2
+            assert overview_payload["duplicate_file_paths"] == 0
+
+            files_response = api_client.get("/v1/admin/files")
+            assert files_response.status_code == 200
+            file_rows = files_response.json()["items"]
+            assert len(file_rows) == 2
+            assert {
+                row["relative_path"] for row in file_rows
+            } == {
+                uploaded_paths[0].relative_to(server_storage_root).as_posix(),
+                "2026/04/Imported_Archive/manual-drop.jpg",
+            }
+            assert {row["source_kind"] for row in file_rows} == {"index_scan"}
+
+            duplicates_response = api_client.get("/v1/admin/duplicates")
+            assert duplicates_response.status_code == 200
+            assert duplicates_response.json()["total"] == 0
+
+            latest_run_response = api_client.get("/v1/admin/latest-index-run")
+            assert latest_run_response.status_code == 200
+            latest_run = latest_run_response.json()["latest_run"]
+            assert latest_run is not None
+            assert latest_run["scanned_files"] == 2
+            assert latest_run["new_sha_entries"] == 1
 
 def test_cleanup_staging_deletes_files_when_policy_false(tmp_path: Path, monkeypatch) -> None:
     db_path = tmp_path / "state.sqlite3"

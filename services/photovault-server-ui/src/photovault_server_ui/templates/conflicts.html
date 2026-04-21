@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% set title = "Conflicts" %}
+{% block content %}
+<section>
+  <h1>Path Conflict History</h1>
+  <p class="muted">Paths whose on-disk content changed across index runs.</p>
+</section>
+
+<section class="panel">
+  <h2 style="margin-top: 0;">Latest Index Outcome</h2>
+  {% if latest_run %}
+  <p class="muted">
+    Completed <span class="mono">{{ latest_run.completed_at_utc }}</span>:
+    scanned {{ latest_run.scanned_files }}, indexed {{ latest_run.indexed_files }},
+    conflicts {{ latest_run.path_conflicts }}, errors {{ latest_run.errors }}.
+  </p>
+  {% else %}
+  <p class="muted">No storage index run has been recorded yet.</p>
+  {% endif %}
+</section>
+
+<section class="panel" style="margin-top: 0.9rem;">
+  {% if conflicts %}
+  <p class="muted">Showing {{ conflicts|length }} conflict record(s) out of {{ total }}.</p>
+  <table>
+    <thead>
+      <tr>
+        <th>Relative Path</th>
+        <th>Previous SHA256</th>
+        <th>Current SHA256</th>
+        <th>Detected (UTC)</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for conflict in conflicts %}
+      <tr>
+        <td class="mono">{{ conflict.relative_path }}</td>
+        <td class="mono">{{ conflict.previous_sha256_hex }}</td>
+        <td class="mono">{{ conflict.current_sha256_hex }}</td>
+        <td class="mono">{{ conflict.detected_at_utc }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">No path conflicts have been recorded.</p>
+  {% endif %}
+</section>
+{% endblock %}

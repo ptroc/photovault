@@ -121,8 +121,12 @@
             <div class="banner {% if job.operator_view.requires_operator_action %}banner-critical{% elif job.status == 'WAIT_NETWORK' %}banner-warning{% else %}banner-success{% endif %}">
               <strong>Next action</strong>
               <span>{{ job.operator_view.next_action }}</span>
+              <span>{{ job.operator_view.completion_summary }}</span>
+              <span>{{ job.operator_view.wait_summary }}</span>
               {% if job.operator_view.retry_backoff_active %}
-                <span>Retry backoff is active while the daemon remains in WAIT_NETWORK.</span>
+                <span>{{ job.operator_view.retry_summary }}</span>
+              {% elif job.operator_view.retry_exhausted_file_count > 0 %}
+                <span>{{ job.operator_view.retry_summary }}</span>
               {% endif %}
             </div>
             <div class="action-row">

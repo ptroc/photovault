@@ -1,6 +1,34 @@
 from photovault_api.state_store import PostgresUploadStateStore
 
 
+def test_in_memory_upsert_stored_file_preserves_first_seen_and_updates_latest_metadata() -> None:
+    from photovault_api.state_store import InMemoryUploadStateStore
+
+    store = InMemoryUploadStateStore()
+
+    store.upsert_stored_file(
+        relative_path="2026/04/job/photo.jpg",
+        sha256_hex="a" * 64,
+        size_bytes=12,
+        source_kind="index_scan",
+        seen_at_utc="2026-04-20T12:01:00+00:00",
+    )
+    store.upsert_stored_file(
+        relative_path="2026/04/job/photo.jpg",
+        sha256_hex="b" * 64,
+        size_bytes=24,
+        source_kind="index_scan",
+        seen_at_utc="2026-04-20T12:05:00+00:00",
+    )
+
+    record = store.get_stored_file_by_path("2026/04/job/photo.jpg")
+    assert record is not None
+    assert record.first_seen_at_utc == "2026-04-20T12:01:00+00:00"
+    assert record.last_seen_at_utc == "2026-04-20T12:05:00+00:00"
+    assert record.sha256_hex == "b" * 64
+    assert record.size_bytes == 24
+
+
 def test_postgres_has_shas_uses_single_query_and_returns_known_set() -> None:
     observed: dict[str, object] = {"connect_calls": 0}
 
@@ -164,4 +192,54 @@ def test_postgres_upsert_stored_file_metadata_uses_conflict_update() -> None:
         "2026-04-20T12:01:00+00:00",
         "2026-04-20T12:01:00+00:00",
     )
+    assert observed["committed"] is True
+
+
+def test_postgres_upsert_stored_file_uses_latest_metadata_but_preserves_first_seen() -> None:
+    observed: dict[str, object] = {}
+
+    class _FakeCursor:
+        rowcount = 1
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def execute(self, query: str, params: tuple[object, ...]) -> None:
+            observed["query"] = query
+            observed["params"] = params
+
+    class _FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def cursor(self) -> _FakeCursor:
+            return _FakeCursor()
+
+        def commit(self) -> None:
+            observed["committed"] = True
+
+    class _TestStore(PostgresUploadStateStore):
+        def _connect(self):  # type: ignore[override]
+            return _FakeConnection()
+
+    store = _TestStore(database_url="postgresql://unused")
+    store.upsert_stored_file(
+        relative_path="2026/04/job/photo.jpg",
+        sha256_hex="c" * 64,
+        size_bytes=99,
+        source_kind="upload_verify",
+        seen_at_utc="2026-04-20T12:09:00+00:00",
+    )
+
+    query = str(observed["query"])
+    assert "first_seen_at_utc" in query
+    assert "ON CONFLICT (relative_path) DO UPDATE" in query
+    assert "last_seen_at_utc = EXCLUDED.last_seen_at_utc" in query
+    assert "first_seen_at_utc = EXCLUDED.first_seen_at_utc" not in query
     assert observed["committed"] is True

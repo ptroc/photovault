@@ -3,18 +3,31 @@ from photovault_server_ui.app import create_app
 
 def test_dashboard_renders_overview_metrics() -> None:
     def _fetcher(path: str, query: dict[str, str]) -> dict:
-        assert path == "/v1/admin/overview"
+        if path == "/v1/admin/overview":
+            assert query == {}
+            return {
+                "total_known_sha256": 3,
+                "total_stored_files": 7,
+                "indexed_files": 5,
+                "uploaded_files": 2,
+                "duplicate_file_paths": 1,
+                "recent_indexed_files_24h": 4,
+                "recent_uploaded_files_24h": 1,
+                "last_indexed_at_utc": "2026-04-20T11:00:00+00:00",
+                "last_uploaded_at_utc": "2026-04-20T10:00:00+00:00",
+            }
+        assert path == "/v1/admin/latest-index-run"
         assert query == {}
         return {
-            "total_known_sha256": 3,
-            "total_stored_files": 7,
-            "indexed_files": 5,
-            "uploaded_files": 2,
-            "duplicate_file_paths": 1,
-            "recent_indexed_files_24h": 4,
-            "recent_uploaded_files_24h": 1,
-            "last_indexed_at_utc": "2026-04-20T11:00:00+00:00",
-            "last_uploaded_at_utc": "2026-04-20T10:00:00+00:00",
+            "latest_run": {
+                "scanned_files": 12,
+                "indexed_files": 12,
+                "new_sha_entries": 2,
+                "existing_sha_matches": 10,
+                "path_conflicts": 1,
+                "errors": 0,
+                "completed_at_utc": "2026-04-20T11:05:00+00:00",
+            }
         }
 
     app = create_app(api_fetcher=_fetcher)
@@ -27,6 +40,9 @@ def test_dashboard_renders_overview_metrics() -> None:
     assert ">3<" in html
     assert "Last indexed file" in html
     assert "2026-04-20T11:00:00+00:00" in html
+    assert "Latest Index Run" in html
+    assert "2026-04-20T11:05:00+00:00" in html
+    assert "Open duplicate SHA groups" in html
 
 
 def test_files_page_renders_rows_and_pager() -> None:
@@ -83,3 +99,73 @@ def test_dashboard_error_state_is_clear() -> None:
     html = response.get_data(as_text=True)
     assert "Unable to reach photovault-api overview endpoint." in html
     assert ">0<" in html
+
+
+def test_duplicates_page_renders_duplicate_groups() -> None:
+    def _fetcher(path: str, query: dict[str, str]) -> dict:
+        assert path == "/v1/admin/duplicates"
+        assert query == {"limit": "25", "offset": "0"}
+        return {
+            "total": 1,
+            "limit": 25,
+            "offset": 0,
+            "items": [
+                {
+                    "sha256_hex": "a" * 64,
+                    "file_count": 2,
+                    "first_seen_at_utc": "2026-04-20T09:00:00+00:00",
+                    "last_seen_at_utc": "2026-04-20T10:00:00+00:00",
+                    "relative_paths": ["2026/04/Trip/a.jpg", "2026/04/TripCopy/a.jpg"],
+                }
+            ],
+        }
+
+    app = create_app(api_fetcher=_fetcher)
+    response = app.test_client().get("/duplicates")
+    assert response.status_code == 200
+    html = response.get_data(as_text=True)
+    assert "Duplicate SHA Groups" in html
+    assert "2026/04/Trip/a.jpg" in html
+    assert "2026/04/TripCopy/a.jpg" in html
+    assert "2 path(s)" in html
+
+
+def test_conflicts_page_renders_conflict_history_and_latest_run() -> None:
+    def _fetcher(path: str, query: dict[str, str]) -> dict:
+        if path == "/v1/admin/path-conflicts":
+            assert query == {"limit": "25", "offset": "0"}
+            return {
+                "total": 1,
+                "limit": 25,
+                "offset": 0,
+                "items": [
+                    {
+                        "relative_path": "2026/04/Trip/photo.jpg",
+                        "previous_sha256_hex": "a" * 64,
+                        "current_sha256_hex": "b" * 64,
+                        "detected_at_utc": "2026-04-20T11:30:00+00:00",
+                    }
+                ],
+            }
+        assert path == "/v1/admin/latest-index-run"
+        assert query == {}
+        return {
+            "latest_run": {
+                "scanned_files": 2,
+                "indexed_files": 2,
+                "new_sha_entries": 1,
+                "existing_sha_matches": 1,
+                "path_conflicts": 1,
+                "errors": 0,
+                "completed_at_utc": "2026-04-20T11:31:00+00:00",
+            }
+        }
+
+    app = create_app(api_fetcher=_fetcher)
+    response = app.test_client().get("/conflicts")
+    assert response.status_code == 200
+    html = response.get_data(as_text=True)
+    assert "Path Conflict History" in html
+    assert "2026/04/Trip/photo.jpg" in html
+    assert "2026-04-20T11:31:00+00:00" in html
+    assert "No path conflicts have been recorded." not in html

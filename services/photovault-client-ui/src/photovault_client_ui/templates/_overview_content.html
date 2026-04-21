@@ -211,6 +211,8 @@
                 upload required={{ job.operator_view.upload_required_count }},
                 retries={{ job.operator_view.retrying_file_count }}
               </div>
+              <div class="muted">Completion: {{ job.operator_view.completion_summary }}</div>
+              <div class="muted">Retry posture: {{ job.operator_view.retry_summary }}</div>
               <div class="muted">Next action: {{ job.operator_view.next_action }}</div>
             </article>
           {% endfor %}
