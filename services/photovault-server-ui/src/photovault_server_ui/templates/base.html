@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{ title }} · photovault server UI</title>
+    <style>
+      :root {
+        --bg: #f4f6f8;
+        --panel: #ffffff;
+        --text: #1f2933;
+        --muted: #66788a;
+        --border: #d7dee5;
+        --accent: #0f5ea8;
+      }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+      }
+      header {
+        background: var(--panel);
+        border-bottom: 1px solid var(--border);
+        padding: 0.75rem 1rem;
+      }
+      nav {
+        display: flex;
+        gap: 1rem;
+        align-items: center;
+      }
+      nav a {
+        color: var(--muted);
+        text-decoration: none;
+        font-weight: 600;
+      }
+      nav a.active {
+        color: var(--accent);
+      }
+      main {
+        max-width: 1100px;
+        margin: 1rem auto;
+        padding: 0 1rem 2rem;
+      }
+      .panel {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 0.9rem;
+      }
+      .error {
+        color: #8f1f1f;
+        background: #fceaea;
+        border: 1px solid #f0c3c3;
+        border-radius: 6px;
+        padding: 0.5rem 0.7rem;
+        margin-bottom: 0.8rem;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+      }
+      th, td {
+        text-align: left;
+        border-bottom: 1px solid var(--border);
+        padding: 0.5rem;
+        vertical-align: top;
+      }
+      th {
+        font-size: 0.9rem;
+        color: var(--muted);
+        font-weight: 600;
+      }
+      .muted {
+        color: var(--muted);
+      }
+      .mono {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 0.86rem;
+      }
+      .pager {
+        display: flex;
+        gap: 0.8rem;
+        align-items: center;
+        margin-top: 0.8rem;
+      }
+      .pager a {
+        color: var(--accent);
+        text-decoration: none;
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+        gap: 0.7rem;
+      }
+      .metric {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 0.7rem;
+      }
+      .metric .label {
+        color: var(--muted);
+        font-size: 0.84rem;
+      }
+      .metric .value {
+        font-size: 1.2rem;
+        font-weight: 700;
+        margin-top: 0.15rem;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <nav>
+        <strong>photovault server</strong>
+        <a href="/" class="{{ 'active' if active_page == 'home' else '' }}">Overview</a>
+        <a href="/files" class="{{ 'active' if active_page == 'files' else '' }}">Files</a>
+      </nav>
+    </header>
+    <main>
+      {% if error_message %}
+      <div class="error">{{ error_message }}</div>
+      {% endif %}
+      {% block content %}{% endblock %}
+    </main>
+  </body>
+</html>

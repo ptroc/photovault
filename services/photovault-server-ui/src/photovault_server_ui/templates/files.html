@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% set title = "Files" %}
+{% block content %}
+<section>
+  <h1>Server Files</h1>
+  <p class="muted">Known files in server storage, capped per page.</p>
+</section>
+
+<section class="panel">
+  {% if files %}
+  <p class="muted">Showing {{ start_index }}-{{ end_index }} of {{ total }} files.</p>
+  <table>
+    <thead>
+      <tr>
+        <th>Relative Path</th>
+        <th>SHA256</th>
+        <th>Size</th>
+        <th>Source</th>
+        <th>Last Seen (UTC)</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for file in files %}
+      <tr>
+        <td class="mono">{{ file.relative_path }}</td>
+        <td class="mono">{{ file.sha256_hex }}</td>
+        <td>{{ file.size_human }}</td>
+        <td>{{ file.source_kind }}</td>
+        <td class="mono">{{ file.last_seen_at_utc }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <div class="pager">
+    {% if has_previous %}
+    <a href="/files?page={{ page - 1 }}">Previous</a>
+    {% endif %}
+    <span class="muted">Page {{ page }}</span>
+    {% if has_next %}
+    <a href="/files?page={{ page + 1 }}">Next</a>
+    {% endif %}
+  </div>
+  {% else %}
+  <p class="muted">No files are indexed or uploaded yet.</p>
+  {% endif %}
+</section>
+{% endblock %}

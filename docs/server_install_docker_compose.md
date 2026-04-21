@@ -8,8 +8,8 @@ This guide runs the server-side photovault services in Docker containers using D
 Assumptions:
 
 - PostgreSQL already exists outside Docker.
-- Host storage is mounted at `/var/storage` and must be visible to containers.
-- Project code is available on the host at `/opt/photovault`.
+- Host storage path is configurable via `.env` and mounted into the containers.
+- Project code is available on the host (example path: `/opt/photovault`).
 
 ## 1. Install Docker and Docker Compose plugin
 
@@ -46,11 +46,11 @@ sudo git pull --ff-only
 ## 3. Ensure host storage path exists
 
 ```bash
-sudo mkdir -p /var/storage
-sudo mkdir -p /var/storage/photovault
+sudo mkdir -p /storage/photovault
 ```
 
-Note: this mount is provided to both containers as a fixed bind mount (`/var/storage:/var/storage`).
+Note: the compose file uses env-based bind mount variables:
+`PHOTOVAULT_STORAGE_HOST_ROOT` → `PHOTOVAULT_STORAGE_CONTAINER_ROOT`.
 
 ## 4. Configure environment file for external PostgreSQL
 
@@ -61,17 +61,21 @@ sudo tee /opt/photovault/deploy/docker/.env >/dev/null <<'ENV'
 # External PostgreSQL connection for photovault-api.
 # If PostgreSQL runs on the Docker host, use host.docker.internal.
 PHOTOVAULT_API_DATABASE_URL=postgresql://photovault_api:change-me-strong-password@host.docker.internal:5432/photovault
-PHOTOVAULT_API_STORAGE_ROOT=/var/storage/photovault
+PHOTOVAULT_STORAGE_HOST_ROOT=/storage/photovault
+PHOTOVAULT_STORAGE_CONTAINER_ROOT=/var/storage
+PHOTOVAULT_API_STORAGE_ROOT=/var/storage
 ENV
 ```
 
 If your DB runs on another machine, replace `host.docker.internal` with that hostname/IP.
+`PHOTOVAULT_API_STORAGE_ROOT` must be inside the container path selected by
+`PHOTOVAULT_STORAGE_CONTAINER_ROOT`.
 
-## 5. Start services with Docker Compose
+## 5. Build and start services with Docker Compose
 
 ```bash
 cd /opt/photovault/deploy/docker
-sudo docker compose --env-file .env -f docker-compose.server.yml up -d
+sudo docker compose --env-file .env -f docker-compose.server.yml up -d --build
 ```
 
 The compose file is at:
@@ -118,7 +122,7 @@ Pull new code and redeploy:
 cd /opt/photovault
 sudo git pull --ff-only
 cd /opt/photovault/deploy/docker
-sudo docker compose --env-file .env -f docker-compose.server.yml up -d --force-recreate
+sudo docker compose --env-file .env -f docker-compose.server.yml up -d --build --force-recreate
 ```
 
 ## Troubleshooting quick checks

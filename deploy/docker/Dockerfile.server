@@ -1,0 +1,13 @@
+FROM python:3.12-slim
+
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+
+WORKDIR /opt/photovault
+
+# Copy repository content into the image and install project dependencies.
+COPY . /opt/photovault
+
+RUN python -m pip install --upgrade pip \
+    && pip install -r requirements.txt
+

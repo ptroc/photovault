@@ -59,6 +59,7 @@ from photovault_clientd.db import (
 from photovault_clientd.events import EventCategory, EventLevel, classify_copy_error, classify_hash_error
 from photovault_clientd.hashing import compute_sha256
 from photovault_clientd.ingest_policy import enumerate_directory_media_files
+from photovault_clientd.networking import parse_nmcli_multiline
 from photovault_clientd.state_machine import ClientState, FileStatus
 from photovault_clientd.storage import build_staged_path, copy_with_fsync
 
@@ -245,18 +246,10 @@ def _network_is_online() -> bool:
     except subprocess.CalledProcessError:
         return False
 
-    state = ""
-    connectivity = ""
-    for raw_line in completed.stdout.splitlines():
-        line = raw_line.strip()
-        if not line or ":" not in line:
-            continue
-        key, value = line.split(":", 1)
-        normalized = key.strip().upper()
-        if normalized == "STATE":
-            state = value.strip().lower()
-        elif normalized == "CONNECTIVITY":
-            connectivity = value.strip().lower()
+    records = parse_nmcli_multiline(completed.stdout)
+    row = records[0] if records else {}
+    state = str(row.get("STATE", "")).strip().lower()
+    connectivity = str(row.get("CONNECTIVITY", "")).strip().lower()
 
     if state != "connected":
         return False

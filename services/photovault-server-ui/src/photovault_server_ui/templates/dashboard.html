@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% set title = "Overview" %}
+{% block content %}
+<section>
+  <h1>Server Overview</h1>
+  <p class="muted">M4 storage and indexing inspection surface.</p>
+  <div class="grid">
+    <div class="metric">
+      <div class="label">Total known SHA256</div>
+      <div class="value">{{ overview.total_known_sha256 }}</div>
+    </div>
+    <div class="metric">
+      <div class="label">Total stored files</div>
+      <div class="value">{{ overview.total_stored_files }}</div>
+    </div>
+    <div class="metric">
+      <div class="label">Indexed files</div>
+      <div class="value">{{ overview.indexed_files }}</div>
+    </div>
+    <div class="metric">
+      <div class="label">Uploaded files</div>
+      <div class="value">{{ overview.uploaded_files }}</div>
+    </div>
+    <div class="metric">
+      <div class="label">Duplicate file paths</div>
+      <div class="value">{{ overview.duplicate_file_paths }}</div>
+    </div>
+    <div class="metric">
+      <div class="label">Indexed in last 24h</div>
+      <div class="value">{{ overview.recent_indexed_files_24h }}</div>
+    </div>
+    <div class="metric">
+      <div class="label">Uploaded in last 24h</div>
+      <div class="value">{{ overview.recent_uploaded_files_24h }}</div>
+    </div>
+  </div>
+</section>
+
+<section class="panel" style="margin-top: 0.9rem;">
+  <h2 style="margin-top: 0;">Recent Activity</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>Signal</th>
+        <th>Latest UTC timestamp</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Last indexed file</td>
+        <td class="mono">{{ overview.last_indexed_at_utc or "No indexed files yet" }}</td>
+      </tr>
+      <tr>
+        <td>Last uploaded file</td>
+        <td class="mono">{{ overview.last_uploaded_at_utc or "No uploaded files yet" }}</td>
+      </tr>
+    </tbody>
+  </table>
+</section>
+{% endblock %}

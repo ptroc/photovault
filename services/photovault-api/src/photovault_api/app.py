@@ -7,12 +7,13 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from photovault_api.state_store import (
     InMemoryUploadStateStore,
     PostgresUploadStateStore,
+    StorageSummary,
     UploadStateStore,
 )
 
@@ -61,6 +62,34 @@ class IndexStorageResponse(BaseModel):
     existing_sha_matches: int
     path_conflicts: int
     errors: int
+
+
+class AdminOverviewResponse(BaseModel):
+    total_known_sha256: int
+    total_stored_files: int
+    indexed_files: int
+    uploaded_files: int
+    duplicate_file_paths: int
+    recent_indexed_files_24h: int
+    recent_uploaded_files_24h: int
+    last_indexed_at_utc: str | None
+    last_uploaded_at_utc: str | None
+
+
+class AdminFileItem(BaseModel):
+    relative_path: str
+    sha256_hex: str
+    size_bytes: int
+    source_kind: str
+    first_seen_at_utc: str
+    last_seen_at_utc: str
+
+
+class AdminFileListResponse(BaseModel):
+    total: int
+    limit: int
+    offset: int
+    items: list[AdminFileItem]
 
 
 def _sanitize_component(raw_value: str, *, default_value: str) -> str:
@@ -295,6 +324,46 @@ def create_app(
             existing_sha_matches=existing_sha_matches,
             path_conflicts=path_conflicts,
             errors=errors,
+        )
+
+    @app.get("/v1/admin/overview", response_model=AdminOverviewResponse)
+    def admin_overview() -> AdminOverviewResponse:
+        store: UploadStateStore = app.state.upload_state_store
+        summary: StorageSummary = store.summarize_storage()
+        return AdminOverviewResponse(
+            total_known_sha256=summary.total_known_sha256,
+            total_stored_files=summary.total_stored_files,
+            indexed_files=summary.indexed_files,
+            uploaded_files=summary.uploaded_files,
+            duplicate_file_paths=summary.duplicate_file_paths,
+            recent_indexed_files_24h=summary.recent_indexed_files_24h,
+            recent_uploaded_files_24h=summary.recent_uploaded_files_24h,
+            last_indexed_at_utc=summary.last_indexed_at_utc,
+            last_uploaded_at_utc=summary.last_uploaded_at_utc,
+        )
+
+    @app.get("/v1/admin/files", response_model=AdminFileListResponse)
+    def admin_files(
+        limit: int = Query(default=50, ge=1, le=200),
+        offset: int = Query(default=0, ge=0),
+    ) -> AdminFileListResponse:
+        store: UploadStateStore = app.state.upload_state_store
+        total, records = store.list_stored_files(limit=limit, offset=offset)
+        return AdminFileListResponse(
+            total=total,
+            limit=limit,
+            offset=offset,
+            items=[
+                AdminFileItem(
+                    relative_path=record.relative_path,
+                    sha256_hex=record.sha256_hex,
+                    size_bytes=record.size_bytes,
+                    source_kind=record.source_kind,
+                    first_seen_at_utc=record.first_seen_at_utc,
+                    last_seen_at_utc=record.last_seen_at_utc,
+                )
+                for record in records
+            ],
         )
 
     return app

@@ -20,6 +20,7 @@ from photovault_clientd.db import (
     count_staged_files,
     create_ingest_job,
     fetch_ingest_job_detail,
+    fetch_network_ap_config,
     fetch_next_copy_candidate,
     fetch_recent_daemon_events,
     get_daemon_state,
@@ -32,9 +33,11 @@ from photovault_clientd.db import (
     mark_file_staged,
     open_db,
     run_state_invariant_checks,
+    set_network_ap_apply_result,
     set_daemon_state,
     set_job_status,
     transition_daemon_state,
+    upsert_network_ap_config,
 )
 from photovault_clientd.engine import (
     DEFAULT_AUTO_PROGRESS_MAX_STEPS,
@@ -52,6 +55,13 @@ from photovault_clientd.ingest_policy import (
     is_allowed_media_file,
 )
 from photovault_clientd.m0_checks import run_m0_foundation_checks
+from photovault_clientd.networking import (
+    DEFAULT_AP_PASSWORD,
+    DEFAULT_AP_PROFILE_NAME,
+    DEFAULT_AP_SSID,
+    NetworkManagerAdapter,
+    NetworkManagerError,
+)
 from photovault_clientd.state_machine import ClientState
 from photovault_clientd.storage import build_staged_path, copy_with_fsync
 
@@ -68,6 +78,33 @@ class IngestJobCreateRequest(BaseModel):
 class IngestStageNextRequest(BaseModel):
     job_id: int
     staging_root: str = Field(min_length=1)
+
+
+class APConfigUpdateRequest(BaseModel):
+    ssid: str
+    password: str
+
+
+def _validate_ap_config_payload(*, ssid: str, password: str) -> None:
+    normalized_ssid = ssid.strip()
+    if not normalized_ssid:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "AP_CONFIG_INVALID",
+                "message": "AP SSID is required.",
+                "suggestion": "Provide a non-empty SSID and retry AP configuration.",
+            },
+        )
+    if len(password) < 8 or len(password) > 63:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "AP_CONFIG_INVALID",
+                "message": "AP password must be between 8 and 63 characters.",
+                "suggestion": "Use a WPA-PSK password in the valid range and retry.",
+            },
+        )
 
 
 def _format_path_os_error(exc: OSError) -> str:
@@ -161,8 +198,62 @@ def create_app(
     retain_staged_files: bool = DEFAULT_RETAIN_STAGED_FILES,
     auto_progress_interval_seconds: float = DEFAULT_AUTO_PROGRESS_INTERVAL_SECONDS,
     auto_progress_max_steps: int = DEFAULT_AUTO_PROGRESS_MAX_STEPS,
+    network_manager: NetworkManagerAdapter | None = None,
 ) -> FastAPI:
+    resolved_network_manager = network_manager or NetworkManagerAdapter()
     progression_lock = threading.Lock()
+
+    def _load_or_init_ap_config(conn, now_utc: str) -> dict[str, object]:
+        existing = fetch_network_ap_config(conn)
+        if existing is not None:
+            return existing
+        upsert_network_ap_config(
+            conn,
+            profile_name=DEFAULT_AP_PROFILE_NAME,
+            ssid=DEFAULT_AP_SSID,
+            password_plaintext=DEFAULT_AP_PASSWORD,
+            now_utc=now_utc,
+        )
+        conn.commit()
+        created = fetch_network_ap_config(conn)
+        if created is None:
+            raise RuntimeError("failed to initialize network_ap_config singleton row")
+        return created
+
+    def _ap_config_view(conn) -> dict[str, object]:
+        row = fetch_network_ap_config(conn)
+        if row is None:
+            return {
+                "profile_name": DEFAULT_AP_PROFILE_NAME,
+                "ssid": DEFAULT_AP_SSID,
+                "password_set": False,
+                "updated_at_utc": "",
+                "last_applied_at_utc": None,
+                "last_apply_error": "AP config not initialized",
+            }
+        return {
+            "profile_name": str(row["profile_name"]),
+            "ssid": str(row["ssid"]),
+            "password_set": bool(row["password_plaintext"]),
+            "updated_at_utc": str(row["updated_at_utc"]),
+            "last_applied_at_utc": row["last_applied_at_utc"],
+            "last_apply_error": row["last_apply_error"],
+        }
+
+    def _ensure_ap_baseline(conn, now_utc: str) -> dict[str, object]:
+        ap_config = _load_or_init_ap_config(conn, now_utc)
+        result = resolved_network_manager.ensure_ap_profile(
+            profile_name=str(ap_config["profile_name"]),
+            ssid=str(ap_config["ssid"]),
+            password=str(ap_config["password_plaintext"]),
+        )
+        set_network_ap_apply_result(
+            conn,
+            last_applied_at_utc=now_utc,
+            last_apply_error=None,
+        )
+        conn.commit()
+        return result
 
     def _manual_tick_busy_noop_response() -> dict[str, object]:
         now = datetime.now(UTC).isoformat()
@@ -229,6 +320,37 @@ def create_app(
                 server_base_url=server_base_url,
                 retain_staged_files=retain_staged_files,
             )
+            try:
+                ensure_result = _ensure_ap_baseline(conn, now)
+                append_daemon_event(
+                    conn,
+                    level=EventLevel.INFO,
+                    category="NETWORK_AP_BASELINE_ENSURED",
+                    message=(
+                        f"startup AP baseline ensured: profile={ensure_result['profile_name']}, "
+                        f"created={ensure_result['created']}"
+                    ),
+                    created_at_utc=now,
+                    from_state=get_daemon_state_safe(conn),
+                    to_state=get_daemon_state_safe(conn),
+                )
+                conn.commit()
+            except NetworkManagerError as exc:
+                set_network_ap_apply_result(
+                    conn,
+                    last_applied_at_utc=None,
+                    last_apply_error=exc.operator_error.message,
+                )
+                append_daemon_event(
+                    conn,
+                    level=EventLevel.ERROR,
+                    category="NETWORK_AP_BASELINE_FAILED",
+                    message=f"{exc.operator_error.message} ({exc.operator_error.code})",
+                    created_at_utc=now,
+                    from_state=get_daemon_state_safe(conn),
+                    to_state=get_daemon_state_safe(conn),
+                )
+                conn.commit()
         except Exception:
             append_daemon_event(
                 conn,
@@ -341,6 +463,84 @@ def create_app(
         if row is None:
             return {"current_state": ClientState.ERROR_DAEMON.value, "updated_at_utc": ""}
         return {"current_state": row[0], "updated_at_utc": row[1]}
+
+    @app.get("/network/status")
+    def network_status() -> dict[str, object]:
+        conn = open_db(db_path)
+        try:
+            ap_config = _load_or_init_ap_config(conn, datetime.now(UTC).isoformat())
+            snapshot = resolved_network_manager.status_snapshot(str(ap_config["profile_name"]))
+            return {
+                "snapshot": snapshot.to_dict(),
+                "ap_config": _ap_config_view(conn),
+            }
+        except NetworkManagerError as exc:
+            raise HTTPException(status_code=503, detail=exc.to_payload()) from exc
+        finally:
+            conn.close()
+
+    @app.get("/network/ap-config")
+    def network_ap_config() -> dict[str, object]:
+        conn = open_db(db_path)
+        try:
+            _load_or_init_ap_config(conn, datetime.now(UTC).isoformat())
+            return _ap_config_view(conn)
+        finally:
+            conn.close()
+
+    @app.put("/network/ap-config")
+    def update_network_ap_config(request: APConfigUpdateRequest) -> dict[str, object]:
+        now = datetime.now(UTC).isoformat()
+        _validate_ap_config_payload(ssid=request.ssid, password=request.password)
+        conn = open_db(db_path)
+        try:
+            existing = _load_or_init_ap_config(conn, now)
+            upsert_network_ap_config(
+                conn,
+                profile_name=str(existing["profile_name"]),
+                ssid=request.ssid.strip(),
+                password_plaintext=request.password,
+                now_utc=now,
+            )
+            conn.commit()
+            try:
+                apply_result = resolved_network_manager.ensure_ap_profile(
+                    profile_name=str(existing["profile_name"]),
+                    ssid=request.ssid.strip(),
+                    password=request.password,
+                )
+                set_network_ap_apply_result(
+                    conn,
+                    last_applied_at_utc=now,
+                    last_apply_error=None,
+                )
+                conn.commit()
+                return {
+                    "ap_config": _ap_config_view(conn),
+                    "apply_result": apply_result,
+                }
+            except NetworkManagerError as exc:
+                set_network_ap_apply_result(
+                    conn,
+                    last_applied_at_utc=None,
+                    last_apply_error=exc.operator_error.message,
+                )
+                conn.commit()
+                raise HTTPException(status_code=503, detail=exc.to_payload()) from exc
+        finally:
+            conn.close()
+
+    @app.post("/network/wifi-scan")
+    def network_wifi_scan() -> dict[str, object]:
+        conn = open_db(db_path)
+        try:
+            _load_or_init_ap_config(conn, datetime.now(UTC).isoformat())
+            resolved_network_manager.trigger_wifi_scan()
+            return {"triggered": True}
+        except NetworkManagerError as exc:
+            raise HTTPException(status_code=503, detail=exc.to_payload()) from exc
+        finally:
+            conn.close()
 
     @app.get("/bootstrap/recovery")
     def recovery_queue() -> dict[str, object]:

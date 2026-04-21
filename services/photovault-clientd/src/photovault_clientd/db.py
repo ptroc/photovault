@@ -66,7 +66,7 @@ RECOVERY_STATE_PRIORITY = (
     ClientState.VERIFY_HASH,
 )
 
-LATEST_SCHEMA_VERSION = 3
+LATEST_SCHEMA_VERSION = 4
 
 
 def validate_recovery_policy() -> None:
@@ -187,10 +187,27 @@ def _apply_migration_v3(conn: sqlite3.Connection) -> None:
     )
 
 
+def _apply_migration_v4(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS network_ap_config (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            profile_name TEXT NOT NULL,
+            ssid TEXT NOT NULL,
+            password_plaintext TEXT NOT NULL,
+            updated_at_utc TEXT NOT NULL,
+            last_applied_at_utc TEXT,
+            last_apply_error TEXT
+        );
+        """
+    )
+
+
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     1: _apply_migration_v1,
     2: _apply_migration_v2,
     3: _apply_migration_v3,
+    4: _apply_migration_v4,
 }
 
 
@@ -425,6 +442,72 @@ def run_state_invariant_checks(conn: sqlite3.Connection) -> list[str]:
         issues.append(f"local_sha_registry contains invalid provenance rows: {row[0]} row(s)")
 
     return issues
+
+
+def fetch_network_ap_config(conn: sqlite3.Connection) -> dict[str, object] | None:
+    row = conn.execute(
+        """
+        SELECT
+            profile_name,
+            ssid,
+            password_plaintext,
+            updated_at_utc,
+            last_applied_at_utc,
+            last_apply_error
+        FROM network_ap_config
+        WHERE id = 1;
+        """
+    ).fetchone()
+    if row is None:
+        return None
+    return {
+        "profile_name": str(row[0]),
+        "ssid": str(row[1]),
+        "password_plaintext": str(row[2]),
+        "updated_at_utc": str(row[3]),
+        "last_applied_at_utc": row[4],
+        "last_apply_error": row[5],
+    }
+
+
+def upsert_network_ap_config(
+    conn: sqlite3.Connection,
+    *,
+    profile_name: str,
+    ssid: str,
+    password_plaintext: str,
+    now_utc: str,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO network_ap_config (
+            id, profile_name, ssid, password_plaintext, updated_at_utc, last_applied_at_utc, last_apply_error
+        )
+        VALUES (1, ?, ?, ?, ?, NULL, NULL)
+        ON CONFLICT(id) DO UPDATE
+        SET profile_name = excluded.profile_name,
+            ssid = excluded.ssid,
+            password_plaintext = excluded.password_plaintext,
+            updated_at_utc = excluded.updated_at_utc;
+        """,
+        (profile_name, ssid, password_plaintext, now_utc),
+    )
+
+
+def set_network_ap_apply_result(
+    conn: sqlite3.Connection,
+    *,
+    last_applied_at_utc: str | None,
+    last_apply_error: str | None,
+) -> None:
+    conn.execute(
+        """
+        UPDATE network_ap_config
+        SET last_applied_at_utc = ?, last_apply_error = ?
+        WHERE id = 1;
+        """,
+        (last_applied_at_utc, last_apply_error),
+    )
 
 
 def create_ingest_job(conn: sqlite3.Connection, media_label: str, now_utc: str) -> int:

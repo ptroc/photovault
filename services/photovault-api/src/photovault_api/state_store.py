@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from threading import Lock
 from typing import Protocol
 
@@ -26,6 +26,19 @@ class StoredFileRecord:
     source_kind: str
     first_seen_at_utc: str
     last_seen_at_utc: str
+
+
+@dataclass(frozen=True)
+class StorageSummary:
+    total_known_sha256: int
+    total_stored_files: int
+    indexed_files: int
+    uploaded_files: int
+    duplicate_file_paths: int
+    recent_indexed_files_24h: int
+    recent_uploaded_files_24h: int
+    last_indexed_at_utc: str | None
+    last_uploaded_at_utc: str | None
 
 
 class UploadStateStore(Protocol):
@@ -61,6 +74,10 @@ class UploadStateStore(Protocol):
     ) -> None: ...
 
     def get_stored_file_by_path(self, relative_path: str) -> StoredFileRecord | None: ...
+
+    def list_stored_files(self, *, limit: int, offset: int) -> tuple[int, list[StoredFileRecord]]: ...
+
+    def summarize_storage(self) -> StorageSummary: ...
 
     def remove_temp_upload(self, sha256_hex: str) -> None: ...
 
@@ -139,6 +156,58 @@ class InMemoryUploadStateStore:
     def get_stored_file_by_path(self, relative_path: str) -> StoredFileRecord | None:
         with self._lock:
             return self.stored_files.get(relative_path)
+
+    def list_stored_files(self, *, limit: int, offset: int) -> tuple[int, list[StoredFileRecord]]:
+        with self._lock:
+            ordered = sorted(self.stored_files.values(), key=lambda item: item.relative_path)
+            ordered = sorted(ordered, key=lambda item: item.last_seen_at_utc, reverse=True)
+            total = len(ordered)
+            return total, ordered[offset : offset + limit]
+
+    def summarize_storage(self) -> StorageSummary:
+        now = datetime.now(UTC)
+        threshold = now - timedelta(hours=24)
+        with self._lock:
+            records = list(self.stored_files.values())
+            duplicate_file_paths = len(records) - len({record.sha256_hex for record in records})
+            indexed_records = [record for record in records if record.source_kind == "index_scan"]
+            uploaded_records = [record for record in records if record.source_kind == "upload_verify"]
+            recent_indexed = 0
+            recent_uploaded = 0
+            last_indexed: str | None = None
+            last_uploaded: str | None = None
+
+            for record in indexed_records:
+                try:
+                    seen_at = datetime.fromisoformat(record.last_seen_at_utc)
+                except ValueError:
+                    continue
+                if seen_at >= threshold:
+                    recent_indexed += 1
+                if last_indexed is None or record.last_seen_at_utc > last_indexed:
+                    last_indexed = record.last_seen_at_utc
+
+            for record in uploaded_records:
+                try:
+                    seen_at = datetime.fromisoformat(record.last_seen_at_utc)
+                except ValueError:
+                    continue
+                if seen_at >= threshold:
+                    recent_uploaded += 1
+                if last_uploaded is None or record.last_seen_at_utc > last_uploaded:
+                    last_uploaded = record.last_seen_at_utc
+
+            return StorageSummary(
+                total_known_sha256=len(self.known_sha256),
+                total_stored_files=len(records),
+                indexed_files=len(indexed_records),
+                uploaded_files=len(uploaded_records),
+                duplicate_file_paths=duplicate_file_paths,
+                recent_indexed_files_24h=recent_indexed,
+                recent_uploaded_files_24h=recent_uploaded,
+                last_indexed_at_utc=last_indexed,
+                last_uploaded_at_utc=last_uploaded,
+            )
 
     def remove_temp_upload(self, sha256_hex: str) -> None:
         with self._lock:
@@ -381,6 +450,99 @@ class PostgresUploadStateStore:
                     source_kind=str(row[2]),
                     first_seen_at_utc=str(row[3]),
                     last_seen_at_utc=str(row[4]),
+                )
+
+    def list_stored_files(self, *, limit: int, offset: int) -> tuple[int, list[StoredFileRecord]]:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) FROM api_stored_files;")
+                count_row = cur.fetchone()
+                total = int(count_row[0]) if count_row is not None else 0
+                cur.execute(
+                    """
+                    SELECT relative_path, sha256_hex, size_bytes, source_kind, first_seen_at_utc, last_seen_at_utc
+                    FROM api_stored_files
+                    ORDER BY last_seen_at_utc DESC, relative_path ASC
+                    LIMIT %s
+                    OFFSET %s;
+                    """,
+                    (limit, offset),
+                )
+                rows = cur.fetchall()
+                records = [
+                    StoredFileRecord(
+                        relative_path=str(row[0]),
+                        sha256_hex=str(row[1]),
+                        size_bytes=int(row[2]),
+                        source_kind=str(row[3]),
+                        first_seen_at_utc=str(row[4]),
+                        last_seen_at_utc=str(row[5]),
+                    )
+                    for row in rows
+                ]
+                return total, records
+
+    def summarize_storage(self) -> StorageSummary:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) FROM api_known_sha256;")
+                known_row = cur.fetchone()
+                total_known_sha256 = int(known_row[0]) if known_row is not None else 0
+
+                cur.execute(
+                    """
+                    SELECT
+                        COUNT(*) AS total_stored_files,
+                        COUNT(*) FILTER (WHERE source_kind = 'index_scan') AS indexed_files,
+                        COUNT(*) FILTER (WHERE source_kind = 'upload_verify') AS uploaded_files,
+                        COUNT(*) - COUNT(DISTINCT sha256_hex) AS duplicate_file_paths
+                    FROM api_stored_files;
+                    """
+                )
+                aggregate_row = cur.fetchone()
+                total_stored_files = int(aggregate_row[0]) if aggregate_row is not None else 0
+                indexed_files = int(aggregate_row[1]) if aggregate_row is not None else 0
+                uploaded_files = int(aggregate_row[2]) if aggregate_row is not None else 0
+                duplicate_file_paths = int(aggregate_row[3]) if aggregate_row is not None else 0
+
+                cur.execute(
+                    """
+                    SELECT
+                        COUNT(*) FILTER (
+                            WHERE source_kind = 'index_scan'
+                            AND last_seen_at_utc >= %s
+                        ) AS recent_indexed_files_24h,
+                        COUNT(*) FILTER (
+                            WHERE source_kind = 'upload_verify'
+                            AND last_seen_at_utc >= %s
+                        ) AS recent_uploaded_files_24h,
+                        MAX(last_seen_at_utc) FILTER (WHERE source_kind = 'index_scan') AS last_indexed_at_utc,
+                        MAX(last_seen_at_utc) FILTER (WHERE source_kind = 'upload_verify') AS last_uploaded_at_utc
+                    FROM api_stored_files;
+                    """,
+                    (
+                        (datetime.now(UTC) - timedelta(hours=24)).isoformat(),
+                        (datetime.now(UTC) - timedelta(hours=24)).isoformat(),
+                    ),
+                )
+                recent_row = cur.fetchone()
+                recent_indexed_files_24h = int(recent_row[0]) if recent_row and recent_row[0] is not None else 0
+                recent_uploaded_files_24h = (
+                    int(recent_row[1]) if recent_row and recent_row[1] is not None else 0
+                )
+                last_indexed_at_utc = str(recent_row[2]) if recent_row and recent_row[2] is not None else None
+                last_uploaded_at_utc = str(recent_row[3]) if recent_row and recent_row[3] is not None else None
+
+                return StorageSummary(
+                    total_known_sha256=total_known_sha256,
+                    total_stored_files=total_stored_files,
+                    indexed_files=indexed_files,
+                    uploaded_files=uploaded_files,
+                    duplicate_file_paths=duplicate_file_paths,
+                    recent_indexed_files_24h=recent_indexed_files_24h,
+                    recent_uploaded_files_24h=recent_uploaded_files_24h,
+                    last_indexed_at_utc=last_indexed_at_utc,
+                    last_uploaded_at_utc=last_uploaded_at_utc,
                 )
 
     def remove_temp_upload(self, sha256_hex: str) -> None:

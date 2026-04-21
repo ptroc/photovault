@@ -41,12 +41,16 @@ def test_open_db_upgrades_legacy_v1_schema_to_latest(tmp_path: Path) -> None:
     local_registry_table = upgraded.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='local_sha_registry';"
     ).fetchone()
+    network_ap_config_table = upgraded.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='network_ap_config';"
+    ).fetchone()
     legacy_row = upgraded.execute("SELECT media_label FROM ingest_jobs WHERE id = 1;").fetchone()
     upgraded.close()
 
     assert version == LATEST_SCHEMA_VERSION
     assert event_table is not None
     assert local_registry_table is not None
+    assert network_ap_config_table is not None
     assert legacy_row is not None
     assert legacy_row[0] == "legacy-sd"
 

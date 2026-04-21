@@ -4,6 +4,12 @@
   <section class="grid section">
     <article class="card">
       <h2>Network</h2>
+      {% if network_notice %}
+        <div class="banner banner-success">
+          <strong>Network action succeeded.</strong>
+          <span>{{ network_notice }}</span>
+        </div>
+      {% endif %}
       {% if network_error %}
         <div class="banner banner-error">
           <strong>Network action failed.</strong>
@@ -17,8 +23,10 @@
         </div>
         <p class="muted">
           State: {{ network_snapshot.general.state }}<br>
-          Wi-Fi: {{ network_snapshot.general.wifi }}
+          Wi-Fi: {{ network_snapshot.general.wifi }}<br>
+          STA connected: {{ "yes" if network_snapshot.sta_connected else "no" }}
         </p>
+        <p><strong>Next action:</strong> {{ network_snapshot.next_operator_action }}</p>
       {% else %}
         <p class="status-error">NetworkManager data unavailable.</p>
       {% endif %}
@@ -29,19 +37,26 @@
         </form>
       </div>
 
-      <form class="form-grid section" method="post" action="/network/connect">
+      <form class="form-grid section" method="post" action="/network/ap-config">
         <div>
-          <label for="ssid">SSID</label>
+          <label for="ssid">AP SSID</label>
           <input id="ssid" name="ssid" value="{{ network_form.ssid }}" required>
         </div>
         <div>
-          <label for="password">Password</label>
+          <label for="password">AP Password</label>
           <input id="password" name="password" type="password" value="{{ network_form.password }}">
         </div>
         <div class="button-row">
-          <button type="submit">Connect Wi-Fi</button>
+          <button type="submit">Update AP config</button>
         </div>
       </form>
+      {% if network_ap_config %}
+        <p class="muted">
+          Managed profile: <code>{{ network_ap_config.profile_name }}</code><br>
+          Last applied: {{ network_ap_config.last_applied_at_utc or "not yet applied" }}<br>
+          Last apply error: {{ network_ap_config.last_apply_error or "none" }}
+        </p>
+      {% endif %}
     </article>
 
     <article class="card">
@@ -51,6 +66,40 @@
         <p class="muted">Updated: {{ state.updated_at_utc }}</p>
       {% else %}
         <p class="status-error">Unavailable</p>
+      {% endif %}
+    </article>
+  </section>
+
+  <section class="section">
+    <article class="card">
+      <h2>Access Point Profile</h2>
+      {% if network_snapshot %}
+        <table>
+          <thead>
+            <tr>
+              <th>Profile</th>
+              <th>Exists</th>
+              <th>Active</th>
+              <th>SSID</th>
+              <th>Mode</th>
+              <th>Autoconnect</th>
+              <th>Security</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>{{ network_snapshot.ap_profile.profile_name }}</code></td>
+              <td>{{ "yes" if network_snapshot.ap_profile.exists else "no" }}</td>
+              <td>{{ "yes" if network_snapshot.ap_profile.active else "no" }}</td>
+              <td>{{ network_snapshot.ap_profile.ssid }}</td>
+              <td>{{ network_snapshot.ap_profile.mode }}</td>
+              <td>{{ network_snapshot.ap_profile.autoconnect }}</td>
+              <td>{{ network_snapshot.ap_profile.key_mgmt }}</td>
+            </tr>
+          </tbody>
+        </table>
+      {% else %}
+        <p class="muted">AP profile status unavailable.</p>
       {% endif %}
     </article>
   </section>

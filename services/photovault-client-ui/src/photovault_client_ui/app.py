@@ -11,7 +11,7 @@ import httpx
 from flask import Flask, Response, abort, make_response, redirect, render_template, request, url_for
 
 DEFAULT_DAEMON_BASE_URL = "http://127.0.0.1:9101"
-DEFAULT_HTTP_TIMEOUT_SECONDS = 2.0
+DEFAULT_HTTP_TIMEOUT_SECONDS = 8.0
 DEFAULT_TICK_TIMEOUT_SECONDS = 2.0
 DEFAULT_TICK_STATUS_REFRESH_MS = 1500
 DEFAULT_CLIENT_DB_PATH = Path("/var/lib/photovault-clientd/state.sqlite3")
@@ -729,6 +729,19 @@ def _daemon_post(
         return response.json()
 
 
+def _daemon_put(
+    daemon_base_url: str,
+    path: str,
+    payload: dict[str, Any],
+    *,
+    timeout_seconds: float = DEFAULT_HTTP_TIMEOUT_SECONDS,
+) -> Any:
+    with httpx.Client(base_url=daemon_base_url, timeout=timeout_seconds) as client:
+        response = client.put(path, json=payload)
+        response.raise_for_status()
+        return response.json()
+
+
 def _run_command(args: list[str]) -> str:
     completed = subprocess.run(
         args,
@@ -915,9 +928,10 @@ def create_app(
     daemon_base_url: str = DEFAULT_DAEMON_BASE_URL,
     daemon_get: Callable[[str, str], Any] = _daemon_get,
     daemon_post: Callable[[str, str, dict[str, Any]], Any] = _daemon_post,
-    network_snapshot_get: Callable[[], dict[str, Any]] = _get_network_snapshot,
-    network_connect: Callable[[str, str | None], None] = _connect_network,
-    network_scan: Callable[[], None] = _scan_networks,
+    daemon_put: Callable[[str, str, dict[str, Any]], Any] = _daemon_put,
+    network_snapshot_get: Callable[[], dict[str, Any]] | None = None,
+    network_connect: Callable[[str, str | None], None] | None = None,
+    network_scan: Callable[[], None] | None = None,
     dependency_snapshot_get: Callable[[], list[dict[str, str]]] = _get_dependency_snapshot,
 ) -> Flask:
     app = Flask(__name__)
@@ -962,20 +976,29 @@ def create_app(
 
     def _load_network_context(
         network_error: str | None = None,
+        network_notice: str | None = None,
         network_form_data: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         context: dict[str, Any] = {
             "network_snapshot": None,
+            "network_ap_config": None,
             "network_error": network_error,
+            "network_notice": network_notice,
             "network_form": {"ssid": "", "password": ""},
         }
         if network_form_data:
             context["network_form"].update(network_form_data)
         try:
-            context["network_snapshot"] = network_snapshot_get()
-        except (subprocess.CalledProcessError, FileNotFoundError) as exc:
+            status_payload = daemon_get(daemon_base_url, "/network/status")
+            context["network_snapshot"] = status_payload.get("snapshot")
+            context["network_ap_config"] = status_payload.get("ap_config")
+            ap_config_payload = daemon_get(daemon_base_url, "/network/ap-config")
+            if context["network_ap_config"] is None:
+                context["network_ap_config"] = ap_config_payload
+            context["network_form"]["ssid"] = str(ap_config_payload.get("ssid", "")).strip()
+        except httpx.HTTPError as exc:
             if context["network_error"] is None:
-                context["network_error"] = _format_network_error("load NetworkManager status", exc)
+                context["network_error"] = f"Failed to load network status: {_describe_http_error(exc)}"
         return context
 
     def _render_overview(
@@ -1108,12 +1131,14 @@ def create_app(
     def _render_network(
         *,
         network_error: str | None = None,
+        network_notice: str | None = None,
         network_form_data: dict[str, str] | None = None,
     ) -> str:
         context = _load_daemon_context()
         context.update(
             _load_network_context(
                 network_error=network_error,
+                network_notice=network_notice,
                 network_form_data=network_form_data,
             )
         )
@@ -1347,32 +1372,39 @@ def create_app(
     @app.post("/network/scan")
     def scan_wifi() -> Any:
         try:
-            network_scan()
-        except (subprocess.CalledProcessError, FileNotFoundError) as exc:
-            return _render_network(network_error=_format_network_error("scan Wi-Fi", exc))
+            daemon_post(daemon_base_url, "/network/wifi-scan", {})
+        except httpx.HTTPError as exc:
+            return _render_network(network_error=f"Failed to scan Wi-Fi: {_describe_http_error(exc)}")
         return redirect(url_for("network_page"))
 
-    @app.post("/network/connect")
-    def connect_wifi() -> str:
-        ssid = request.form.get("ssid", "").strip()
+    @app.post("/network/ap-config")
+    def update_ap_config() -> str:
+        ssid = request.form.get("ssid", "")
         password = request.form.get("password", "")
         network_form = {"ssid": ssid, "password": password}
 
-        if not ssid:
+        if not ssid.strip():
             return _render_network(
-                network_error="SSID is required.",
+                network_error="AP SSID is required.",
                 network_form_data=network_form,
             )
 
         try:
-            network_connect(ssid, password or None)
-        except (subprocess.CalledProcessError, FileNotFoundError) as exc:
+            daemon_put(
+                daemon_base_url,
+                "/network/ap-config",
+                {"ssid": ssid, "password": password},
+            )
+        except httpx.HTTPError as exc:
             return _render_network(
-                network_error=_format_network_error("connect Wi-Fi", exc),
+                network_error=f"Failed to update AP config: {_describe_http_error(exc)}",
                 network_form_data=network_form,
             )
 
-        return redirect(url_for("network_page"))
+        return _render_network(
+            network_notice="AP configuration updated and applied via NetworkManager.",
+            network_form_data={"ssid": ssid.strip(), "password": ""},
+        )
 
     @app.get("/jobs/<int:job_id>")
     def job_detail(job_id: int) -> str:

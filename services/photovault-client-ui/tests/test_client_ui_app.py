@@ -1,5 +1,3 @@
-import subprocess
-
 import httpx
 from photovault_client_ui.app import _derive_job_operator_view, _parse_nmcli_multiline, create_app
 
@@ -213,6 +211,60 @@ def _overview_payloads(daemon_state: str = "WAIT_NETWORK") -> dict[str, object]:
                     "last_error": "server verification failed retries exhausted",
                 },
             ],
+        },
+        "/network/status": {
+            "snapshot": {
+                "general": {
+                    "state": "connected",
+                    "connectivity": "full",
+                    "wifi": "enabled",
+                },
+                "devices": [
+                    {
+                        "device": "wlan0",
+                        "type": "wifi",
+                        "state": "connected",
+                        "connection": "studio-wifi",
+                    }
+                ],
+                "wifi_networks": [
+                    {
+                        "in_use": "*",
+                        "ssid": "studio-wifi",
+                        "signal": "76",
+                        "security": "WPA2",
+                        "channel": "40",
+                        "rate": "540 Mbit/s",
+                    }
+                ],
+                "ap_profile": {
+                    "profile_name": "photovault-ap",
+                    "exists": True,
+                    "active": True,
+                    "ssid": "photovault-ap",
+                    "autoconnect": "yes",
+                    "mode": "ap",
+                    "key_mgmt": "wpa-psk",
+                },
+                "sta_connected": True,
+                "next_operator_action": "Upstream network is connected. Verify AP settings and continue operations.",
+            },
+            "ap_config": {
+                "profile_name": "photovault-ap",
+                "ssid": "photovault-ap",
+                "password_set": True,
+                "updated_at_utc": "2026-04-19T16:51:44.120670+00:00",
+                "last_applied_at_utc": "2026-04-19T16:51:44.120670+00:00",
+                "last_apply_error": None,
+            },
+        },
+        "/network/ap-config": {
+            "profile_name": "photovault-ap",
+            "ssid": "photovault-ap",
+            "password_set": True,
+            "updated_at_utc": "2026-04-19T16:51:44.120670+00:00",
+            "last_applied_at_utc": "2026-04-19T16:51:44.120670+00:00",
+            "last_apply_error": None,
         },
     }
 
@@ -619,21 +671,88 @@ def test_network_page_and_errors_render() -> None:
     client = app.test_client()
     page = client.get("/network").get_data(as_text=True)
     assert 'class="active">Network<' in page
-    assert "Connect Wi-Fi" in page
+    assert "Update AP config" in page
     assert "Visible Wi-Fi Networks" in page
+    assert "Next action:" in page
 
-    def failing_network_scan() -> None:
-        raise subprocess.CalledProcessError(
-            10,
-            ["nmcli", "device", "wifi", "rescan"],
-            stderr="Error: org.freedesktop.NetworkManager.wifi.scan request failed: not authorized.",
+    def failing_daemon_post(_: str, path: str, payload: dict[str, object]) -> object:
+        assert path == "/network/wifi-scan"
+        request = httpx.Request("POST", "http://127.0.0.1:9101/network/wifi-scan")
+        response = httpx.Response(
+            status_code=503,
+            json={
+                "detail": {
+                    "code": "NM_PERMISSION_DENIED",
+                    "message": "Failed to trigger Wi-Fi scan: NetworkManager denied the photovault service user.",
+                    "suggestion": "configure polkit",
+                }
+            },
+            request=request,
         )
+        raise httpx.HTTPStatusError("scan failed", request=request, response=response)
 
     app_with_scan_error = create_app(
         daemon_get=fake_daemon_get,
-        network_snapshot_get=_network_snapshot,
-        network_scan=failing_network_scan,
+        daemon_post=failing_daemon_post,
         dependency_snapshot_get=_dependency_snapshot,
     )
     scan_error_body = app_with_scan_error.test_client().post("/network/scan").get_data(as_text=True)
-    assert "Failed to scan Wi-Fi: NetworkManager denied the photovault service user." in scan_error_body
+    assert "Failed to scan Wi-Fi: daemon API returned HTTP 503" in scan_error_body
+
+
+def test_network_ap_update_success_and_error_render() -> None:
+    payloads = _overview_payloads()
+
+    def fake_daemon_get(_: str, path: str) -> object:
+        return payloads[path]
+
+    def success_daemon_put(_: str, path: str, payload: dict[str, object]) -> object:
+        assert path == "/network/ap-config"
+        assert payload["ssid"] == "field-ap"
+        return {
+            "ap_config": {
+                "profile_name": "photovault-ap",
+                "ssid": "field-ap",
+                "password_set": True,
+                "updated_at_utc": "2026-04-20T11:12:00+00:00",
+                "last_applied_at_utc": "2026-04-20T11:12:00+00:00",
+                "last_apply_error": None,
+            }
+        }
+
+    app = create_app(
+        daemon_get=fake_daemon_get,
+        daemon_put=success_daemon_put,
+        dependency_snapshot_get=_dependency_snapshot,
+    )
+    success_body = app.test_client().post(
+        "/network/ap-config",
+        data={"ssid": "field-ap", "password": "validpass11"},
+    ).get_data(as_text=True)
+    assert "AP configuration updated and applied via NetworkManager." in success_body
+
+    def failing_daemon_put(_: str, path: str, payload: dict[str, object]) -> object:
+        assert path == "/network/ap-config"
+        request = httpx.Request("PUT", "http://127.0.0.1:9101/network/ap-config")
+        response = httpx.Response(
+            status_code=422,
+            json={
+                "detail": {
+                    "code": "AP_CONFIG_INVALID",
+                    "message": "AP password must be between 8 and 63 characters.",
+                }
+            },
+            request=request,
+        )
+        raise httpx.HTTPStatusError("bad request", request=request, response=response)
+
+    app_with_error = create_app(
+        daemon_get=fake_daemon_get,
+        daemon_put=failing_daemon_put,
+        dependency_snapshot_get=_dependency_snapshot,
+    )
+    error_body = app_with_error.test_client().post(
+        "/network/ap-config",
+        data={"ssid": "field-ap", "password": "short"},
+    ).get_data(as_text=True)
+    assert "Failed to update AP config: daemon API returned HTTP 422" in error_body

@@ -1,5 +1,5 @@
 import hashlib
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 import photovault_api.app as app_module
@@ -77,6 +77,22 @@ def test_metadata_handshake_classifies_mixed_batch_with_single_lookup(tmp_path: 
 
         def get_stored_file_by_path(self, relative_path: str):
             return None
+
+        def list_stored_files(self, *, limit: int, offset: int):
+            return 0, []
+
+        def summarize_storage(self):
+            return {
+                "total_known_sha256": 0,
+                "total_stored_files": 0,
+                "indexed_files": 0,
+                "uploaded_files": 0,
+                "duplicate_file_paths": 0,
+                "recent_indexed_files_24h": 0,
+                "recent_uploaded_files_24h": 0,
+                "last_indexed_at_utc": None,
+                "last_uploaded_at_utc": None,
+            }
 
         def remove_temp_upload(self, sha256_hex: str) -> None:
             return None
@@ -226,6 +242,111 @@ def test_verify_returns_verify_failed_when_content_not_uploaded(tmp_path: Path) 
     assert response.json()["status"] == "VERIFY_FAILED"
 
 
+def test_admin_overview_reports_storage_summary(tmp_path: Path) -> None:
+    store = InMemoryUploadStateStore()
+    now = datetime.now(UTC).isoformat()
+    older = "2020-01-01T00:00:00+00:00"
+    store.mark_sha_verified("a" * 64)
+    store.mark_sha_verified("b" * 64)
+    store.upsert_stored_file(
+        relative_path="2026/04/Job_A/a.jpg",
+        sha256_hex="a" * 64,
+        size_bytes=10,
+        source_kind="index_scan",
+        seen_at_utc=now,
+    )
+    store.upsert_stored_file(
+        relative_path="2026/04/Job_B/b.jpg",
+        sha256_hex="a" * 64,
+        size_bytes=11,
+        source_kind="upload_verify",
+        seen_at_utc=now,
+    )
+    store.upsert_stored_file(
+        relative_path="2026/04/Job_C/c.jpg",
+        sha256_hex="b" * 64,
+        size_bytes=12,
+        source_kind="index_scan",
+        seen_at_utc=older,
+    )
+    client = TestClient(create_app(state_store=store, storage_root=tmp_path))
+    response = client.get("/v1/admin/overview")
+    assert response.status_code == 200
+    assert response.json() == {
+        "total_known_sha256": 2,
+        "total_stored_files": 3,
+        "indexed_files": 2,
+        "uploaded_files": 1,
+        "duplicate_file_paths": 1,
+        "recent_indexed_files_24h": 1,
+        "recent_uploaded_files_24h": 1,
+        "last_indexed_at_utc": now,
+        "last_uploaded_at_utc": now,
+    }
+
+
+def test_admin_files_returns_paged_results(tmp_path: Path) -> None:
+    store = InMemoryUploadStateStore()
+    t1 = "2026-04-20T10:00:00+00:00"
+    t2 = "2026-04-20T11:00:00+00:00"
+    t3 = "2026-04-20T12:00:00+00:00"
+    store.upsert_stored_file(
+        relative_path="2026/04/Job_A/a.jpg",
+        sha256_hex="a" * 64,
+        size_bytes=100,
+        source_kind="index_scan",
+        seen_at_utc=t1,
+    )
+    store.upsert_stored_file(
+        relative_path="2026/04/Job_B/b.jpg",
+        sha256_hex="b" * 64,
+        size_bytes=200,
+        source_kind="upload_verify",
+        seen_at_utc=t2,
+    )
+    store.upsert_stored_file(
+        relative_path="2026/04/Job_C/c.jpg",
+        sha256_hex="c" * 64,
+        size_bytes=300,
+        source_kind="index_scan",
+        seen_at_utc=t3,
+    )
+
+    client = TestClient(create_app(state_store=store, storage_root=tmp_path))
+    response = client.get("/v1/admin/files?limit=2&offset=1")
+    assert response.status_code == 200
+    assert response.json() == {
+        "total": 3,
+        "limit": 2,
+        "offset": 1,
+        "items": [
+            {
+                "relative_path": "2026/04/Job_B/b.jpg",
+                "sha256_hex": "b" * 64,
+                "size_bytes": 200,
+                "source_kind": "upload_verify",
+                "first_seen_at_utc": t2,
+                "last_seen_at_utc": t2,
+            },
+            {
+                "relative_path": "2026/04/Job_A/a.jpg",
+                "sha256_hex": "a" * 64,
+                "size_bytes": 100,
+                "source_kind": "index_scan",
+                "first_seen_at_utc": t1,
+                "last_seen_at_utc": t1,
+            },
+        ],
+    }
+
+
+def test_admin_files_empty_state(tmp_path: Path) -> None:
+    client = TestClient(create_app(storage_root=tmp_path))
+    response = client.get("/v1/admin/files")
+    assert response.status_code == 200
+    assert response.json() == {"total": 0, "limit": 50, "offset": 0, "items": []}
+
+
 def test_create_app_requires_storage_root_when_not_provided(monkeypatch) -> None:
     monkeypatch.delenv("PHOTOVAULT_API_STORAGE_ROOT", raising=False)
     try:
@@ -264,6 +385,23 @@ def test_create_app_uses_postgres_store_when_database_url_env_set(monkeypatch, t
 
         def get_stored_file_by_path(self, relative_path: str):
             return None
+
+        def list_stored_files(self, *, limit: int, offset: int):
+            return 0, []
+
+        def summarize_storage(self):
+            class _Summary:
+                total_known_sha256 = 0
+                total_stored_files = 0
+                indexed_files = 0
+                uploaded_files = 0
+                duplicate_file_paths = 0
+                recent_indexed_files_24h = 0
+                recent_uploaded_files_24h = 0
+                last_indexed_at_utc = None
+                last_uploaded_at_utc = None
+
+            return _Summary()
 
         def remove_temp_upload(self, sha256_hex: str) -> None:
             return None
