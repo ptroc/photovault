@@ -13,6 +13,9 @@ It is used to:
 This roadmap is **authoritative for v1 scope**.  
 Anything not listed here is either **explicitly deferred** or **out of scope**.
 
+For the next planned server-focused follow-on release, see:
+- `docs/photovault_v1_5_roadmap.md`
+
 ---
 
 ## v1 Product Definition

@@ -76,7 +76,9 @@ For iterative Raspberry Pi deployment, use:
 - `scripts/deploy_rpi.sh`
 
 The script uses `rsync` to push the repo to `/opt/photovault`, refreshes the remote `.venv`,
-restarts photovault systemd services, and runs basic health checks. See
+restarts photovault systemd services, waits for health checks with retries, and runs basic
+validation. It also seeds the default server storage root at `/storage/photovault` if the
+Pi env file does not define `PHOTOVAULT_API_STORAGE_ROOT`. See
 [`scripts/README.md`](scripts/README.md) for examples.
 
 ---

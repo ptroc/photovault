@@ -7,7 +7,8 @@ Usage: scripts/deploy_rpi.sh [options]
 
 Deploy the current photovault workspace to a Raspberry Pi using rsync,
 refresh the remote virtualenv dependencies, restart photovault services,
-and run explicit M4 storage/index smoke validation.
+wait for post-restart health with retries, and run explicit M4 storage/index smoke
+validation.
 
 Options:
   --host <host>            Remote host (default: 10.100.1.95)
@@ -37,6 +38,9 @@ DEFAULT_USER="root"
 DEFAULT_KEY="${HOME}/.ssh/id_rsa_theworlt_bitbucket_key"
 DEFAULT_TARGET="/opt/photovault"
 DEFAULT_VENV="${DEFAULT_TARGET}/.venv"
+DEFAULT_STORAGE_ROOT="/storage/photovault"
+DEFAULT_HEALTH_ATTEMPTS=12
+DEFAULT_HEALTH_SLEEP_SECONDS=2
 DEFAULT_SERVICES=(
   "photovault-clientd.service"
   "photovault-client-ui.service"
@@ -54,6 +58,8 @@ SKIP_INSTALL=0
 SKIP_RESTART=0
 SKIP_HEALTH=0
 SKIP_SMOKE=0
+HEALTH_ATTEMPTS="${DEFAULT_HEALTH_ATTEMPTS}"
+HEALTH_SLEEP_SECONDS="${DEFAULT_HEALTH_SLEEP_SECONDS}"
 SERVICES=()
 
 while (($# > 0)); do
@@ -151,17 +157,37 @@ remote() {
   ssh "${SSH_OPTS[@]}" "${USER_NAME}@${HOST}" "$@"
 }
 
+joined_services() {
+  local joined=""
+  local service
+  for service in "${SERVICES[@]}"; do
+    if [[ -n "${joined}" ]]; then
+      joined+=" "
+    fi
+    joined+="${service}"
+  done
+  printf '%s' "${joined}"
+}
+
 preflight_remote_storage() {
   remote "set -euo pipefail
 API_ENV='/etc/photovault/photovault-api.env'
+DEFAULT_STORAGE_ROOT='${DEFAULT_STORAGE_ROOT}'
 if [[ ! -f \"\$API_ENV\" ]]; then
   echo 'missing /etc/photovault/photovault-api.env' >&2
   exit 1
 fi
+mkdir -p \"\$DEFAULT_STORAGE_ROOT\"
+chown photovault:photovault \"\$DEFAULT_STORAGE_ROOT\"
+chmod 0750 \"\$DEFAULT_STORAGE_ROOT\"
 STORAGE_ROOT=\$(grep '^PHOTOVAULT_API_STORAGE_ROOT=' \"\$API_ENV\" | tail -n 1 | cut -d= -f2-)
 if [[ -z \"\${STORAGE_ROOT:-}\" ]]; then
-  echo 'PHOTOVAULT_API_STORAGE_ROOT is not set in /etc/photovault/photovault-api.env' >&2
-  exit 1
+  if grep -q '^PHOTOVAULT_API_STORAGE_ROOT=' \"\$API_ENV\"; then
+    sed -i \"s|^PHOTOVAULT_API_STORAGE_ROOT=.*|PHOTOVAULT_API_STORAGE_ROOT=\$DEFAULT_STORAGE_ROOT|\" \"\$API_ENV\"
+  else
+    printf 'PHOTOVAULT_API_STORAGE_ROOT=%s\n' \"\$DEFAULT_STORAGE_ROOT\" >> \"\$API_ENV\"
+  fi
+  STORAGE_ROOT=\"\$DEFAULT_STORAGE_ROOT\"
 fi
 if [[ ! -d \"\$STORAGE_ROOT\" ]]; then
   echo \"storage root does not exist: \$STORAGE_ROOT\" >&2
@@ -175,13 +201,39 @@ printf 'storage-root=%s\n' \"\$STORAGE_ROOT\""
 }
 
 run_remote_health_checks() {
+  local services_joined
+  services_joined="$(joined_services)"
   remote "set -euo pipefail
+systemctl is-active ${services_joined} >/dev/null
 curl -fsS http://127.0.0.1:9101/healthz
 echo
 curl -fsS http://127.0.0.1:9201/ >/dev/null && echo 'client-ui: ok'
 curl -fsS http://127.0.0.1:9301/healthz
 echo
 curl -fsS http://127.0.0.1:9401/ >/dev/null && echo 'server-ui: ok'"
+}
+
+wait_for_remote_health_checks() {
+  local attempt=1
+  local output=""
+
+  while ((attempt <= HEALTH_ATTEMPTS)); do
+    if output="$(run_remote_health_checks 2>&1)"; then
+      printf '%s\n' "${output}"
+      return 0
+    fi
+
+    echo "health check attempt ${attempt}/${HEALTH_ATTEMPTS} not ready yet"
+    printf '%s\n' "${output}" >&2
+
+    if ((attempt == HEALTH_ATTEMPTS)); then
+      echo "health checks did not pass after ${HEALTH_ATTEMPTS} attempts" >&2
+      return 1
+    fi
+
+    sleep "${HEALTH_SLEEP_SECONDS}"
+    attempt=$((attempt + 1))
+  done
 }
 
 run_remote_m4_smoke() {
@@ -218,8 +270,8 @@ if ((SKIP_RESTART == 0)); then
 fi
 
 if ((SKIP_HEALTH == 0)); then
-  echo "==> Running remote health checks"
-  run_remote_health_checks
+  echo "==> Running remote health checks (up to ${HEALTH_ATTEMPTS} attempts, ${HEALTH_SLEEP_SECONDS}s apart)"
+  wait_for_remote_health_checks
 fi
 
 if ((SKIP_SMOKE == 0)); then

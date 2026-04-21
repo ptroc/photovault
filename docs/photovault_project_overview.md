@@ -137,3 +137,7 @@ Components:
 ---
 
 This document serves as the architectural foundation for all other design and implementation documents in the photovault project.
+
+Related roadmap documents:
+- `docs/photovault_v1_roadmap.md`
+- `docs/photovault_v1_5_roadmap.md`

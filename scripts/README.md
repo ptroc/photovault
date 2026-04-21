@@ -4,14 +4,15 @@
 
 Use [`deploy_rpi.sh`](./deploy_rpi.sh) to sync the current workspace to the Raspberry Pi,
 refresh the remote Python environment, restart photovault services, verify the configured
-server storage root is usable, and run explicit M4 storage/index smoke checks.
+server storage root is usable, wait for service health with retries, and run explicit
+M4 storage/index smoke checks.
 
 The deploy path now validates:
 
 - `/etc/photovault/photovault-api.env` exists
-- `PHOTOVAULT_API_STORAGE_ROOT` is configured
+- `PHOTOVAULT_API_STORAGE_ROOT` is configured, defaulting to `/storage/photovault` if unset
 - the storage root exists and is writable by the `photovault` service user
-- API/client/server UI health endpoints respond
+- API/client/server UI health endpoints respond after post-restart retry polling
 - a deterministic M4 smoke file can be indexed and then deduplicated by SHA
 
 Examples:

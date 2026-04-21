@@ -34,11 +34,11 @@ sudo useradd --system --gid photovault --no-create-home --shell /usr/sbin/nologi
 
 sudo mkdir -p /opt/photovault
 sudo mkdir -p /etc/photovault
-sudo mkdir -p /var/storage/photovault
+sudo mkdir -p /storage/photovault
 sudo chmod 0750 /etc/photovault
 sudo chown root:photovault /etc/photovault
-sudo chown -R photovault:photovault /var/storage/photovault
-sudo chmod 0750 /var/storage/photovault
+sudo chown -R photovault:photovault /storage/photovault
+sudo chmod 0750 /storage/photovault
 ```
 
 ## 3. Place project code on host
@@ -94,7 +94,7 @@ Create `/etc/photovault/photovault-api.env`:
 ```bash
 sudo tee /etc/photovault/photovault-api.env >/dev/null <<'ENV'
 PHOTOVAULT_API_DATABASE_URL=postgresql://photovault_api:change-me-strong-password@127.0.0.1:5432/photovault
-PHOTOVAULT_API_STORAGE_ROOT=/var/storage/photovault
+PHOTOVAULT_API_STORAGE_ROOT=/storage/photovault
 ENV
 ```
 
@@ -161,7 +161,7 @@ Run the explicit M4 smoke check:
 
 ```bash
 cd /opt/photovault
-sudo -u photovault ./.venv/bin/python scripts/m4_smoke_check.py --storage-root /var/storage/photovault
+sudo -u photovault ./.venv/bin/python scripts/m4_smoke_check.py --storage-root /storage/photovault
 ```
 
 Expected:
@@ -189,7 +189,7 @@ sudo journalctl -u photovault-server-ui.service -f
 
 - If API fails on boot, verify both `PHOTOVAULT_API_DATABASE_URL` and
   `PHOTOVAULT_API_STORAGE_ROOT` are set and valid.
-- If API logs show storage permission errors, verify `/var/storage/photovault` is writable by the
+- If API logs show storage permission errors, verify `/storage/photovault` is writable by the
   `photovault` service user.
 - If health checks pass but M4 smoke fails, confirm the configured storage root is the same path
   exposed to `PHOTOVAULT_API_STORAGE_ROOT` and that the API can write and re-index within it.
