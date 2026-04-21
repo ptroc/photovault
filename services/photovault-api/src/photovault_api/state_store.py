@@ -460,7 +460,13 @@ class PostgresUploadStateStore:
                 total = int(count_row[0]) if count_row is not None else 0
                 cur.execute(
                     """
-                    SELECT relative_path, sha256_hex, size_bytes, source_kind, first_seen_at_utc, last_seen_at_utc
+                    SELECT
+                        relative_path,
+                        sha256_hex,
+                        size_bytes,
+                        source_kind,
+                        first_seen_at_utc,
+                        last_seen_at_utc
                     FROM api_stored_files
                     ORDER BY last_seen_at_utc DESC, relative_path ASC
                     LIMIT %s
@@ -516,8 +522,12 @@ class PostgresUploadStateStore:
                             WHERE source_kind = 'upload_verify'
                             AND last_seen_at_utc >= %s
                         ) AS recent_uploaded_files_24h,
-                        MAX(last_seen_at_utc) FILTER (WHERE source_kind = 'index_scan') AS last_indexed_at_utc,
-                        MAX(last_seen_at_utc) FILTER (WHERE source_kind = 'upload_verify') AS last_uploaded_at_utc
+                        MAX(last_seen_at_utc) FILTER (
+                            WHERE source_kind = 'index_scan'
+                        ) AS last_indexed_at_utc,
+                        MAX(last_seen_at_utc) FILTER (
+                            WHERE source_kind = 'upload_verify'
+                        ) AS last_uploaded_at_utc
                     FROM api_stored_files;
                     """,
                     (
@@ -526,12 +536,18 @@ class PostgresUploadStateStore:
                     ),
                 )
                 recent_row = cur.fetchone()
-                recent_indexed_files_24h = int(recent_row[0]) if recent_row and recent_row[0] is not None else 0
+                recent_indexed_files_24h = (
+                    int(recent_row[0]) if recent_row and recent_row[0] is not None else 0
+                )
                 recent_uploaded_files_24h = (
                     int(recent_row[1]) if recent_row and recent_row[1] is not None else 0
                 )
-                last_indexed_at_utc = str(recent_row[2]) if recent_row and recent_row[2] is not None else None
-                last_uploaded_at_utc = str(recent_row[3]) if recent_row and recent_row[3] is not None else None
+                last_indexed_at_utc = (
+                    str(recent_row[2]) if recent_row and recent_row[2] is not None else None
+                )
+                last_uploaded_at_utc = (
+                    str(recent_row[3]) if recent_row and recent_row[3] is not None else None
+                )
 
                 return StorageSummary(
                     total_known_sha256=total_known_sha256,

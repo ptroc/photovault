@@ -58,7 +58,12 @@ def create_app(*, api_fetcher: ApiFetcher | None = None) -> Flask:
             overview = default_overview
             error_message = "Unable to reach photovault-api overview endpoint."
 
-        return render_template("dashboard.html", overview=overview, error_message=error_message, active_page="home")
+        return render_template(
+            "dashboard.html",
+            overview=overview,
+            error_message=error_message,
+            active_page="home",
+        )
 
     @app.get("/files")
     def files() -> str:

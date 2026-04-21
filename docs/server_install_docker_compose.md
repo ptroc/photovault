@@ -10,6 +10,7 @@ Assumptions:
 - PostgreSQL already exists outside Docker.
 - Host storage path is configurable via `.env` and mounted into the containers.
 - Project code is available on the host (example path: `/opt/photovault`).
+- `photovault-server-ui` reaches `photovault-api` over the internal Compose network.
 
 ## 1. Install Docker and Docker Compose plugin
 
@@ -101,6 +102,7 @@ Expected:
 
 - API returns JSON like `{"status":"ok"}`
 - Server UI responds on `/`
+- Server UI proxies its overview/files data from `http://photovault-api:9301` inside Compose
 
 ## 7. Day-2 operations
 

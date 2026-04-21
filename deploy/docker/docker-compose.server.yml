@@ -38,6 +38,7 @@ services:
     environment:
       PYTHONUNBUFFERED: "1"
       PYTHONDONTWRITEBYTECODE: "1"
+      PHOTOVAULT_SERVER_UI_API_BASE_URL: "http://photovault-api:9301"
     ports:
       - "9401:9401"
     volumes:

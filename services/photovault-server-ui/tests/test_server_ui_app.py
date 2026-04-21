@@ -70,3 +70,16 @@ def test_files_page_empty_state_is_clear() -> None:
     response = client.get("/files")
     assert response.status_code == 200
     assert "No files are indexed or uploaded yet." in response.get_data(as_text=True)
+
+
+def test_dashboard_error_state_is_clear() -> None:
+    def _fetcher(path: str, query: dict[str, str]) -> dict:
+        raise TimeoutError("api unavailable")
+
+    app = create_app(api_fetcher=_fetcher)
+    client = app.test_client()
+    response = client.get("/")
+    assert response.status_code == 200
+    html = response.get_data(as_text=True)
+    assert "Unable to reach photovault-api overview endpoint." in html
+    assert ">0<" in html
