@@ -59,6 +59,7 @@
         <th>SHA256</th>
         <th>Size</th>
         <th>Extraction</th>
+        <th>Preview</th>
         <th>Metadata</th>
         <th>Actions</th>
       </tr>
@@ -85,6 +86,20 @@
           {% endif %}
         </td>
         <td>
+          <span class="badge {{ asset.preview_status }}">{{ asset.preview_status }}</span>
+          <div class="stack mono">
+            <span>attempted: {{ asset.preview_last_attempted_at_utc or "n/a" }}</span>
+            <span>succeeded: {{ asset.preview_last_succeeded_at_utc or "n/a" }}</span>
+            <span>failed: {{ asset.preview_last_failed_at_utc or "n/a" }}</span>
+          </div>
+          {% if asset.preview_status == "failed" and asset.preview_failure_detail %}
+          <details>
+            <summary>Failure detail</summary>
+            <div class="mono">{{ asset.preview_failure_detail }}</div>
+          </details>
+          {% endif %}
+        </td>
+        <td>
           {% if asset.extraction_status == "succeeded" and asset.metadata_summary %}
           <div class="mono">{{ asset.metadata_summary }}</div>
           {% elif asset.extraction_status == "succeeded" %}
@@ -96,6 +111,8 @@
           {% endif %}
         </td>
         <td>
+          <a href="/catalog/asset?relative_path={{ asset.relative_path | urlencode }}&page={{ page }}&extraction_status={{ extraction_status_filter | urlencode }}&origin_kind={{ origin_kind_filter | urlencode }}&cataloged_since_utc={{ cataloged_since_filter | urlencode }}&cataloged_before_utc={{ cataloged_before_filter | urlencode }}">Inspect</a>
+          <br>
           <form method="post" action="/catalog/actions/retry">
             <input type="hidden" name="page" value="{{ page }}">
             <input type="hidden" name="extraction_status" value="{{ extraction_status_filter }}">

@@ -102,6 +102,52 @@ def test_in_memory_media_asset_extraction_updates_status_and_metadata() -> None:
     assert rows[0].orientation == 1
 
 
+def test_in_memory_media_asset_preview_updates_status_path_and_failure_detail() -> None:
+    from photovault_api.state_store import InMemoryUploadStateStore
+
+    store = InMemoryUploadStateStore()
+    observed_at = "2026-04-20T12:01:00+00:00"
+    store.upsert_media_asset(
+        relative_path="2026/04/job/photo.png",
+        sha256_hex="a" * 64,
+        size_bytes=99,
+        origin_kind="indexed",
+        observed_at_utc=observed_at,
+    )
+    store.upsert_media_asset_preview(
+        relative_path="2026/04/job/photo.png",
+        preview_status="failed",
+        preview_relative_path=None,
+        attempted_at_utc=observed_at,
+        succeeded_at_utc=None,
+        failed_at_utc=observed_at,
+        failure_detail="preview generation failed: unsupported",
+        recorded_at_utc=observed_at,
+    )
+
+    record = store.get_media_asset_by_path("2026/04/job/photo.png")
+    assert record is not None
+    assert record.preview_status == "failed"
+    assert record.preview_relative_path is None
+    assert record.preview_failure_detail == "preview generation failed: unsupported"
+
+    store.upsert_media_asset_preview(
+        relative_path="2026/04/job/photo.png",
+        preview_status="succeeded",
+        preview_relative_path="2026/04/job/photo__abc123__w1024.jpg",
+        attempted_at_utc="2026-04-20T12:02:00+00:00",
+        succeeded_at_utc="2026-04-20T12:02:00+00:00",
+        failed_at_utc=None,
+        failure_detail=None,
+        recorded_at_utc="2026-04-20T12:02:00+00:00",
+    )
+    updated = store.get_media_asset_by_path("2026/04/job/photo.png")
+    assert updated is not None
+    assert updated.preview_status == "succeeded"
+    assert updated.preview_relative_path == "2026/04/job/photo__abc123__w1024.jpg"
+    assert updated.preview_failure_detail is None
+
+
 def test_in_memory_client_lifecycle_pending_approve_revoke() -> None:
     from photovault_api.state_store import InMemoryUploadStateStore
 
@@ -757,6 +803,67 @@ def test_postgres_upsert_media_asset_extraction_uses_conflict_update() -> None:
     assert observed["committed"] is True
 
 
+def test_postgres_upsert_media_asset_preview_uses_conflict_update() -> None:
+    observed: dict[str, object] = {}
+
+    class _FakeCursor:
+        rowcount = 1
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def execute(self, query: str, params: tuple[object, ...]) -> None:
+            observed["query"] = query
+            observed["params"] = params
+
+    class _FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def cursor(self) -> _FakeCursor:
+            return _FakeCursor()
+
+        def commit(self) -> None:
+            observed["committed"] = True
+
+    class _TestStore(PostgresUploadStateStore):
+        def _connect(self):  # type: ignore[override]
+            return _FakeConnection()
+
+    store = _TestStore(database_url="postgresql://unused")
+    store.upsert_media_asset_preview(
+        relative_path="2026/04/job/photo.jpg",
+        preview_status="succeeded",
+        preview_relative_path="2026/04/job/photo__abc__w1024.jpg",
+        attempted_at_utc="2026-04-20T12:16:00+00:00",
+        succeeded_at_utc="2026-04-20T12:16:00+00:00",
+        failed_at_utc=None,
+        failure_detail=None,
+        recorded_at_utc="2026-04-20T12:16:00+00:00",
+    )
+
+    query = str(observed["query"])
+    assert "ON CONFLICT (relative_path) DO UPDATE" in query
+    assert "preview_status = EXCLUDED.preview_status" in query
+    assert observed["params"] == (
+        "2026/04/job/photo.jpg",
+        "succeeded",
+        "2026/04/job/photo__abc__w1024.jpg",
+        "2026-04-20T12:16:00+00:00",
+        "2026-04-20T12:16:00+00:00",
+        None,
+        None,
+        "2026-04-20T12:16:00+00:00",
+    )
+    assert observed["committed"] is True
+
+
 def test_in_memory_media_asset_lookup_and_extraction_selection() -> None:
     from photovault_api.state_store import InMemoryUploadStateStore
 
@@ -863,6 +970,12 @@ def test_postgres_get_media_asset_by_path_uses_joined_extraction_row() -> None:
                 None,
                 "2026-04-20T12:01:00+00:00",
                 "bad file",
+                "failed",
+                None,
+                "2026-04-20T12:02:00+00:00",
+                None,
+                "2026-04-20T12:02:00+00:00",
+                "preview error",
                 None,
                 None,
                 None,
@@ -893,7 +1006,10 @@ def test_postgres_get_media_asset_by_path_uses_joined_extraction_row() -> None:
     assert record.relative_path == "2026/04/job/photo.jpg"
     assert record.extraction_status == "failed"
     assert record.extraction_failure_detail == "bad file"
+    assert record.preview_status == "failed"
+    assert record.preview_failure_detail == "preview error"
     assert "LEFT JOIN api_media_asset_extractions" in str(observed["query"])
+    assert "LEFT JOIN api_media_asset_previews" in str(observed["query"])
     assert observed["params"] == ("2026/04/job/photo.jpg",)
 
 
@@ -928,6 +1044,12 @@ def test_postgres_list_media_assets_for_extraction_filters_by_status_and_limit()
                     None,
                     None,
                     None,
+                    "pending",
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
                     None,
                     None,
                     None,
@@ -951,6 +1073,12 @@ def test_postgres_list_media_assets_for_extraction_filters_by_status_and_limit()
                     None,
                     "2026-04-20T12:06:00+00:00",
                     "broken",
+                    "succeeded",
+                    "cache/2026/04/job/failed.jpg__preview.jpg",
+                    "2026-04-20T12:07:00+00:00",
+                    "2026-04-20T12:07:00+00:00",
+                    None,
+                    None,
                     None,
                     None,
                     None,
@@ -981,6 +1109,8 @@ def test_postgres_list_media_assets_for_extraction_filters_by_status_and_limit()
     assert len(rows) == 2
     assert rows[0].extraction_status == "pending"
     assert rows[1].extraction_status == "failed"
+    assert rows[0].preview_status == "pending"
+    assert rows[1].preview_status == "succeeded"
     assert "COALESCE(me.extraction_status, 'pending') = ANY(%s)" in str(observed["query"])
     assert observed["params"] == (["pending", "failed"], 5)
 
@@ -1105,6 +1235,12 @@ def test_postgres_list_media_assets_uses_bounded_filter_where_clause() -> None:
                     None,
                     "2026-04-22T10:01:00+00:00",
                     "broken",
+                    "pending",
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
                     None,
                     None,
                     None,

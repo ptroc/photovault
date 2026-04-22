@@ -706,3 +706,156 @@ def test_catalog_page_origin_filter_and_filtered_pagination_links() -> None:
     html = response.get_data(as_text=True)
     assert 'href="/catalog?page=1&amp;extraction_status=failed&amp;origin_kind=uploaded"' in html
     assert 'href="/catalog?page=3&amp;extraction_status=failed&amp;origin_kind=uploaded"' in html
+
+
+def test_catalog_asset_detail_renders_preview_status_and_image() -> None:
+    def _fetcher(path: str, query: dict[str, str]) -> dict:
+        assert path == "/v1/admin/catalog/asset"
+        assert query == {"relative_path": "2026/04/Job_A/a.jpg"}
+        return {
+            "item": {
+                "relative_path": "2026/04/Job_A/a.jpg",
+                "sha256_hex": "a" * 64,
+                "size_bytes": 2048,
+                "origin_kind": "uploaded",
+                "last_observed_origin_kind": "uploaded",
+                "provenance_job_name": "Job_A",
+                "provenance_original_filename": "a.jpg",
+                "first_cataloged_at_utc": "2026-04-22T10:00:00+00:00",
+                "last_cataloged_at_utc": "2026-04-22T10:00:00+00:00",
+                "extraction_status": "succeeded",
+                "extraction_last_attempted_at_utc": "2026-04-22T10:01:00+00:00",
+                "extraction_last_succeeded_at_utc": "2026-04-22T10:01:00+00:00",
+                "extraction_last_failed_at_utc": None,
+                "extraction_failure_detail": None,
+                "preview_status": "succeeded",
+                "preview_relative_path": "2026/04/Job_A/a__abc__w1024.jpg",
+                "preview_last_attempted_at_utc": "2026-04-22T10:02:00+00:00",
+                "preview_last_succeeded_at_utc": "2026-04-22T10:02:00+00:00",
+                "preview_last_failed_at_utc": None,
+                "preview_failure_detail": None,
+                "capture_timestamp_utc": "2026-04-22T09:30:00+00:00",
+                "camera_make": "Canon",
+                "camera_model": "EOS R6",
+                "image_width": 6000,
+                "image_height": 4000,
+                "orientation": 1,
+                "lens_model": "RF 24-70mm",
+            }
+        }
+
+    app = create_app(api_fetcher=_fetcher)
+    response = app.test_client().get("/catalog/asset?relative_path=2026/04/Job_A/a.jpg")
+    assert response.status_code == 200
+    html = response.get_data(as_text=True)
+    assert "Catalog Asset Detail" in html
+    assert "Preview Image" in html
+    assert "preview_last_succeeded_at_utc" not in html
+    assert 'src="/catalog/preview?relative_path=2026/04/Job_A/a.jpg"' in html
+
+
+def test_catalog_asset_detail_renders_preview_status_for_heic_asset() -> None:
+    def _fetcher(path: str, query: dict[str, str]) -> dict:
+        assert path == "/v1/admin/catalog/asset"
+        assert query == {"relative_path": "2026/04/Job_A/a.heic"}
+        return {
+            "item": {
+                "relative_path": "2026/04/Job_A/a.heic",
+                "sha256_hex": "b" * 64,
+                "size_bytes": 4096,
+                "origin_kind": "indexed",
+                "last_observed_origin_kind": "indexed",
+                "provenance_job_name": None,
+                "provenance_original_filename": None,
+                "first_cataloged_at_utc": "2026-04-22T10:00:00+00:00",
+                "last_cataloged_at_utc": "2026-04-22T10:00:00+00:00",
+                "extraction_status": "pending",
+                "extraction_last_attempted_at_utc": None,
+                "extraction_last_succeeded_at_utc": None,
+                "extraction_last_failed_at_utc": None,
+                "extraction_failure_detail": None,
+                "preview_status": "failed",
+                "preview_relative_path": None,
+                "preview_last_attempted_at_utc": "2026-04-22T10:02:00+00:00",
+                "preview_last_succeeded_at_utc": None,
+                "preview_last_failed_at_utc": "2026-04-22T10:02:00+00:00",
+                "preview_failure_detail": "HEIC preview backend unavailable",
+                "capture_timestamp_utc": None,
+                "camera_make": None,
+                "camera_model": None,
+                "image_width": None,
+                "image_height": None,
+                "orientation": None,
+                "lens_model": None,
+            }
+        }
+
+    app = create_app(api_fetcher=_fetcher)
+    response = app.test_client().get("/catalog/asset?relative_path=2026/04/Job_A/a.heic")
+    assert response.status_code == 200
+    html = response.get_data(as_text=True)
+    assert "Catalog Asset Detail" in html
+    assert "failed" in html
+    assert "HEIC preview backend unavailable" in html
+    assert "Preview Image" not in html
+
+
+def test_catalog_preview_action_calls_api_and_redirects_to_detail() -> None:
+    observed: dict[str, object] = {}
+
+    def _fetcher(path: str, query: dict[str, str]) -> dict:
+        assert path == "/v1/admin/catalog/asset"
+        return {
+            "item": {
+                "relative_path": "2026/04/Job_A/a.jpg",
+                "sha256_hex": "a" * 64,
+                "size_bytes": 2048,
+                "origin_kind": "uploaded",
+                "last_observed_origin_kind": "uploaded",
+                "provenance_job_name": None,
+                "provenance_original_filename": None,
+                "first_cataloged_at_utc": "2026-04-22T10:00:00+00:00",
+                "last_cataloged_at_utc": "2026-04-22T10:00:00+00:00",
+                "extraction_status": "succeeded",
+                "extraction_last_attempted_at_utc": None,
+                "extraction_last_succeeded_at_utc": None,
+                "extraction_last_failed_at_utc": None,
+                "extraction_failure_detail": None,
+                "preview_status": "pending",
+                "preview_relative_path": None,
+                "preview_last_attempted_at_utc": None,
+                "preview_last_succeeded_at_utc": None,
+                "preview_last_failed_at_utc": None,
+                "preview_failure_detail": None,
+                "capture_timestamp_utc": None,
+                "camera_make": None,
+                "camera_model": None,
+                "image_width": None,
+                "image_height": None,
+                "orientation": None,
+                "lens_model": None,
+            }
+        }
+
+    def _poster(path: str, payload: dict) -> dict:
+        observed["path"] = path
+        observed["payload"] = payload
+        return {
+            "item": {
+                "relative_path": payload["relative_path"],
+                "preview_status": "succeeded",
+                "preview_relative_path": "x.jpg",
+            }
+        }
+
+    app = create_app(api_fetcher=_fetcher, api_poster=_poster)
+    client = app.test_client()
+    response = client.post(
+        "/catalog/actions/preview",
+        data={"relative_path": "2026/04/Job_A/a.jpg", "page": "1"},
+        follow_redirects=True,
+    )
+    assert response.status_code == 200
+    assert observed["path"] == "/v1/admin/catalog/preview/retry"
+    assert observed["payload"] == {"relative_path": "2026/04/Job_A/a.jpg"}
+    assert "Retried preview generation for 2026/04/Job_A/a.jpg." in response.get_data(as_text=True)

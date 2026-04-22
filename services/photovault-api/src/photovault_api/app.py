@@ -1,14 +1,19 @@
 """Server-side API skeleton for photovault."""
 
 import hashlib
+import io
 import os
 import re
 import secrets
+import shutil
+import subprocess
+import tempfile
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.responses import FileResponse
 from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel, Field
 
@@ -112,6 +117,12 @@ class AdminCatalogItem(BaseModel):
     extraction_last_succeeded_at_utc: str | None
     extraction_last_failed_at_utc: str | None
     extraction_failure_detail: str | None
+    preview_status: str
+    preview_relative_path: str | None
+    preview_last_attempted_at_utc: str | None
+    preview_last_succeeded_at_utc: str | None
+    preview_last_failed_at_utc: str | None
+    preview_failure_detail: str | None
     capture_timestamp_utc: str | None
     camera_make: str | None
     camera_model: str | None
@@ -133,6 +144,18 @@ class AdminRetryExtractionRequest(BaseModel):
 
 
 class AdminRetryExtractionResponse(BaseModel):
+    item: AdminCatalogItem
+
+
+class AdminRetryPreviewRequest(BaseModel):
+    relative_path: str = Field(min_length=1)
+
+
+class AdminRetryPreviewResponse(BaseModel):
+    item: AdminCatalogItem
+
+
+class AdminCatalogAssetResponse(BaseModel):
     item: AdminCatalogItem
 
 
@@ -303,6 +326,20 @@ class ClientHeartbeatResponse(BaseModel):
 _HEARTBEAT_ONLINE_MAX_AGE_SECONDS = 90
 _CLIENT_LIST_SCAN_MAX = 5000
 _CLIENT_LIST_SCAN_PAGE_SIZE = 200
+_PREVIEW_MAX_SIZE = (1024, 1024)
+_PREVIEW_RASTER_SUFFIXES = {".png", ".jpg", ".jpeg"}
+_PREVIEW_HEIC_SUFFIXES = {".heic", ".heif"}
+_PREVIEW_RAW_SUFFIXES = {
+    ".arw",
+    ".cr2",
+    ".cr3",
+    ".dng",
+    ".nef",
+    ".orf",
+    ".raf",
+    ".rw2",
+}
+_RAW_EMBEDDED_PREVIEW_TAGS = ("PreviewImage", "JpgFromRaw", "OtherImage", "ThumbnailImage")
 
 
 def _sanitize_component(raw_value: str, *, default_value: str) -> str:
@@ -421,6 +458,104 @@ def _extract_media_metadata(path: Path) -> dict[str, str | int | None]:
     }
 
 
+def _find_executable(name: str) -> str | None:
+    return shutil.which(name)
+
+
+def _run_external_command(command: list[str]) -> subprocess.CompletedProcess[bytes]:
+    return subprocess.run(command, check=False, capture_output=True)
+
+
+def _open_rgb_image(path: Path) -> Image.Image:
+    with Image.open(path) as image:
+        image.load()
+        return image.convert("RGB")
+
+
+def _open_rgb_image_from_bytes(payload: bytes) -> Image.Image:
+    with Image.open(io.BytesIO(payload)) as image:
+        image.load()
+        return image.convert("RGB")
+
+
+def _decode_process_stderr(stderr: bytes) -> str:
+    decoded = stderr.decode("utf-8", errors="ignore").strip()
+    return decoded or "no error detail"
+
+
+def _render_heic_preview_source(path: Path) -> Image.Image:
+    try:
+        return _open_rgb_image(path)
+    except (UnidentifiedImageError, OSError, SyntaxError, ValueError):
+        pass
+
+    converter_path = _find_executable("heif-convert")
+    if converter_path is None:
+        raise ValueError(
+            "HEIC preview backend unavailable: install heif-convert or enable HEIF support in Pillow"
+        )
+
+    with tempfile.TemporaryDirectory(prefix="photovault-heic-preview-") as temp_dir:
+        converted_path = Path(temp_dir) / "preview.jpg"
+        result = _run_external_command([converter_path, str(path), str(converted_path)])
+        if result.returncode != 0:
+            raise ValueError(
+                "HEIC preview backend failed: "
+                f"{_decode_process_stderr(result.stderr)}"
+            )
+        if not converted_path.is_file():
+            raise ValueError("HEIC preview backend failed: converter did not produce preview output")
+        try:
+            return _open_rgb_image(converted_path)
+        except (UnidentifiedImageError, OSError, SyntaxError, ValueError) as exc:
+            raise ValueError(f"HEIC preview backend produced invalid preview data: {exc}") from exc
+
+
+def _extract_raw_embedded_preview_bytes(path: Path) -> bytes:
+    extractor_path = _find_executable("exiftool")
+    if extractor_path is None:
+        raise ValueError("RAW embedded preview unavailable: exiftool is not installed")
+
+    observed_errors: list[str] = []
+    for tag_name in _RAW_EMBEDDED_PREVIEW_TAGS:
+        result = _run_external_command([extractor_path, "-b", f"-{tag_name}", str(path)])
+        if result.returncode == 0 and result.stdout:
+            return result.stdout
+        stderr_text = _decode_process_stderr(result.stderr)
+        if result.returncode != 0 and stderr_text != "no error detail":
+            observed_errors.append(f"{tag_name}: {stderr_text}")
+
+    if observed_errors:
+        raise ValueError("RAW embedded preview unavailable: " + "; ".join(observed_errors))
+    raise ValueError("RAW embedded preview unavailable: no embedded preview data found")
+
+
+def _render_raw_preview_source(path: Path) -> Image.Image:
+    try:
+        preview_bytes = _extract_raw_embedded_preview_bytes(path)
+    except OSError as exc:
+        raise ValueError(f"RAW embedded preview extraction failed: {exc}") from exc
+
+    try:
+        return _open_rgb_image_from_bytes(preview_bytes)
+    except (UnidentifiedImageError, OSError, SyntaxError, ValueError) as exc:
+        raise ValueError(f"RAW embedded preview data is invalid: {exc}") from exc
+
+
+def _render_preview_source(path: Path) -> Image.Image:
+    file_suffix = path.suffix.lower()
+    if file_suffix in _PREVIEW_RASTER_SUFFIXES:
+        try:
+            return _open_rgb_image(path)
+        except (UnidentifiedImageError, OSError, SyntaxError, ValueError) as exc:
+            raise ValueError(f"invalid media content for preview: {exc}") from exc
+    if file_suffix in _PREVIEW_HEIC_SUFFIXES:
+        return _render_heic_preview_source(path)
+    if file_suffix in _PREVIEW_RAW_SUFFIXES:
+        return _render_raw_preview_source(path)
+    raise ValueError(f"unsupported media format for preview: {file_suffix or 'unknown'}")
+
+
 def _upsert_storage_and_catalog_record(
     *,
     store: UploadStateStore,
@@ -502,6 +637,67 @@ def _attempt_media_extraction(
     )
 
 
+def _preview_relative_cache_path(*, relative_path: str, sha256_hex: str) -> str:
+    source_path = Path(relative_path)
+    stem = source_path.stem or "asset"
+    parent = source_path.parent.as_posix()
+    filename = f"{stem}__{sha256_hex[:12]}__w1024.jpg"
+    if parent and parent != ".":
+        return f"{parent}/{filename}"
+    return filename
+
+
+def _attempt_preview_generation(
+    *,
+    store: UploadStateStore,
+    storage_root_path: Path,
+    preview_cache_root_path: Path,
+    relative_path: str,
+) -> None:
+    now = datetime.now(UTC).isoformat()
+    store.ensure_media_asset_preview_row(relative_path=relative_path, recorded_at_utc=now)
+    asset = store.get_media_asset_by_path(relative_path)
+    if asset is None:
+        return
+    asset_path = storage_root_path / relative_path
+
+    preview_relative_path = _preview_relative_cache_path(
+        relative_path=relative_path,
+        sha256_hex=asset.sha256_hex,
+    )
+    preview_path = preview_cache_root_path / preview_relative_path
+    preview_path.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        if not preview_path.exists():
+            with _render_preview_source(asset_path) as preview_image:
+                preview_image.thumbnail(_PREVIEW_MAX_SIZE, Image.Resampling.LANCZOS)
+                preview_image.save(preview_path, format="JPEG", quality=85, optimize=True)
+    except ValueError as exc:
+        store.upsert_media_asset_preview(
+            relative_path=relative_path,
+            preview_status="failed",
+            preview_relative_path=None,
+            attempted_at_utc=now,
+            succeeded_at_utc=None,
+            failed_at_utc=now,
+            failure_detail=f"preview generation failed: {exc}",
+            recorded_at_utc=now,
+        )
+        return
+
+    store.upsert_media_asset_preview(
+        relative_path=relative_path,
+        preview_status="succeeded",
+        preview_relative_path=preview_relative_path,
+        attempted_at_utc=now,
+        succeeded_at_utc=now,
+        failed_at_utc=None,
+        failure_detail=None,
+        recorded_at_utc=now,
+    )
+
+
 def _to_admin_catalog_item(record: object) -> AdminCatalogItem:
     return AdminCatalogItem(
         relative_path=str(record.relative_path),
@@ -537,6 +733,26 @@ def _to_admin_catalog_item(record: object) -> AdminCatalogItem:
         ),
         extraction_failure_detail=(
             str(record.extraction_failure_detail) if record.extraction_failure_detail is not None else None
+        ),
+        preview_status=str(record.preview_status),
+        preview_relative_path=(
+            str(record.preview_relative_path) if record.preview_relative_path is not None else None
+        ),
+        preview_last_attempted_at_utc=(
+            str(record.preview_last_attempted_at_utc)
+            if record.preview_last_attempted_at_utc is not None
+            else None
+        ),
+        preview_last_succeeded_at_utc=(
+            str(record.preview_last_succeeded_at_utc)
+            if record.preview_last_succeeded_at_utc is not None
+            else None
+        ),
+        preview_last_failed_at_utc=(
+            str(record.preview_last_failed_at_utc) if record.preview_last_failed_at_utc is not None else None
+        ),
+        preview_failure_detail=(
+            str(record.preview_failure_detail) if record.preview_failure_detail is not None else None
         ),
         capture_timestamp_utc=(
             str(record.capture_timestamp_utc) if record.capture_timestamp_utc is not None else None
@@ -695,8 +911,14 @@ def create_app(
     if not resolved_storage_root:
         raise RuntimeError("PHOTOVAULT_API_STORAGE_ROOT must be set")
     storage_root_path = Path(resolved_storage_root).expanduser().resolve()
+    resolved_preview_cache_root = (
+        os.getenv("PHOTOVAULT_API_PREVIEW_CACHE_ROOT")
+        or str(storage_root_path.parent / ".photovault_preview_cache")
+    )
+    preview_cache_root_path = Path(resolved_preview_cache_root).expanduser().resolve()
     temp_root = storage_root_path / ".temp_uploads"
     temp_root.mkdir(parents=True, exist_ok=True)
+    preview_cache_root_path.mkdir(parents=True, exist_ok=True)
 
     app = FastAPI(title="photovault-api", version="0.1.0")
     if state_store is not None:
@@ -711,6 +933,7 @@ def create_app(
     app.state.upload_state_store = store
     app.state.storage_root = storage_root_path
     app.state.storage_temp_root = temp_root
+    app.state.preview_cache_root = preview_cache_root_path
     app.state.bootstrap_token = bootstrap_token or os.getenv("PHOTOVAULT_API_BOOTSTRAP_TOKEN", "")
 
     @app.get("/healthz")
@@ -1211,6 +1434,52 @@ def create_app(
             offset=offset,
             items=[_to_admin_catalog_item(record) for record in records],
         )
+
+    @app.get("/v1/admin/catalog/asset", response_model=AdminCatalogAssetResponse)
+    def admin_catalog_asset(
+        relative_path: str = Query(min_length=1),
+    ) -> AdminCatalogAssetResponse:
+        store: UploadStateStore = app.state.upload_state_store
+        record = store.get_media_asset_by_path(relative_path)
+        if record is None:
+            raise HTTPException(status_code=404, detail="catalog asset not found")
+        return AdminCatalogAssetResponse(item=_to_admin_catalog_item(record))
+
+    @app.post("/v1/admin/catalog/preview/retry", response_model=AdminRetryPreviewResponse)
+    def admin_retry_catalog_preview(payload: AdminRetryPreviewRequest) -> AdminRetryPreviewResponse:
+        store: UploadStateStore = app.state.upload_state_store
+        existing = store.get_media_asset_by_path(payload.relative_path)
+        if existing is None:
+            raise HTTPException(status_code=404, detail="catalog asset not found")
+
+        _attempt_preview_generation(
+            store=store,
+            storage_root_path=storage_root_path,
+            preview_cache_root_path=preview_cache_root_path,
+            relative_path=payload.relative_path,
+        )
+        updated = store.get_media_asset_by_path(payload.relative_path)
+        if updated is None:
+            raise HTTPException(status_code=404, detail="catalog asset not found after preview retry")
+        return AdminRetryPreviewResponse(item=_to_admin_catalog_item(updated))
+
+    @app.get("/v1/admin/catalog/preview")
+    def admin_catalog_preview_file(relative_path: str = Query(min_length=1)) -> FileResponse:
+        store: UploadStateStore = app.state.upload_state_store
+        record = store.get_media_asset_by_path(relative_path)
+        if record is None:
+            raise HTTPException(status_code=404, detail="catalog asset not found")
+        if record.preview_status != "succeeded" or not record.preview_relative_path:
+            raise HTTPException(status_code=404, detail="preview not available")
+
+        preview_path = (preview_cache_root_path / record.preview_relative_path).resolve()
+        try:
+            preview_path.relative_to(preview_cache_root_path)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="invalid preview path") from exc
+        if not preview_path.is_file():
+            raise HTTPException(status_code=404, detail="preview file missing")
+        return FileResponse(preview_path, media_type="image/jpeg")
 
     @app.post("/v1/admin/catalog/extraction/retry", response_model=AdminRetryExtractionResponse)
     def admin_retry_catalog_extraction(payload: AdminRetryExtractionRequest) -> AdminRetryExtractionResponse:

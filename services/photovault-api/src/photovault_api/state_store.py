@@ -44,6 +44,12 @@ class MediaAssetRecord:
     extraction_last_succeeded_at_utc: str | None
     extraction_last_failed_at_utc: str | None
     extraction_failure_detail: str | None
+    preview_status: str
+    preview_relative_path: str | None
+    preview_last_attempted_at_utc: str | None
+    preview_last_succeeded_at_utc: str | None
+    preview_last_failed_at_utc: str | None
+    preview_failure_detail: str | None
     capture_timestamp_utc: str | None
     camera_make: str | None
     camera_model: str | None
@@ -68,6 +74,17 @@ class MediaExtractionRecord:
     image_height: int | None
     orientation: int | None
     lens_model: str | None
+
+
+@dataclass(frozen=True)
+class MediaPreviewRecord:
+    relative_path: str
+    preview_status: str
+    preview_relative_path: str | None
+    preview_last_attempted_at_utc: str | None
+    preview_last_succeeded_at_utc: str | None
+    preview_last_failed_at_utc: str | None
+    preview_failure_detail: str | None
 
 
 @dataclass(frozen=True)
@@ -235,6 +252,21 @@ class UploadStateStore(Protocol):
         recorded_at_utc: str,
     ) -> None: ...
 
+    def ensure_media_asset_preview_row(self, *, relative_path: str, recorded_at_utc: str) -> None: ...
+
+    def upsert_media_asset_preview(
+        self,
+        *,
+        relative_path: str,
+        preview_status: str,
+        preview_relative_path: str | None,
+        attempted_at_utc: str | None,
+        succeeded_at_utc: str | None,
+        failed_at_utc: str | None,
+        failure_detail: str | None,
+        recorded_at_utc: str,
+    ) -> None: ...
+
     def list_duplicate_sha_groups(
         self, *, limit: int, offset: int
     ) -> tuple[int, list[DuplicateShaGroup]]: ...
@@ -324,6 +356,7 @@ class InMemoryUploadStateStore:
     stored_files: dict[str, StoredFileRecord] = field(default_factory=dict)
     media_assets: dict[str, MediaAssetRecord] = field(default_factory=dict)
     media_asset_extractions: dict[str, MediaExtractionRecord] = field(default_factory=dict)
+    media_asset_previews: dict[str, MediaPreviewRecord] = field(default_factory=dict)
     clients: dict[str, ClientRecord] = field(default_factory=dict)
     client_heartbeats: dict[str, ClientHeartbeatRecord] = field(default_factory=dict)
     path_conflicts: list[PathConflictRecord] = field(default_factory=list)
@@ -448,6 +481,18 @@ class InMemoryUploadStateStore:
                 extraction_failure_detail=(
                     existing.extraction_failure_detail if existing is not None else None
                 ),
+                preview_status=existing.preview_status if existing is not None else "pending",
+                preview_relative_path=existing.preview_relative_path if existing is not None else None,
+                preview_last_attempted_at_utc=(
+                    existing.preview_last_attempted_at_utc if existing is not None else None
+                ),
+                preview_last_succeeded_at_utc=(
+                    existing.preview_last_succeeded_at_utc if existing is not None else None
+                ),
+                preview_last_failed_at_utc=(
+                    existing.preview_last_failed_at_utc if existing is not None else None
+                ),
+                preview_failure_detail=existing.preview_failure_detail if existing is not None else None,
                 capture_timestamp_utc=existing.capture_timestamp_utc if existing is not None else None,
                 camera_make=existing.camera_make if existing is not None else None,
                 camera_model=existing.camera_model if existing is not None else None,
@@ -472,6 +517,18 @@ class InMemoryUploadStateStore:
                     image_height=None,
                     orientation=None,
                     lens_model=None,
+                ),
+            )
+            self.media_asset_previews.setdefault(
+                relative_path,
+                MediaPreviewRecord(
+                    relative_path=relative_path,
+                    preview_status="pending",
+                    preview_relative_path=None,
+                    preview_last_attempted_at_utc=None,
+                    preview_last_succeeded_at_utc=None,
+                    preview_last_failed_at_utc=None,
+                    preview_failure_detail=None,
                 ),
             )
 
@@ -590,6 +647,12 @@ class InMemoryUploadStateStore:
                 extraction_last_succeeded_at_utc=succeeded_at_utc,
                 extraction_last_failed_at_utc=failed_at_utc,
                 extraction_failure_detail=failure_detail,
+                preview_status=existing_asset.preview_status,
+                preview_relative_path=existing_asset.preview_relative_path,
+                preview_last_attempted_at_utc=existing_asset.preview_last_attempted_at_utc,
+                preview_last_succeeded_at_utc=existing_asset.preview_last_succeeded_at_utc,
+                preview_last_failed_at_utc=existing_asset.preview_last_failed_at_utc,
+                preview_failure_detail=existing_asset.preview_failure_detail,
                 capture_timestamp_utc=capture_timestamp_utc,
                 camera_make=camera_make,
                 camera_model=camera_model,
@@ -597,6 +660,78 @@ class InMemoryUploadStateStore:
                 image_height=image_height,
                 orientation=orientation,
                 lens_model=lens_model,
+            )
+
+    def ensure_media_asset_preview_row(self, *, relative_path: str, recorded_at_utc: str) -> None:
+        del recorded_at_utc
+        with self._lock:
+            self.media_asset_previews.setdefault(
+                relative_path,
+                MediaPreviewRecord(
+                    relative_path=relative_path,
+                    preview_status="pending",
+                    preview_relative_path=None,
+                    preview_last_attempted_at_utc=None,
+                    preview_last_succeeded_at_utc=None,
+                    preview_last_failed_at_utc=None,
+                    preview_failure_detail=None,
+                ),
+            )
+
+    def upsert_media_asset_preview(
+        self,
+        *,
+        relative_path: str,
+        preview_status: str,
+        preview_relative_path: str | None,
+        attempted_at_utc: str | None,
+        succeeded_at_utc: str | None,
+        failed_at_utc: str | None,
+        failure_detail: str | None,
+        recorded_at_utc: str,
+    ) -> None:
+        del recorded_at_utc
+        with self._lock:
+            self.media_asset_previews[relative_path] = MediaPreviewRecord(
+                relative_path=relative_path,
+                preview_status=preview_status,
+                preview_relative_path=preview_relative_path,
+                preview_last_attempted_at_utc=attempted_at_utc,
+                preview_last_succeeded_at_utc=succeeded_at_utc,
+                preview_last_failed_at_utc=failed_at_utc,
+                preview_failure_detail=failure_detail,
+            )
+            existing_asset = self.media_assets.get(relative_path)
+            if existing_asset is None:
+                return
+            self.media_assets[relative_path] = MediaAssetRecord(
+                relative_path=existing_asset.relative_path,
+                sha256_hex=existing_asset.sha256_hex,
+                size_bytes=existing_asset.size_bytes,
+                origin_kind=existing_asset.origin_kind,
+                last_observed_origin_kind=existing_asset.last_observed_origin_kind,
+                provenance_job_name=existing_asset.provenance_job_name,
+                provenance_original_filename=existing_asset.provenance_original_filename,
+                first_cataloged_at_utc=existing_asset.first_cataloged_at_utc,
+                last_cataloged_at_utc=existing_asset.last_cataloged_at_utc,
+                extraction_status=existing_asset.extraction_status,
+                extraction_last_attempted_at_utc=existing_asset.extraction_last_attempted_at_utc,
+                extraction_last_succeeded_at_utc=existing_asset.extraction_last_succeeded_at_utc,
+                extraction_last_failed_at_utc=existing_asset.extraction_last_failed_at_utc,
+                extraction_failure_detail=existing_asset.extraction_failure_detail,
+                preview_status=preview_status,
+                preview_relative_path=preview_relative_path,
+                preview_last_attempted_at_utc=attempted_at_utc,
+                preview_last_succeeded_at_utc=succeeded_at_utc,
+                preview_last_failed_at_utc=failed_at_utc,
+                preview_failure_detail=failure_detail,
+                capture_timestamp_utc=existing_asset.capture_timestamp_utc,
+                camera_make=existing_asset.camera_make,
+                camera_model=existing_asset.camera_model,
+                image_width=existing_asset.image_width,
+                image_height=existing_asset.image_height,
+                orientation=existing_asset.orientation,
+                lens_model=existing_asset.lens_model,
             )
 
     def list_duplicate_sha_groups(
@@ -966,6 +1101,21 @@ class PostgresUploadStateStore:
                         image_height INTEGER,
                         orientation INTEGER,
                         lens_model TEXT,
+                        updated_at_utc TEXT NOT NULL
+                    );
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS api_media_asset_previews (
+                        relative_path TEXT PRIMARY KEY REFERENCES api_media_assets(relative_path)
+                            ON DELETE CASCADE,
+                        preview_status TEXT NOT NULL,
+                        preview_relative_path TEXT,
+                        last_attempted_at_utc TEXT,
+                        last_succeeded_at_utc TEXT,
+                        last_failed_at_utc TEXT,
+                        failure_detail TEXT,
                         updated_at_utc TEXT NOT NULL
                     );
                     """
@@ -1351,6 +1501,8 @@ class PostgresUploadStateStore:
                     FROM api_media_assets ma
                     LEFT JOIN api_media_asset_extractions me
                         ON me.relative_path = ma.relative_path
+                    LEFT JOIN api_media_asset_previews mp
+                        ON mp.relative_path = ma.relative_path
                     {where_sql};
                     """,
                     tuple(params),
@@ -1374,6 +1526,12 @@ class PostgresUploadStateStore:
                         me.last_succeeded_at_utc,
                         me.last_failed_at_utc,
                         me.failure_detail,
+                        COALESCE(mp.preview_status, 'pending') AS preview_status,
+                        mp.preview_relative_path,
+                        mp.last_attempted_at_utc,
+                        mp.last_succeeded_at_utc,
+                        mp.last_failed_at_utc,
+                        mp.failure_detail,
                         me.capture_timestamp_utc,
                         me.camera_make,
                         me.camera_model,
@@ -1384,6 +1542,8 @@ class PostgresUploadStateStore:
                     FROM api_media_assets ma
                     LEFT JOIN api_media_asset_extractions me
                         ON me.relative_path = ma.relative_path
+                    LEFT JOIN api_media_asset_previews mp
+                        ON mp.relative_path = ma.relative_path
                     {where_sql}
                     ORDER BY ma.last_cataloged_at_utc DESC, ma.relative_path ASC
                     LIMIT %s
@@ -1408,13 +1568,19 @@ class PostgresUploadStateStore:
                         extraction_last_succeeded_at_utc=str(row[11]) if row[11] is not None else None,
                         extraction_last_failed_at_utc=str(row[12]) if row[12] is not None else None,
                         extraction_failure_detail=str(row[13]) if row[13] is not None else None,
-                        capture_timestamp_utc=str(row[14]) if row[14] is not None else None,
-                        camera_make=str(row[15]) if row[15] is not None else None,
-                        camera_model=str(row[16]) if row[16] is not None else None,
-                        image_width=int(row[17]) if row[17] is not None else None,
-                        image_height=int(row[18]) if row[18] is not None else None,
-                        orientation=int(row[19]) if row[19] is not None else None,
-                        lens_model=str(row[20]) if row[20] is not None else None,
+                        preview_status=str(row[14]),
+                        preview_relative_path=str(row[15]) if row[15] is not None else None,
+                        preview_last_attempted_at_utc=str(row[16]) if row[16] is not None else None,
+                        preview_last_succeeded_at_utc=str(row[17]) if row[17] is not None else None,
+                        preview_last_failed_at_utc=str(row[18]) if row[18] is not None else None,
+                        preview_failure_detail=str(row[19]) if row[19] is not None else None,
+                        capture_timestamp_utc=str(row[20]) if row[20] is not None else None,
+                        camera_make=str(row[21]) if row[21] is not None else None,
+                        camera_model=str(row[22]) if row[22] is not None else None,
+                        image_width=int(row[23]) if row[23] is not None else None,
+                        image_height=int(row[24]) if row[24] is not None else None,
+                        orientation=int(row[25]) if row[25] is not None else None,
+                        lens_model=str(row[26]) if row[26] is not None else None,
                     )
                     for row in rows
                 ]
@@ -1440,6 +1606,12 @@ class PostgresUploadStateStore:
                         me.last_succeeded_at_utc,
                         me.last_failed_at_utc,
                         me.failure_detail,
+                        COALESCE(mp.preview_status, 'pending') AS preview_status,
+                        mp.preview_relative_path,
+                        mp.last_attempted_at_utc,
+                        mp.last_succeeded_at_utc,
+                        mp.last_failed_at_utc,
+                        mp.failure_detail,
                         me.capture_timestamp_utc,
                         me.camera_make,
                         me.camera_model,
@@ -1450,6 +1622,8 @@ class PostgresUploadStateStore:
                     FROM api_media_assets ma
                     LEFT JOIN api_media_asset_extractions me
                         ON me.relative_path = ma.relative_path
+                    LEFT JOIN api_media_asset_previews mp
+                        ON mp.relative_path = ma.relative_path
                     WHERE ma.relative_path = %s
                     LIMIT 1;
                     """,
@@ -1473,13 +1647,19 @@ class PostgresUploadStateStore:
                     extraction_last_succeeded_at_utc=str(row[11]) if row[11] is not None else None,
                     extraction_last_failed_at_utc=str(row[12]) if row[12] is not None else None,
                     extraction_failure_detail=str(row[13]) if row[13] is not None else None,
-                    capture_timestamp_utc=str(row[14]) if row[14] is not None else None,
-                    camera_make=str(row[15]) if row[15] is not None else None,
-                    camera_model=str(row[16]) if row[16] is not None else None,
-                    image_width=int(row[17]) if row[17] is not None else None,
-                    image_height=int(row[18]) if row[18] is not None else None,
-                    orientation=int(row[19]) if row[19] is not None else None,
-                    lens_model=str(row[20]) if row[20] is not None else None,
+                    preview_status=str(row[14]),
+                    preview_relative_path=str(row[15]) if row[15] is not None else None,
+                    preview_last_attempted_at_utc=str(row[16]) if row[16] is not None else None,
+                    preview_last_succeeded_at_utc=str(row[17]) if row[17] is not None else None,
+                    preview_last_failed_at_utc=str(row[18]) if row[18] is not None else None,
+                    preview_failure_detail=str(row[19]) if row[19] is not None else None,
+                    capture_timestamp_utc=str(row[20]) if row[20] is not None else None,
+                    camera_make=str(row[21]) if row[21] is not None else None,
+                    camera_model=str(row[22]) if row[22] is not None else None,
+                    image_width=int(row[23]) if row[23] is not None else None,
+                    image_height=int(row[24]) if row[24] is not None else None,
+                    orientation=int(row[25]) if row[25] is not None else None,
+                    lens_model=str(row[26]) if row[26] is not None else None,
                 )
 
     def list_media_assets_for_extraction(
@@ -1506,6 +1686,12 @@ class PostgresUploadStateStore:
                         me.last_succeeded_at_utc,
                         me.last_failed_at_utc,
                         me.failure_detail,
+                        COALESCE(mp.preview_status, 'pending') AS preview_status,
+                        mp.preview_relative_path,
+                        mp.last_attempted_at_utc,
+                        mp.last_succeeded_at_utc,
+                        mp.last_failed_at_utc,
+                        mp.failure_detail,
                         me.capture_timestamp_utc,
                         me.camera_make,
                         me.camera_model,
@@ -1516,6 +1702,8 @@ class PostgresUploadStateStore:
                     FROM api_media_assets ma
                     LEFT JOIN api_media_asset_extractions me
                         ON me.relative_path = ma.relative_path
+                    LEFT JOIN api_media_asset_previews mp
+                        ON mp.relative_path = ma.relative_path
                     WHERE COALESCE(me.extraction_status, 'pending') = ANY(%s)
                     ORDER BY ma.last_cataloged_at_utc DESC, ma.relative_path ASC
                     LIMIT %s;
@@ -1539,13 +1727,19 @@ class PostgresUploadStateStore:
                         extraction_last_succeeded_at_utc=str(row[11]) if row[11] is not None else None,
                         extraction_last_failed_at_utc=str(row[12]) if row[12] is not None else None,
                         extraction_failure_detail=str(row[13]) if row[13] is not None else None,
-                        capture_timestamp_utc=str(row[14]) if row[14] is not None else None,
-                        camera_make=str(row[15]) if row[15] is not None else None,
-                        camera_model=str(row[16]) if row[16] is not None else None,
-                        image_width=int(row[17]) if row[17] is not None else None,
-                        image_height=int(row[18]) if row[18] is not None else None,
-                        orientation=int(row[19]) if row[19] is not None else None,
-                        lens_model=str(row[20]) if row[20] is not None else None,
+                        preview_status=str(row[14]),
+                        preview_relative_path=str(row[15]) if row[15] is not None else None,
+                        preview_last_attempted_at_utc=str(row[16]) if row[16] is not None else None,
+                        preview_last_succeeded_at_utc=str(row[17]) if row[17] is not None else None,
+                        preview_last_failed_at_utc=str(row[18]) if row[18] is not None else None,
+                        preview_failure_detail=str(row[19]) if row[19] is not None else None,
+                        capture_timestamp_utc=str(row[20]) if row[20] is not None else None,
+                        camera_make=str(row[21]) if row[21] is not None else None,
+                        camera_model=str(row[22]) if row[22] is not None else None,
+                        image_width=int(row[23]) if row[23] is not None else None,
+                        image_height=int(row[24]) if row[24] is not None else None,
+                        orientation=int(row[25]) if row[25] is not None else None,
+                        lens_model=str(row[26]) if row[26] is not None else None,
                     )
                     for row in rows
                 ]
@@ -1635,6 +1829,72 @@ class PostgresUploadStateStore:
                         image_height,
                         orientation,
                         lens_model,
+                        recorded_at_utc,
+                    ),
+                )
+            conn.commit()
+
+    def ensure_media_asset_preview_row(self, *, relative_path: str, recorded_at_utc: str) -> None:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO api_media_asset_previews (
+                        relative_path,
+                        preview_status,
+                        updated_at_utc
+                    )
+                    VALUES (%s, 'pending', %s)
+                    ON CONFLICT (relative_path) DO NOTHING;
+                    """,
+                    (relative_path, recorded_at_utc),
+                )
+            conn.commit()
+
+    def upsert_media_asset_preview(
+        self,
+        *,
+        relative_path: str,
+        preview_status: str,
+        preview_relative_path: str | None,
+        attempted_at_utc: str | None,
+        succeeded_at_utc: str | None,
+        failed_at_utc: str | None,
+        failure_detail: str | None,
+        recorded_at_utc: str,
+    ) -> None:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO api_media_asset_previews (
+                        relative_path,
+                        preview_status,
+                        preview_relative_path,
+                        last_attempted_at_utc,
+                        last_succeeded_at_utc,
+                        last_failed_at_utc,
+                        failure_detail,
+                        updated_at_utc
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (relative_path) DO UPDATE
+                    SET preview_status = EXCLUDED.preview_status,
+                        preview_relative_path = EXCLUDED.preview_relative_path,
+                        last_attempted_at_utc = EXCLUDED.last_attempted_at_utc,
+                        last_succeeded_at_utc = EXCLUDED.last_succeeded_at_utc,
+                        last_failed_at_utc = EXCLUDED.last_failed_at_utc,
+                        failure_detail = EXCLUDED.failure_detail,
+                        updated_at_utc = EXCLUDED.updated_at_utc;
+                    """,
+                    (
+                        relative_path,
+                        preview_status,
+                        preview_relative_path,
+                        attempted_at_utc,
+                        succeeded_at_utc,
+                        failed_at_utc,
+                        failure_detail,
                         recorded_at_utc,
                     ),
                 )

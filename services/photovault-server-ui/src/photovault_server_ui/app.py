@@ -9,7 +9,7 @@ from urllib.error import URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-from flask import Flask, redirect, render_template, request, url_for
+from flask import Flask, Response, redirect, render_template, request, url_for
 
 ApiFetcher = Callable[[str, dict[str, str]], dict[str, Any]]
 ApiPoster = Callable[[str, dict[str, Any]], dict[str, Any]]
@@ -379,6 +379,13 @@ def create_app(*, api_fetcher: ApiFetcher | None = None, api_poster: ApiPoster |
             if orientation is not None:
                 metadata_bits.append(f"orientation {orientation}")
             item["metadata_summary"] = " | ".join(metadata_bits)
+            preview_status = str(item.get("preview_status") or "pending")
+            if preview_status == "succeeded":
+                item["preview_summary"] = "Preview available"
+            elif preview_status == "failed":
+                item["preview_summary"] = "Preview failed"
+            else:
+                item["preview_summary"] = "Preview pending"
 
         filter_query: dict[str, str] = {}
         if extraction_status_filter:
@@ -411,6 +418,117 @@ def create_app(*, api_fetcher: ApiFetcher | None = None, api_poster: ApiPoster |
             filter_query_suffix=filter_query_suffix,
             active_page="catalog",
         )
+
+    @app.get("/catalog/asset")
+    def catalog_asset_detail() -> str:
+        relative_path = request.args.get("relative_path", "").strip()
+        if not relative_path:
+            return redirect(url_for("catalog", action_error="Missing catalog relative path for detail view."))
+
+        page = request.args.get("page", "1").strip() or "1"
+        extraction_status_filter = request.args.get("extraction_status", "").strip()
+        origin_kind_filter = request.args.get("origin_kind", "").strip()
+        cataloged_since_filter = request.args.get("cataloged_since_utc", "").strip()
+        cataloged_before_filter = request.args.get("cataloged_before_utc", "").strip()
+        action_message = request.args.get("action_message")
+        action_error = request.args.get("action_error")
+        error_message: str | None = None
+
+        try:
+            payload = fetcher("/v1/admin/catalog/asset", {"relative_path": relative_path})
+        except (URLError, TimeoutError, ValueError):
+            payload = {"item": None}
+            error_message = "Unable to reach photovault-api catalog detail endpoint."
+
+        item = payload.get("item")
+        if item is not None:
+            size_bytes = int(item.get("size_bytes", 0))
+            item["size_human"] = _format_size_bytes(size_bytes)
+            metadata_bits: list[str] = []
+            capture = item.get("capture_timestamp_utc")
+            if capture:
+                metadata_bits.append(f"captured {capture}")
+            make = (item.get("camera_make") or "").strip()
+            model = (item.get("camera_model") or "").strip()
+            if make or model:
+                metadata_bits.append("camera " + " ".join([part for part in [make, model] if part]))
+            lens_model = (item.get("lens_model") or "").strip()
+            if lens_model:
+                metadata_bits.append(f"lens {lens_model}")
+            width = item.get("image_width")
+            height = item.get("image_height")
+            if width is not None and height is not None:
+                metadata_bits.append(f"{width}x{height}")
+            orientation = item.get("orientation")
+            if orientation is not None:
+                metadata_bits.append(f"orientation {orientation}")
+            item["metadata_summary"] = " | ".join(metadata_bits)
+
+        return render_template(
+            "catalog_asset.html",
+            asset=item,
+            page=page,
+            extraction_status_filter=extraction_status_filter,
+            origin_kind_filter=origin_kind_filter,
+            cataloged_since_filter=cataloged_since_filter,
+            cataloged_before_filter=cataloged_before_filter,
+            error_message=error_message,
+            action_message=action_message,
+            action_error=action_error,
+            active_page="catalog",
+        )
+
+    @app.post("/catalog/actions/preview")
+    def catalog_preview_action():
+        relative_path = request.form.get("relative_path", "").strip()
+        page = request.form.get("page", "1").strip() or "1"
+        extraction_status_filter = request.form.get("extraction_status", "").strip()
+        origin_kind_filter = request.form.get("origin_kind", "").strip()
+        cataloged_since_filter = request.form.get("cataloged_since_utc", "").strip()
+        cataloged_before_filter = request.form.get("cataloged_before_utc", "").strip()
+        redirect_query: dict[str, str] = {
+            "relative_path": relative_path,
+            "page": page,
+            "extraction_status": extraction_status_filter,
+            "origin_kind": origin_kind_filter,
+            "cataloged_since_utc": cataloged_since_filter,
+            "cataloged_before_utc": cataloged_before_filter,
+        }
+        if not relative_path:
+            return redirect(url_for("catalog", page=page, action_error="Missing catalog relative path."))
+        try:
+            poster("/v1/admin/catalog/preview/retry", {"relative_path": relative_path})
+        except (URLError, TimeoutError, ValueError):
+            return redirect(
+                url_for(
+                    "catalog_asset_detail",
+                    **redirect_query,
+                    action_error=f"Preview generation failed for {relative_path}.",
+                )
+            )
+        return redirect(
+            url_for(
+                "catalog_asset_detail",
+                **redirect_query,
+                action_message=f"Retried preview generation for {relative_path}.",
+            )
+        )
+
+    @app.get("/catalog/preview")
+    def catalog_preview_proxy() -> Response:
+        relative_path = request.args.get("relative_path", "").strip()
+        if not relative_path:
+            return Response("missing relative_path", status=400, mimetype="text/plain")
+        base_url = os.getenv("PHOTOVAULT_SERVER_UI_API_BASE_URL", "http://127.0.0.1:9301")
+        query_suffix = urlencode({"relative_path": relative_path})
+        req = Request(url=f"{base_url}/v1/admin/catalog/preview?{query_suffix}", method="GET")
+        try:
+            with urlopen(req, timeout=10) as response:
+                content = response.read()
+                content_type = response.headers.get("Content-Type", "image/jpeg")
+                return Response(content, status=200, mimetype=content_type)
+        except (URLError, TimeoutError, ValueError):
+            return Response("preview unavailable", status=404, mimetype="text/plain")
 
     @app.post("/catalog/actions/retry")
     def catalog_retry_action():

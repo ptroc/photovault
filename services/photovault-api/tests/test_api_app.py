@@ -766,6 +766,12 @@ def test_upload_content_and_verify_writes_filesystem_and_promotes_sha(tmp_path: 
             ],
             "extraction_last_failed_at_utc": None,
             "extraction_failure_detail": None,
+            "preview_status": "pending",
+            "preview_relative_path": None,
+            "preview_last_attempted_at_utc": None,
+            "preview_last_succeeded_at_utc": None,
+            "preview_last_failed_at_utc": None,
+            "preview_failure_detail": None,
             "capture_timestamp_utc": None,
             "camera_make": None,
             "camera_model": None,
@@ -1218,6 +1224,274 @@ def test_admin_backfill_is_sane_for_repeated_runs(tmp_path: Path) -> None:
     assert second_backfill.json()["processed_count"] == 0
 
 
+def test_admin_retry_preview_generates_cache_and_detail_visibility_for_still_image(tmp_path: Path) -> None:
+    image_path = tmp_path / "2026" / "04" / "Job_A" / "preview.jpg"
+    image_path.parent.mkdir(parents=True, exist_ok=True)
+    image_path.write_bytes(_jpeg_with_exif_bytes(width=20, height=10))
+
+    client = TestClient(create_app(storage_root=tmp_path))
+    index_response = client.post("/v1/storage/index")
+    assert index_response.status_code == 200
+
+    before = client.get("/v1/admin/catalog/asset", params={"relative_path": "2026/04/Job_A/preview.jpg"})
+    assert before.status_code == 200
+    assert before.json()["item"]["preview_status"] == "pending"
+
+    retry_response = client.post(
+        "/v1/admin/catalog/preview/retry",
+        json={"relative_path": "2026/04/Job_A/preview.jpg"},
+    )
+    assert retry_response.status_code == 200
+    item = retry_response.json()["item"]
+    assert item["preview_status"] == "succeeded"
+    assert item["preview_relative_path"]
+    assert item["preview_last_attempted_at_utc"] is not None
+    assert item["preview_last_succeeded_at_utc"] is not None
+    assert item["preview_last_failed_at_utc"] is None
+    assert item["preview_failure_detail"] is None
+
+    preview_cache_root = tmp_path.parent / ".photovault_preview_cache"
+    preview_file = preview_cache_root / str(item["preview_relative_path"])
+    assert preview_file.is_file()
+    assert preview_file.suffix.lower() == ".jpg"
+
+    preview_response = client.get(
+        "/v1/admin/catalog/preview",
+        params={"relative_path": "2026/04/Job_A/preview.jpg"},
+    )
+    assert preview_response.status_code == 200
+    assert preview_response.headers["content-type"] == "image/jpeg"
+
+    detail_response = client.get(
+        "/v1/admin/catalog/asset",
+        params={"relative_path": "2026/04/Job_A/preview.jpg"},
+    )
+    assert detail_response.status_code == 200
+    assert detail_response.json()["item"]["preview_status"] == "succeeded"
+    assert detail_response.json()["item"]["preview_relative_path"] == item["preview_relative_path"]
+
+
+def test_admin_retry_preview_generates_cache_for_heic_via_explicit_converter(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    image_path = tmp_path / "2026" / "04" / "Job_A" / "preview.heic"
+    image_path.parent.mkdir(parents=True, exist_ok=True)
+    image_path.write_bytes(b"fake-heic-content")
+
+    converted_bytes = _jpeg_with_exif_bytes(width=18, height=12)
+
+    def _fake_find_executable(name: str) -> str | None:
+        if name == "heif-convert":
+            return "/usr/local/bin/heif-convert"
+        return None
+
+    def _fake_run_external_command(command: list[str]):
+        assert command[0] == "/usr/local/bin/heif-convert"
+        converted_path = Path(command[2])
+        converted_path.write_bytes(converted_bytes)
+        return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(app_module, "_find_executable", _fake_find_executable)
+    monkeypatch.setattr(app_module, "_run_external_command", _fake_run_external_command)
+
+    client = TestClient(create_app(storage_root=tmp_path))
+    index_response = client.post("/v1/storage/index")
+    assert index_response.status_code == 200
+
+    retry_response = client.post(
+        "/v1/admin/catalog/preview/retry",
+        json={"relative_path": "2026/04/Job_A/preview.heic"},
+    )
+    assert retry_response.status_code == 200
+    item = retry_response.json()["item"]
+    assert item["preview_status"] == "succeeded"
+    assert (
+        item["preview_relative_path"]
+        == "2026/04/Job_A/preview__" + item["sha256_hex"][:12] + "__w1024.jpg"
+    )
+    assert item["preview_last_failed_at_utc"] is None
+    assert item["preview_failure_detail"] is None
+
+    preview_response = client.get(
+        "/v1/admin/catalog/preview",
+        params={"relative_path": "2026/04/Job_A/preview.heic"},
+    )
+    assert preview_response.status_code == 200
+    assert preview_response.headers["content-type"] == "image/jpeg"
+
+
+def test_admin_retry_preview_persists_explicit_heic_backend_failure_when_converter_missing(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    image_path = tmp_path / "2026" / "04" / "Job_A" / "unsupported.heic"
+    image_path.parent.mkdir(parents=True, exist_ok=True)
+    image_path.write_bytes(b"not-really-heic")
+
+    monkeypatch.setattr(app_module, "_find_executable", lambda name: None)
+
+    client = TestClient(create_app(storage_root=tmp_path))
+    index_response = client.post("/v1/storage/index")
+    assert index_response.status_code == 200
+
+    retry_response = client.post(
+        "/v1/admin/catalog/preview/retry",
+        json={"relative_path": "2026/04/Job_A/unsupported.heic"},
+    )
+    assert retry_response.status_code == 200
+    item = retry_response.json()["item"]
+    assert item["preview_status"] == "failed"
+    assert item["preview_last_failed_at_utc"] is not None
+    assert "HEIC preview backend unavailable" in str(item["preview_failure_detail"])
+
+
+def test_admin_retry_preview_generates_cache_for_raw_via_embedded_preview(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    image_path = tmp_path / "2026" / "04" / "Job_A" / "raw.cr3"
+    image_path.parent.mkdir(parents=True, exist_ok=True)
+    image_path.write_bytes(b"fake-raw-content")
+
+    monkeypatch.setattr(
+        app_module,
+        "_extract_raw_embedded_preview_bytes",
+        lambda path: _jpeg_with_exif_bytes(width=22, height=14),
+    )
+
+    client = TestClient(create_app(storage_root=tmp_path))
+    index_response = client.post("/v1/storage/index")
+    assert index_response.status_code == 200
+
+    retry_response = client.post(
+        "/v1/admin/catalog/preview/retry",
+        json={"relative_path": "2026/04/Job_A/raw.cr3"},
+    )
+    assert retry_response.status_code == 200
+    item = retry_response.json()["item"]
+    assert item["preview_status"] == "succeeded"
+    assert item["preview_relative_path"] == "2026/04/Job_A/raw__" + item["sha256_hex"][:12] + "__w1024.jpg"
+    assert item["preview_failure_detail"] is None
+
+
+def test_admin_retry_preview_persists_failure_for_raw_embedded_preview_errors(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    image_path = tmp_path / "2026" / "04" / "Job_A" / "raw_missing_preview.nef"
+    image_path.parent.mkdir(parents=True, exist_ok=True)
+    image_path.write_bytes(b"fake-raw-content-without-embedded-preview")
+
+    def _raise_missing_embedded_preview(path: Path) -> bytes:
+        raise ValueError("RAW embedded preview unavailable: no embedded preview data found")
+
+    monkeypatch.setattr(app_module, "_extract_raw_embedded_preview_bytes", _raise_missing_embedded_preview)
+
+    client = TestClient(create_app(storage_root=tmp_path))
+    index_response = client.post("/v1/storage/index")
+    assert index_response.status_code == 200
+
+    retry_response = client.post(
+        "/v1/admin/catalog/preview/retry",
+        json={"relative_path": "2026/04/Job_A/raw_missing_preview.nef"},
+    )
+    assert retry_response.status_code == 200
+    item = retry_response.json()["item"]
+    assert item["preview_status"] == "failed"
+    assert item["preview_last_failed_at_utc"] is not None
+    assert "RAW embedded preview unavailable" in str(item["preview_failure_detail"])
+
+
+def test_admin_retry_preview_persists_failure_for_unsupported_media(tmp_path: Path) -> None:
+    bad_path = tmp_path / "2026" / "04" / "Job_A" / "notes.txt"
+    bad_path.parent.mkdir(parents=True, exist_ok=True)
+    bad_path.write_text("not an image", encoding="utf-8")
+
+    client = TestClient(create_app(storage_root=tmp_path))
+    index_response = client.post("/v1/storage/index")
+    assert index_response.status_code == 200
+
+    retry_response = client.post(
+        "/v1/admin/catalog/preview/retry",
+        json={"relative_path": "2026/04/Job_A/notes.txt"},
+    )
+    assert retry_response.status_code == 200
+    item = retry_response.json()["item"]
+    assert item["preview_status"] == "failed"
+    assert item["preview_last_failed_at_utc"] is not None
+    assert "unsupported media format for preview" in str(item["preview_failure_detail"])
+
+    preview_response = client.get(
+        "/v1/admin/catalog/preview",
+        params={"relative_path": "2026/04/Job_A/notes.txt"},
+    )
+    assert preview_response.status_code == 404
+
+
+def test_admin_retry_preview_is_sane_for_repeated_runs(tmp_path: Path) -> None:
+    image_path = tmp_path / "2026" / "04" / "Job_A" / "repeat.png"
+    image_path.parent.mkdir(parents=True, exist_ok=True)
+    image_path.write_bytes(TINY_PNG)
+
+    client = TestClient(create_app(storage_root=tmp_path))
+    index_response = client.post("/v1/storage/index")
+    assert index_response.status_code == 200
+
+    first = client.post(
+        "/v1/admin/catalog/preview/retry",
+        json={"relative_path": "2026/04/Job_A/repeat.png"},
+    )
+    assert first.status_code == 200
+    first_item = first.json()["item"]
+    assert first_item["preview_status"] == "succeeded"
+    first_preview_path = first_item["preview_relative_path"]
+    assert first_preview_path is not None
+
+    second = client.post(
+        "/v1/admin/catalog/preview/retry",
+        json={"relative_path": "2026/04/Job_A/repeat.png"},
+    )
+    assert second.status_code == 200
+    second_item = second.json()["item"]
+    assert second_item["preview_status"] == "succeeded"
+    assert second_item["preview_relative_path"] == first_preview_path
+
+
+def test_admin_retry_preview_is_sane_for_repeated_raw_runs(tmp_path: Path, monkeypatch) -> None:
+    image_path = tmp_path / "2026" / "04" / "Job_A" / "repeat.arw"
+    image_path.parent.mkdir(parents=True, exist_ok=True)
+    image_path.write_bytes(b"fake-raw-content")
+
+    monkeypatch.setattr(
+        app_module,
+        "_extract_raw_embedded_preview_bytes",
+        lambda path: _jpeg_with_exif_bytes(width=30, height=20),
+    )
+
+    client = TestClient(create_app(storage_root=tmp_path))
+    index_response = client.post("/v1/storage/index")
+    assert index_response.status_code == 200
+
+    first = client.post(
+        "/v1/admin/catalog/preview/retry",
+        json={"relative_path": "2026/04/Job_A/repeat.arw"},
+    )
+    assert first.status_code == 200
+    first_item = first.json()["item"]
+    first_preview_path = first_item["preview_relative_path"]
+    assert first_item["preview_status"] == "succeeded"
+    assert first_preview_path is not None
+
+    second = client.post(
+        "/v1/admin/catalog/preview/retry",
+        json={"relative_path": "2026/04/Job_A/repeat.arw"},
+    )
+    assert second.status_code == 200
+    second_item = second.json()["item"]
+    assert second_item["preview_status"] == "succeeded"
+    assert second_item["preview_relative_path"] == first_preview_path
+
 def test_storage_index_counts_same_path_conflict_and_updates_metadata(tmp_path: Path) -> None:
     original_content = b"original"
     replacement_content = b"replacement"
@@ -1598,6 +1872,12 @@ def test_admin_catalog_returns_paged_results(tmp_path: Path) -> None:
                 "extraction_last_succeeded_at_utc": None,
                 "extraction_last_failed_at_utc": t2,
                 "extraction_failure_detail": "unsupported media format for extraction: .jpg",
+                "preview_status": "pending",
+                "preview_relative_path": None,
+                "preview_last_attempted_at_utc": None,
+                "preview_last_succeeded_at_utc": None,
+                "preview_last_failed_at_utc": None,
+                "preview_failure_detail": None,
                 "capture_timestamp_utc": None,
                 "camera_make": None,
                 "camera_model": None,
