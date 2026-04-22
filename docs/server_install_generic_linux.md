@@ -168,7 +168,7 @@ Expected:
 
 - output includes `m4-smoke: ok`
 - the deterministic smoke fixture is indexed under `_photovault_smoke/m4/manual-smoke.txt`
-- metadata handshake for that SHA is reported as already existing after the index run
+- unauthenticated metadata handshake is rejected with `CLIENT_AUTH_REQUIRED`
 
 ## 10. Day-2 operations
 

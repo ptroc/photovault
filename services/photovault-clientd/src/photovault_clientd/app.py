@@ -1,6 +1,8 @@
 """Local control-plane API exposed by photovault-clientd."""
 
 import asyncio
+import os
+import socket
 import threading
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -31,6 +33,7 @@ from photovault_clientd.db import (
     fetch_network_ap_config,
     fetch_next_copy_candidate,
     fetch_recent_daemon_events,
+    fetch_server_auth_state,
     get_daemon_state,
     get_daemon_state_safe,
     get_schema_version,
@@ -77,6 +80,8 @@ from photovault_clientd.storage import build_staged_path, copy_with_fsync
 DEFAULT_DB_PATH = Path("/var/lib/photovault-clientd/state.sqlite3")
 DEFAULT_STAGING_ROOT = Path("/var/lib/photovault-clientd/staging")
 DEFAULT_AUTO_PROGRESS_INTERVAL_SECONDS = 2.0
+DEFAULT_CLIENT_ID = socket.gethostname().strip() or "photovault-client"
+DEFAULT_CLIENT_DISPLAY_NAME = DEFAULT_CLIENT_ID
 
 
 class IngestJobCreateRequest(BaseModel):
@@ -260,12 +265,26 @@ def create_app(
     db_path: Path = DEFAULT_DB_PATH,
     staging_root: Path = DEFAULT_STAGING_ROOT,
     server_base_url: str = DEFAULT_SERVER_BASE_URL,
+    client_id: str = DEFAULT_CLIENT_ID,
+    client_display_name: str = DEFAULT_CLIENT_DISPLAY_NAME,
+    bootstrap_token: str | None = None,
     retain_staged_files: bool = DEFAULT_RETAIN_STAGED_FILES,
     auto_progress_interval_seconds: float = DEFAULT_AUTO_PROGRESS_INTERVAL_SECONDS,
     auto_progress_max_steps: int = DEFAULT_AUTO_PROGRESS_MAX_STEPS,
     network_manager: NetworkManagerAdapter | None = None,
     block_device_adapter: BlockDeviceAdapter | None = None,
 ) -> FastAPI:
+    resolved_server_base_url = os.getenv("PHOTOVAULT_SERVER_BASE_URL", server_base_url).strip()
+    resolved_client_id = os.getenv("PHOTOVAULT_CLIENT_ID", client_id).strip() or DEFAULT_CLIENT_ID
+    resolved_client_display_name = (
+        os.getenv("PHOTOVAULT_CLIENT_DISPLAY_NAME", client_display_name).strip() or resolved_client_id
+    )
+    resolved_bootstrap_token = (
+        bootstrap_token
+        if bootstrap_token is not None
+        else os.getenv("PHOTOVAULT_CLIENT_BOOTSTRAP_TOKEN")
+    )
+
     resolved_network_manager = network_manager or NetworkManagerAdapter()
     resolved_block_device_adapter = block_device_adapter or BlockDeviceAdapter()
     progression_lock = threading.Lock()
@@ -384,7 +403,10 @@ def create_app(
             run_recovery_dispatch(
                 conn,
                 staging_root,
-                server_base_url=server_base_url,
+                server_base_url=resolved_server_base_url,
+                client_id=resolved_client_id,
+                client_display_name=resolved_client_display_name,
+                bootstrap_token=resolved_bootstrap_token,
                 retain_staged_files=retain_staged_files,
             )
             try:
@@ -446,7 +468,10 @@ def create_app(
                     outcome = run_auto_progress_dispatch(
                         conn_loop,
                         staging_root,
-                        server_base_url=server_base_url,
+                        server_base_url=resolved_server_base_url,
+                        client_id=resolved_client_id,
+                        client_display_name=resolved_client_display_name,
+                        bootstrap_token=resolved_bootstrap_token,
                         retain_staged_files=retain_staged_files,
                         max_steps=auto_progress_max_steps,
                     )
@@ -523,13 +548,18 @@ def create_app(
         return checks
 
     @app.get("/state")
-    def daemon_state() -> dict[str, str]:
+    def daemon_state() -> dict[str, object]:
         conn = open_db(db_path)
         row = conn.execute("SELECT current_state, updated_at_utc FROM daemon_state WHERE id = 1;").fetchone()
+        auth_state = fetch_server_auth_state(conn)
         conn.close()
         if row is None:
-            return {"current_state": ClientState.ERROR_DAEMON.value, "updated_at_utc": ""}
-        return {"current_state": row[0], "updated_at_utc": row[1]}
+            return {
+                "current_state": ClientState.ERROR_DAEMON.value,
+                "updated_at_utc": "",
+                "server_auth": auth_state,
+            }
+        return {"current_state": row[0], "updated_at_utc": row[1], "server_auth": auth_state}
 
     @app.get("/network/status")
     def network_status() -> dict[str, object]:
@@ -765,7 +795,10 @@ def create_app(
             outcome = run_daemon_tick(
                 conn,
                 staging_root,
-                server_base_url=server_base_url,
+                server_base_url=resolved_server_base_url,
+                client_id=resolved_client_id,
+                client_display_name=resolved_client_display_name,
+                bootstrap_token=resolved_bootstrap_token,
                 retain_staged_files=retain_staged_files,
             )
             return outcome

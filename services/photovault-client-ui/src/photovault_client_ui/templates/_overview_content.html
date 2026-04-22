@@ -53,6 +53,13 @@
       {% if state %}
         <p class="muted">Current state: <code>{{ state.current_state }}</code> · Last update: {{ state.updated_at_utc }}</p>
       {% endif %}
+      {% if overview_metrics.client_auth_guidance %}
+        <div class="banner banner-critical">
+          <strong>{{ overview_metrics.client_auth_guidance.title }}</strong>
+          <span>{{ overview_metrics.client_auth_guidance.summary }}</span>
+          <span>Operator action: {{ overview_metrics.client_auth_guidance.operator_action }}</span>
+        </div>
+      {% endif %}
       <div class="banner {% if daemon_progress.is_auto_progressing %}banner-warning{% else %}banner-success{% endif %}">
         <strong>{{ daemon_progress.badge_label }}</strong>
         <span>{{ daemon_progress.message }}</span>

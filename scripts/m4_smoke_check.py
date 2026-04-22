@@ -27,6 +27,22 @@ def _http_json(method: str, url: str, payload: dict | None = None) -> dict:
     return json.loads(body)
 
 
+def _http_json_error(method: str, url: str, payload: dict | None = None) -> tuple[int, dict]:
+    data = None
+    headers: dict[str, str] = {}
+    if payload is not None:
+        data = json.dumps(payload).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    req = request.Request(url=url, data=data, headers=headers, method=method)
+    try:
+        with request.urlopen(req, timeout=10) as response:
+            body = response.read().decode("utf-8")
+        return response.status, json.loads(body)
+    except error.HTTPError as exc:
+        body = exc.read().decode("utf-8")
+        return exc.code, json.loads(body)
+
+
 def _http_ok(url: str) -> None:
     with request.urlopen(url, timeout=10) as response:
         response.read()
@@ -55,7 +71,7 @@ def main() -> int:
         _http_ok(args.server_ui_url)
 
         index_payload = _http_json("POST", f"{args.api_base_url.rstrip('/')}/v1/storage/index")
-        handshake_payload = _http_json(
+        handshake_status, handshake_payload = _http_json_error(
             "POST",
             f"{args.api_base_url.rstrip('/')}/v1/upload/metadata-handshake",
             {
@@ -79,8 +95,14 @@ def main() -> int:
     except (error.URLError, error.HTTPError, ValueError) as exc:
         raise SystemExit(f"M4 smoke check failed: {exc}") from exc
 
-    if handshake_payload["results"][0]["decision"] != "ALREADY_EXISTS":
-        raise SystemExit("M4 smoke check failed: smoke file was not recognized as already indexed")
+    if handshake_status != 401:
+        raise SystemExit(
+            "M4 smoke check failed: upload metadata handshake did not enforce required client auth"
+        )
+    if handshake_payload.get("detail") != "CLIENT_AUTH_REQUIRED":
+        raise SystemExit(
+            "M4 smoke check failed: metadata handshake auth error detail did not match CLIENT_AUTH_REQUIRED"
+        )
 
     latest_run = latest_run_payload.get("latest_run")
     if latest_run is None:
@@ -89,6 +111,9 @@ def main() -> int:
     indexed_paths = {item["relative_path"] for item in files_payload.get("items", [])}
     if SMOKE_RELATIVE_PATH not in indexed_paths:
         raise SystemExit("M4 smoke check failed: smoke path missing from admin files view")
+    indexed_sha_map = {item["relative_path"]: item["sha256_hex"] for item in files_payload.get("items", [])}
+    if indexed_sha_map.get(SMOKE_RELATIVE_PATH) != smoke_sha:
+        raise SystemExit("M4 smoke check failed: indexed smoke path SHA did not match deterministic fixture")
 
     print("m4-smoke: ok")
     print(f"storage_root={storage_root}")
@@ -107,6 +132,7 @@ def main() -> int:
         f"indexed={latest_run['indexed_files']}"
     )
     print(f"smoke_relative_path={SMOKE_RELATIVE_PATH}")
+    print("auth_boundary=metadata_handshake_requires_client_auth")
     return 0
 
 

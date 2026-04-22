@@ -102,6 +102,126 @@ def test_in_memory_media_asset_extraction_updates_status_and_metadata() -> None:
     assert rows[0].orientation == 1
 
 
+def test_in_memory_client_lifecycle_pending_approve_revoke() -> None:
+    from photovault_api.state_store import InMemoryUploadStateStore
+
+    store = InMemoryUploadStateStore()
+    pending = store.upsert_client_pending(
+        client_id="pi-kitchen",
+        display_name="Kitchen Pi",
+        enrolled_at_utc="2026-04-22T10:00:00+00:00",
+    )
+    assert pending.enrollment_status == "pending"
+    assert pending.auth_token is None
+
+    approved = store.approve_client(
+        client_id="pi-kitchen",
+        approved_at_utc="2026-04-22T10:05:00+00:00",
+        auth_token="token-1",
+    )
+    assert approved is not None
+    assert approved.enrollment_status == "approved"
+    assert approved.auth_token == "token-1"
+    assert approved.approved_at_utc == "2026-04-22T10:05:00+00:00"
+
+    revoked = store.revoke_client(
+        client_id="pi-kitchen",
+        revoked_at_utc="2026-04-22T10:07:00+00:00",
+    )
+    assert revoked is not None
+    assert revoked.enrollment_status == "revoked"
+    assert revoked.auth_token == "token-1"
+    assert revoked.revoked_at_utc == "2026-04-22T10:07:00+00:00"
+
+
+def test_in_memory_upsert_client_pending_preserves_approved_status_and_token() -> None:
+    from photovault_api.state_store import InMemoryUploadStateStore
+
+    store = InMemoryUploadStateStore()
+    store.upsert_client_pending(
+        client_id="pi-kitchen",
+        display_name="Kitchen Pi",
+        enrolled_at_utc="2026-04-22T10:00:00+00:00",
+    )
+    approved = store.approve_client(
+        client_id="pi-kitchen",
+        approved_at_utc="2026-04-22T10:05:00+00:00",
+        auth_token="token-1",
+    )
+    assert approved is not None
+
+    seen_again = store.upsert_client_pending(
+        client_id="pi-kitchen",
+        display_name="Kitchen Pi Updated",
+        enrolled_at_utc="2026-04-22T10:10:00+00:00",
+    )
+    assert seen_again.enrollment_status == "approved"
+    assert seen_again.auth_token == "token-1"
+    assert seen_again.display_name == "Kitchen Pi Updated"
+
+
+def test_postgres_upsert_client_pending_uses_conflict_update() -> None:
+    observed: dict[str, object] = {}
+
+    class _FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def execute(self, query: str, params: tuple[object, ...]) -> None:
+            observed["query"] = query
+            observed["params"] = params
+
+        def fetchone(self):
+            return (
+                "pi-kitchen",
+                "Kitchen Pi",
+                "pending",
+                "2026-04-22T10:00:00+00:00",
+                "2026-04-22T10:00:00+00:00",
+                None,
+                None,
+                None,
+            )
+
+    class _FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def cursor(self) -> _FakeCursor:
+            return _FakeCursor()
+
+        def commit(self) -> None:
+            observed["committed"] = True
+
+    class _TestStore(PostgresUploadStateStore):
+        def _connect(self):  # type: ignore[override]
+            return _FakeConnection()
+
+    store = _TestStore(database_url="postgresql://unused")
+    record = store.upsert_client_pending(
+        client_id="pi-kitchen",
+        display_name="Kitchen Pi",
+        enrolled_at_utc="2026-04-22T10:00:00+00:00",
+    )
+
+    assert "INSERT INTO api_clients" in str(observed["query"])
+    assert "ON CONFLICT (client_id) DO UPDATE" in str(observed["query"])
+    assert observed["params"] == (
+        "pi-kitchen",
+        "Kitchen Pi",
+        "2026-04-22T10:00:00+00:00",
+        "2026-04-22T10:00:00+00:00",
+    )
+    assert observed["committed"] is True
+    assert record.enrollment_status == "pending"
+
+
 def test_postgres_has_shas_uses_single_query_and_returns_known_set() -> None:
     observed: dict[str, object] = {"connect_calls": 0}
 
@@ -452,3 +572,407 @@ def test_postgres_upsert_media_asset_extraction_uses_conflict_update() -> None:
         "2026-04-20T12:15:00+00:00",
     )
     assert observed["committed"] is True
+
+
+def test_in_memory_media_asset_lookup_and_extraction_selection() -> None:
+    from photovault_api.state_store import InMemoryUploadStateStore
+
+    store = InMemoryUploadStateStore()
+    t1 = "2026-04-20T12:00:00+00:00"
+    t2 = "2026-04-20T12:05:00+00:00"
+    t3 = "2026-04-20T12:10:00+00:00"
+    store.upsert_media_asset(
+        relative_path="2026/04/job/a.jpg",
+        sha256_hex="a" * 64,
+        size_bytes=10,
+        origin_kind="indexed",
+        observed_at_utc=t1,
+    )
+    store.upsert_media_asset(
+        relative_path="2026/04/job/b.jpg",
+        sha256_hex="b" * 64,
+        size_bytes=20,
+        origin_kind="indexed",
+        observed_at_utc=t2,
+    )
+    store.upsert_media_asset(
+        relative_path="2026/04/job/c.jpg",
+        sha256_hex="c" * 64,
+        size_bytes=30,
+        origin_kind="indexed",
+        observed_at_utc=t3,
+    )
+    store.upsert_media_asset_extraction(
+        relative_path="2026/04/job/b.jpg",
+        extraction_status="failed",
+        attempted_at_utc=t2,
+        succeeded_at_utc=None,
+        failed_at_utc=t2,
+        failure_detail="boom",
+        capture_timestamp_utc=None,
+        camera_make=None,
+        camera_model=None,
+        image_width=None,
+        image_height=None,
+        orientation=None,
+        lens_model=None,
+        recorded_at_utc=t2,
+    )
+    store.upsert_media_asset_extraction(
+        relative_path="2026/04/job/c.jpg",
+        extraction_status="succeeded",
+        attempted_at_utc=t3,
+        succeeded_at_utc=t3,
+        failed_at_utc=None,
+        failure_detail=None,
+        capture_timestamp_utc=None,
+        camera_make=None,
+        camera_model=None,
+        image_width=100,
+        image_height=200,
+        orientation=None,
+        lens_model=None,
+        recorded_at_utc=t3,
+    )
+
+    looked_up = store.get_media_asset_by_path("2026/04/job/b.jpg")
+    assert looked_up is not None
+    assert looked_up.extraction_status == "failed"
+    assert looked_up.extraction_failure_detail == "boom"
+
+    selection = store.list_media_assets_for_extraction(
+        extraction_statuses=["pending", "failed"],
+        limit=10,
+    )
+    assert [item.relative_path for item in selection] == [
+        "2026/04/job/b.jpg",
+        "2026/04/job/a.jpg",
+    ]
+
+
+def test_postgres_get_media_asset_by_path_uses_joined_extraction_row() -> None:
+    observed: dict[str, object] = {}
+
+    class _FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def execute(self, query: str, params: tuple[object, ...]) -> None:
+            observed["query"] = query
+            observed["params"] = params
+
+        def fetchone(self):
+            return (
+                "2026/04/job/photo.jpg",
+                "a" * 64,
+                12,
+                "indexed",
+                "indexed",
+                None,
+                None,
+                "2026-04-20T12:00:00+00:00",
+                "2026-04-20T12:00:00+00:00",
+                "failed",
+                "2026-04-20T12:01:00+00:00",
+                None,
+                "2026-04-20T12:01:00+00:00",
+                "bad file",
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+
+    class _FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def cursor(self) -> _FakeCursor:
+            return _FakeCursor()
+
+    class _TestStore(PostgresUploadStateStore):
+        def _connect(self):  # type: ignore[override]
+            return _FakeConnection()
+
+    store = _TestStore(database_url="postgresql://unused")
+    record = store.get_media_asset_by_path("2026/04/job/photo.jpg")
+
+    assert record is not None
+    assert record.relative_path == "2026/04/job/photo.jpg"
+    assert record.extraction_status == "failed"
+    assert record.extraction_failure_detail == "bad file"
+    assert "LEFT JOIN api_media_asset_extractions" in str(observed["query"])
+    assert observed["params"] == ("2026/04/job/photo.jpg",)
+
+
+def test_postgres_list_media_assets_for_extraction_filters_by_status_and_limit() -> None:
+    observed: dict[str, object] = {}
+
+    class _FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def execute(self, query: str, params: tuple[object, ...]) -> None:
+            observed["query"] = query
+            observed["params"] = params
+
+        def fetchall(self) -> list[tuple[object, ...]]:
+            return [
+                (
+                    "2026/04/job/pending.jpg",
+                    "a" * 64,
+                    10,
+                    "indexed",
+                    "indexed",
+                    None,
+                    None,
+                    "2026-04-20T12:00:00+00:00",
+                    "2026-04-20T12:00:00+00:00",
+                    "pending",
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                ),
+                (
+                    "2026/04/job/failed.jpg",
+                    "b" * 64,
+                    20,
+                    "indexed",
+                    "indexed",
+                    None,
+                    None,
+                    "2026-04-20T12:05:00+00:00",
+                    "2026-04-20T12:05:00+00:00",
+                    "failed",
+                    "2026-04-20T12:06:00+00:00",
+                    None,
+                    "2026-04-20T12:06:00+00:00",
+                    "broken",
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                ),
+            ]
+
+    class _FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def cursor(self) -> _FakeCursor:
+            return _FakeCursor()
+
+    class _TestStore(PostgresUploadStateStore):
+        def _connect(self):  # type: ignore[override]
+            return _FakeConnection()
+
+    store = _TestStore(database_url="postgresql://unused")
+    rows = store.list_media_assets_for_extraction(extraction_statuses=["pending", "failed"], limit=5)
+
+    assert len(rows) == 2
+    assert rows[0].extraction_status == "pending"
+    assert rows[1].extraction_status == "failed"
+    assert "COALESCE(me.extraction_status, 'pending') = ANY(%s)" in str(observed["query"])
+    assert observed["params"] == (["pending", "failed"], 5)
+
+
+def test_in_memory_list_media_assets_supports_status_origin_and_catalog_date_filters() -> None:
+    from photovault_api.state_store import InMemoryUploadStateStore
+
+    store = InMemoryUploadStateStore()
+    t1 = "2026-04-22T09:00:00+00:00"
+    t2 = "2026-04-22T10:00:00+00:00"
+    t3 = "2026-04-22T11:00:00+00:00"
+
+    store.upsert_media_asset(
+        relative_path="2026/04/job/pending.jpg",
+        sha256_hex="a" * 64,
+        size_bytes=10,
+        origin_kind="indexed",
+        observed_at_utc=t1,
+    )
+    store.upsert_media_asset(
+        relative_path="2026/04/job/failed.jpg",
+        sha256_hex="b" * 64,
+        size_bytes=20,
+        origin_kind="uploaded",
+        observed_at_utc=t2,
+    )
+    store.upsert_media_asset_extraction(
+        relative_path="2026/04/job/failed.jpg",
+        extraction_status="failed",
+        attempted_at_utc=t2,
+        succeeded_at_utc=None,
+        failed_at_utc=t2,
+        failure_detail="broken",
+        capture_timestamp_utc=None,
+        camera_make=None,
+        camera_model=None,
+        image_width=None,
+        image_height=None,
+        orientation=None,
+        lens_model=None,
+        recorded_at_utc=t2,
+    )
+    store.upsert_media_asset(
+        relative_path="2026/04/job/succeeded.jpg",
+        sha256_hex="c" * 64,
+        size_bytes=30,
+        origin_kind="uploaded",
+        observed_at_utc=t3,
+    )
+    store.upsert_media_asset_extraction(
+        relative_path="2026/04/job/succeeded.jpg",
+        extraction_status="succeeded",
+        attempted_at_utc=t3,
+        succeeded_at_utc=t3,
+        failed_at_utc=None,
+        failure_detail=None,
+        capture_timestamp_utc=None,
+        camera_make=None,
+        camera_model=None,
+        image_width=100,
+        image_height=200,
+        orientation=None,
+        lens_model=None,
+        recorded_at_utc=t3,
+    )
+
+    total_pending, pending_rows = store.list_media_assets(limit=10, offset=0, extraction_status="pending")
+    assert total_pending == 1
+    assert [row.relative_path for row in pending_rows] == ["2026/04/job/pending.jpg"]
+
+    total_uploaded, uploaded_rows = store.list_media_assets(limit=10, offset=0, origin_kind="uploaded")
+    assert total_uploaded == 2
+    assert [row.relative_path for row in uploaded_rows] == [
+        "2026/04/job/succeeded.jpg",
+        "2026/04/job/failed.jpg",
+    ]
+
+    total_since, since_rows = store.list_media_assets(
+        limit=10,
+        offset=0,
+        cataloged_since_utc="2026-04-22T10:30:00+00:00",
+    )
+    assert total_since == 1
+    assert [row.relative_path for row in since_rows] == ["2026/04/job/succeeded.jpg"]
+
+
+def test_postgres_list_media_assets_uses_bounded_filter_where_clause() -> None:
+    observed: dict[str, object] = {}
+
+    class _FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def execute(self, query: str, params: tuple[object, ...]) -> None:
+            if "COUNT(*)" in query:
+                observed["count_query"] = query
+                observed["count_params"] = params
+            else:
+                observed["select_query"] = query
+                observed["select_params"] = params
+
+        def fetchone(self):
+            return (1,)
+
+        def fetchall(self) -> list[tuple[object, ...]]:
+            return [
+                (
+                    "2026/04/job/a.jpg",
+                    "a" * 64,
+                    10,
+                    "uploaded",
+                    "uploaded",
+                    None,
+                    None,
+                    "2026-04-22T10:00:00+00:00",
+                    "2026-04-22T10:00:00+00:00",
+                    "failed",
+                    "2026-04-22T10:01:00+00:00",
+                    None,
+                    "2026-04-22T10:01:00+00:00",
+                    "broken",
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+            ]
+
+    class _FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def cursor(self) -> _FakeCursor:
+            return _FakeCursor()
+
+    class _TestStore(PostgresUploadStateStore):
+        def _connect(self):  # type: ignore[override]
+            return _FakeConnection()
+
+    store = _TestStore(database_url="postgresql://unused")
+    total, rows = store.list_media_assets(
+        limit=20,
+        offset=40,
+        extraction_status="failed",
+        origin_kind="uploaded",
+        cataloged_since_utc="2026-04-01T00:00:00+00:00",
+        cataloged_before_utc="2026-04-30T23:59:59+00:00",
+    )
+
+    assert total == 1
+    assert len(rows) == 1
+    assert "COALESCE(me.extraction_status, 'pending') = %s" in str(observed["count_query"])
+    assert "ma.origin_kind = %s" in str(observed["count_query"])
+    assert "ma.last_cataloged_at_utc >= %s" in str(observed["count_query"])
+    assert "ma.last_cataloged_at_utc <= %s" in str(observed["count_query"])
+    assert observed["count_params"] == (
+        "failed",
+        "uploaded",
+        "2026-04-01T00:00:00+00:00",
+        "2026-04-30T23:59:59+00:00",
+    )
+    assert observed["select_params"] == (
+        "failed",
+        "uploaded",
+        "2026-04-01T00:00:00+00:00",
+        "2026-04-30T23:59:59+00:00",
+        20,
+        40,
+    )

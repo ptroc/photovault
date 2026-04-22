@@ -111,6 +111,18 @@ class StorageSummary:
     last_uploaded_at_utc: str | None
 
 
+@dataclass(frozen=True)
+class ClientRecord:
+    client_id: str
+    display_name: str
+    enrollment_status: str
+    first_seen_at_utc: str
+    last_enrolled_at_utc: str
+    approved_at_utc: str | None
+    revoked_at_utc: str | None
+    auth_token: str | None
+
+
 class UploadStateStore(Protocol):
     def initialize(self) -> None: ...
 
@@ -159,7 +171,22 @@ class UploadStateStore(Protocol):
         provenance_original_filename: str | None = None,
     ) -> None: ...
 
-    def list_media_assets(self, *, limit: int, offset: int) -> tuple[int, list[MediaAssetRecord]]: ...
+    def list_media_assets(
+        self,
+        *,
+        limit: int,
+        offset: int,
+        extraction_status: str | None = None,
+        origin_kind: str | None = None,
+        cataloged_since_utc: str | None = None,
+        cataloged_before_utc: str | None = None,
+    ) -> tuple[int, list[MediaAssetRecord]]: ...
+
+    def get_media_asset_by_path(self, relative_path: str) -> MediaAssetRecord | None: ...
+
+    def list_media_assets_for_extraction(
+        self, *, extraction_statuses: list[str], limit: int
+    ) -> list[MediaAssetRecord]: ...
 
     def ensure_media_asset_extraction_row(self, *, relative_path: str, recorded_at_utc: str) -> None: ...
 
@@ -203,6 +230,33 @@ class UploadStateStore(Protocol):
 
     def summarize_storage(self) -> StorageSummary: ...
 
+    def upsert_client_pending(
+        self,
+        *,
+        client_id: str,
+        display_name: str,
+        enrolled_at_utc: str,
+    ) -> ClientRecord: ...
+
+    def get_client(self, client_id: str) -> ClientRecord | None: ...
+
+    def list_clients(self, *, limit: int, offset: int) -> tuple[int, list[ClientRecord]]: ...
+
+    def approve_client(
+        self,
+        *,
+        client_id: str,
+        approved_at_utc: str,
+        auth_token: str,
+    ) -> ClientRecord | None: ...
+
+    def revoke_client(
+        self,
+        *,
+        client_id: str,
+        revoked_at_utc: str,
+    ) -> ClientRecord | None: ...
+
     def remove_temp_upload(self, sha256_hex: str) -> None: ...
 
 
@@ -215,6 +269,7 @@ class InMemoryUploadStateStore:
     stored_files: dict[str, StoredFileRecord] = field(default_factory=dict)
     media_assets: dict[str, MediaAssetRecord] = field(default_factory=dict)
     media_asset_extractions: dict[str, MediaExtractionRecord] = field(default_factory=dict)
+    clients: dict[str, ClientRecord] = field(default_factory=dict)
     path_conflicts: list[PathConflictRecord] = field(default_factory=list)
     latest_index_run: StorageIndexRunRecord | None = None
     _lock: Lock = field(default_factory=Lock)
@@ -364,12 +419,45 @@ class InMemoryUploadStateStore:
                 ),
             )
 
-    def list_media_assets(self, *, limit: int, offset: int) -> tuple[int, list[MediaAssetRecord]]:
+    def list_media_assets(
+        self,
+        *,
+        limit: int,
+        offset: int,
+        extraction_status: str | None = None,
+        origin_kind: str | None = None,
+        cataloged_since_utc: str | None = None,
+        cataloged_before_utc: str | None = None,
+    ) -> tuple[int, list[MediaAssetRecord]]:
         with self._lock:
             ordered = sorted(self.media_assets.values(), key=lambda item: item.relative_path)
             ordered = sorted(ordered, key=lambda item: item.last_cataloged_at_utc, reverse=True)
+            if extraction_status is not None:
+                ordered = [item for item in ordered if item.extraction_status == extraction_status]
+            if origin_kind is not None:
+                ordered = [item for item in ordered if item.origin_kind == origin_kind]
+            if cataloged_since_utc is not None:
+                ordered = [item for item in ordered if item.last_cataloged_at_utc >= cataloged_since_utc]
+            if cataloged_before_utc is not None:
+                ordered = [item for item in ordered if item.last_cataloged_at_utc <= cataloged_before_utc]
             total = len(ordered)
             return total, ordered[offset : offset + limit]
+
+    def get_media_asset_by_path(self, relative_path: str) -> MediaAssetRecord | None:
+        with self._lock:
+            return self.media_assets.get(relative_path)
+
+    def list_media_assets_for_extraction(
+        self, *, extraction_statuses: list[str], limit: int
+    ) -> list[MediaAssetRecord]:
+        if limit <= 0 or not extraction_statuses:
+            return []
+        status_filter = set(extraction_statuses)
+        with self._lock:
+            ordered = sorted(self.media_assets.values(), key=lambda item: item.relative_path)
+            ordered = sorted(ordered, key=lambda item: item.last_cataloged_at_utc, reverse=True)
+            filtered = [item for item in ordered if item.extraction_status in status_filter]
+            return filtered[:limit]
 
     def ensure_media_asset_extraction_row(self, *, relative_path: str, recorded_at_utc: str) -> None:
         del recorded_at_utc
@@ -566,6 +654,99 @@ class InMemoryUploadStateStore:
         with self._lock:
             self.upload_temp.pop(sha256_hex, None)
 
+    def upsert_client_pending(
+        self,
+        *,
+        client_id: str,
+        display_name: str,
+        enrolled_at_utc: str,
+    ) -> ClientRecord:
+        with self._lock:
+            existing = self.clients.get(client_id)
+            first_seen = existing.first_seen_at_utc if existing is not None else enrolled_at_utc
+            enrollment_status = "pending" if existing is None else existing.enrollment_status
+            keep_existing_identity = existing is not None and existing.enrollment_status != "pending"
+            approved_at_utc = (
+                existing.approved_at_utc if keep_existing_identity and existing is not None else None
+            )
+            revoked_at_utc = (
+                existing.revoked_at_utc if keep_existing_identity and existing is not None else None
+            )
+            auth_token = existing.auth_token if keep_existing_identity and existing is not None else None
+            updated = ClientRecord(
+                client_id=client_id,
+                display_name=display_name,
+                enrollment_status=enrollment_status,
+                first_seen_at_utc=first_seen,
+                last_enrolled_at_utc=enrolled_at_utc,
+                approved_at_utc=approved_at_utc,
+                revoked_at_utc=revoked_at_utc,
+                auth_token=auth_token,
+            )
+            self.clients[client_id] = updated
+            return updated
+
+    def get_client(self, client_id: str) -> ClientRecord | None:
+        with self._lock:
+            return self.clients.get(client_id)
+
+    def list_clients(self, *, limit: int, offset: int) -> tuple[int, list[ClientRecord]]:
+        with self._lock:
+            rows = sorted(
+                self.clients.values(),
+                key=lambda client: (client.first_seen_at_utc, client.client_id),
+                reverse=True,
+            )
+            total = len(rows)
+            return total, rows[offset : offset + limit]
+
+    def approve_client(
+        self,
+        *,
+        client_id: str,
+        approved_at_utc: str,
+        auth_token: str,
+    ) -> ClientRecord | None:
+        with self._lock:
+            existing = self.clients.get(client_id)
+            if existing is None:
+                return None
+            updated = ClientRecord(
+                client_id=existing.client_id,
+                display_name=existing.display_name,
+                enrollment_status="approved",
+                first_seen_at_utc=existing.first_seen_at_utc,
+                last_enrolled_at_utc=existing.last_enrolled_at_utc,
+                approved_at_utc=approved_at_utc,
+                revoked_at_utc=None,
+                auth_token=auth_token,
+            )
+            self.clients[client_id] = updated
+            return updated
+
+    def revoke_client(
+        self,
+        *,
+        client_id: str,
+        revoked_at_utc: str,
+    ) -> ClientRecord | None:
+        with self._lock:
+            existing = self.clients.get(client_id)
+            if existing is None:
+                return None
+            updated = ClientRecord(
+                client_id=existing.client_id,
+                display_name=existing.display_name,
+                enrollment_status="revoked",
+                first_seen_at_utc=existing.first_seen_at_utc,
+                last_enrolled_at_utc=existing.last_enrolled_at_utc,
+                approved_at_utc=existing.approved_at_utc,
+                revoked_at_utc=revoked_at_utc,
+                auth_token=existing.auth_token,
+            )
+            self.clients[client_id] = updated
+            return updated
+
 
 @dataclass
 class PostgresUploadStateStore:
@@ -697,6 +878,20 @@ class PostgresUploadStateStore:
                         path_conflicts INTEGER NOT NULL,
                         errors INTEGER NOT NULL,
                         completed_at_utc TEXT NOT NULL
+                    );
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS api_clients (
+                        client_id TEXT PRIMARY KEY,
+                        display_name TEXT NOT NULL,
+                        enrollment_status TEXT NOT NULL,
+                        first_seen_at_utc TEXT NOT NULL,
+                        last_enrolled_at_utc TEXT NOT NULL,
+                        approved_at_utc TEXT,
+                        revoked_at_utc TEXT,
+                        auth_token TEXT
                     );
                     """
                 )
@@ -958,14 +1153,50 @@ class PostgresUploadStateStore:
                 )
             conn.commit()
 
-    def list_media_assets(self, *, limit: int, offset: int) -> tuple[int, list[MediaAssetRecord]]:
+    def list_media_assets(
+        self,
+        *,
+        limit: int,
+        offset: int,
+        extraction_status: str | None = None,
+        origin_kind: str | None = None,
+        cataloged_since_utc: str | None = None,
+        cataloged_before_utc: str | None = None,
+    ) -> tuple[int, list[MediaAssetRecord]]:
+        where_clauses = []
+        params: list[object] = []
+        if extraction_status is not None:
+            where_clauses.append("COALESCE(me.extraction_status, 'pending') = %s")
+            params.append(extraction_status)
+        if origin_kind is not None:
+            where_clauses.append("ma.origin_kind = %s")
+            params.append(origin_kind)
+        if cataloged_since_utc is not None:
+            where_clauses.append("ma.last_cataloged_at_utc >= %s")
+            params.append(cataloged_since_utc)
+        if cataloged_before_utc is not None:
+            where_clauses.append("ma.last_cataloged_at_utc <= %s")
+            params.append(cataloged_before_utc)
+        where_sql = ""
+        if where_clauses:
+            where_sql = "WHERE " + " AND ".join(where_clauses)
+
         with self._connect() as conn:
             with conn.cursor() as cur:
-                cur.execute("SELECT COUNT(*) FROM api_media_assets;")
+                cur.execute(
+                    f"""
+                    SELECT COUNT(*)
+                    FROM api_media_assets ma
+                    LEFT JOIN api_media_asset_extractions me
+                        ON me.relative_path = ma.relative_path
+                    {where_sql};
+                    """,
+                    tuple(params),
+                )
                 count_row = cur.fetchone()
                 total = int(count_row[0]) if count_row is not None else 0
                 cur.execute(
-                    """
+                    f"""
                     SELECT
                         ma.relative_path,
                         ma.sha256_hex,
@@ -991,11 +1222,12 @@ class PostgresUploadStateStore:
                     FROM api_media_assets ma
                     LEFT JOIN api_media_asset_extractions me
                         ON me.relative_path = ma.relative_path
+                    {where_sql}
                     ORDER BY ma.last_cataloged_at_utc DESC, ma.relative_path ASC
                     LIMIT %s
                     OFFSET %s;
                     """,
-                    (limit, offset),
+                    tuple([*params, limit, offset]),
                 )
                 rows = cur.fetchall()
                 records = [
@@ -1025,6 +1257,136 @@ class PostgresUploadStateStore:
                     for row in rows
                 ]
                 return total, records
+
+    def get_media_asset_by_path(self, relative_path: str) -> MediaAssetRecord | None:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        ma.relative_path,
+                        ma.sha256_hex,
+                        ma.size_bytes,
+                        ma.origin_kind,
+                        ma.last_observed_origin_kind,
+                        ma.provenance_job_name,
+                        ma.provenance_original_filename,
+                        ma.first_cataloged_at_utc,
+                        ma.last_cataloged_at_utc,
+                        COALESCE(me.extraction_status, 'pending') AS extraction_status,
+                        me.last_attempted_at_utc,
+                        me.last_succeeded_at_utc,
+                        me.last_failed_at_utc,
+                        me.failure_detail,
+                        me.capture_timestamp_utc,
+                        me.camera_make,
+                        me.camera_model,
+                        me.image_width,
+                        me.image_height,
+                        me.orientation,
+                        me.lens_model
+                    FROM api_media_assets ma
+                    LEFT JOIN api_media_asset_extractions me
+                        ON me.relative_path = ma.relative_path
+                    WHERE ma.relative_path = %s
+                    LIMIT 1;
+                    """,
+                    (relative_path,),
+                )
+                row = cur.fetchone()
+                if row is None:
+                    return None
+                return MediaAssetRecord(
+                    relative_path=str(row[0]),
+                    sha256_hex=str(row[1]),
+                    size_bytes=int(row[2]),
+                    origin_kind=str(row[3]),
+                    last_observed_origin_kind=str(row[4]),
+                    provenance_job_name=str(row[5]) if row[5] is not None else None,
+                    provenance_original_filename=str(row[6]) if row[6] is not None else None,
+                    first_cataloged_at_utc=str(row[7]),
+                    last_cataloged_at_utc=str(row[8]),
+                    extraction_status=str(row[9]),
+                    extraction_last_attempted_at_utc=str(row[10]) if row[10] is not None else None,
+                    extraction_last_succeeded_at_utc=str(row[11]) if row[11] is not None else None,
+                    extraction_last_failed_at_utc=str(row[12]) if row[12] is not None else None,
+                    extraction_failure_detail=str(row[13]) if row[13] is not None else None,
+                    capture_timestamp_utc=str(row[14]) if row[14] is not None else None,
+                    camera_make=str(row[15]) if row[15] is not None else None,
+                    camera_model=str(row[16]) if row[16] is not None else None,
+                    image_width=int(row[17]) if row[17] is not None else None,
+                    image_height=int(row[18]) if row[18] is not None else None,
+                    orientation=int(row[19]) if row[19] is not None else None,
+                    lens_model=str(row[20]) if row[20] is not None else None,
+                )
+
+    def list_media_assets_for_extraction(
+        self, *, extraction_statuses: list[str], limit: int
+    ) -> list[MediaAssetRecord]:
+        if limit <= 0 or not extraction_statuses:
+            return []
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        ma.relative_path,
+                        ma.sha256_hex,
+                        ma.size_bytes,
+                        ma.origin_kind,
+                        ma.last_observed_origin_kind,
+                        ma.provenance_job_name,
+                        ma.provenance_original_filename,
+                        ma.first_cataloged_at_utc,
+                        ma.last_cataloged_at_utc,
+                        COALESCE(me.extraction_status, 'pending') AS extraction_status,
+                        me.last_attempted_at_utc,
+                        me.last_succeeded_at_utc,
+                        me.last_failed_at_utc,
+                        me.failure_detail,
+                        me.capture_timestamp_utc,
+                        me.camera_make,
+                        me.camera_model,
+                        me.image_width,
+                        me.image_height,
+                        me.orientation,
+                        me.lens_model
+                    FROM api_media_assets ma
+                    LEFT JOIN api_media_asset_extractions me
+                        ON me.relative_path = ma.relative_path
+                    WHERE COALESCE(me.extraction_status, 'pending') = ANY(%s)
+                    ORDER BY ma.last_cataloged_at_utc DESC, ma.relative_path ASC
+                    LIMIT %s;
+                    """,
+                    (extraction_statuses, limit),
+                )
+                rows = cur.fetchall()
+                return [
+                    MediaAssetRecord(
+                        relative_path=str(row[0]),
+                        sha256_hex=str(row[1]),
+                        size_bytes=int(row[2]),
+                        origin_kind=str(row[3]),
+                        last_observed_origin_kind=str(row[4]),
+                        provenance_job_name=str(row[5]) if row[5] is not None else None,
+                        provenance_original_filename=str(row[6]) if row[6] is not None else None,
+                        first_cataloged_at_utc=str(row[7]),
+                        last_cataloged_at_utc=str(row[8]),
+                        extraction_status=str(row[9]),
+                        extraction_last_attempted_at_utc=str(row[10]) if row[10] is not None else None,
+                        extraction_last_succeeded_at_utc=str(row[11]) if row[11] is not None else None,
+                        extraction_last_failed_at_utc=str(row[12]) if row[12] is not None else None,
+                        extraction_failure_detail=str(row[13]) if row[13] is not None else None,
+                        capture_timestamp_utc=str(row[14]) if row[14] is not None else None,
+                        camera_make=str(row[15]) if row[15] is not None else None,
+                        camera_model=str(row[16]) if row[16] is not None else None,
+                        image_width=int(row[17]) if row[17] is not None else None,
+                        image_height=int(row[18]) if row[18] is not None else None,
+                        orientation=int(row[19]) if row[19] is not None else None,
+                        lens_model=str(row[20]) if row[20] is not None else None,
+                    )
+                    for row in rows
+                ]
 
     def ensure_media_asset_extraction_row(self, *, relative_path: str, recorded_at_utc: str) -> None:
         with self._connect() as conn:
@@ -1360,6 +1722,233 @@ class PostgresUploadStateStore:
                     last_indexed_at_utc=last_indexed_at_utc,
                     last_uploaded_at_utc=last_uploaded_at_utc,
                 )
+
+    def upsert_client_pending(
+        self,
+        *,
+        client_id: str,
+        display_name: str,
+        enrolled_at_utc: str,
+    ) -> ClientRecord:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO api_clients (
+                        client_id,
+                        display_name,
+                        enrollment_status,
+                        first_seen_at_utc,
+                        last_enrolled_at_utc,
+                        approved_at_utc,
+                        revoked_at_utc,
+                        auth_token
+                    )
+                    VALUES (%s, %s, 'pending', %s, %s, NULL, NULL, NULL)
+                    ON CONFLICT (client_id) DO UPDATE
+                    SET display_name = EXCLUDED.display_name,
+                        last_enrolled_at_utc = EXCLUDED.last_enrolled_at_utc,
+                        enrollment_status = CASE
+                            WHEN api_clients.enrollment_status = 'pending' THEN 'pending'
+                            ELSE api_clients.enrollment_status
+                        END,
+                        approved_at_utc = CASE
+                            WHEN api_clients.enrollment_status = 'pending' THEN NULL
+                            ELSE api_clients.approved_at_utc
+                        END,
+                        revoked_at_utc = CASE
+                            WHEN api_clients.enrollment_status = 'pending' THEN NULL
+                            ELSE api_clients.revoked_at_utc
+                        END,
+                        auth_token = CASE
+                            WHEN api_clients.enrollment_status = 'pending' THEN NULL
+                            ELSE api_clients.auth_token
+                        END
+                    RETURNING
+                        client_id,
+                        display_name,
+                        enrollment_status,
+                        first_seen_at_utc,
+                        last_enrolled_at_utc,
+                        approved_at_utc,
+                        revoked_at_utc,
+                        auth_token;
+                    """,
+                    (client_id, display_name, enrolled_at_utc, enrolled_at_utc),
+                )
+                row = cur.fetchone()
+            conn.commit()
+
+        if row is None:
+            raise RuntimeError("upsert_client_pending must return a row")
+        return ClientRecord(
+            client_id=str(row[0]),
+            display_name=str(row[1]),
+            enrollment_status=str(row[2]),
+            first_seen_at_utc=str(row[3]),
+            last_enrolled_at_utc=str(row[4]),
+            approved_at_utc=str(row[5]) if row[5] is not None else None,
+            revoked_at_utc=str(row[6]) if row[6] is not None else None,
+            auth_token=str(row[7]) if row[7] is not None else None,
+        )
+
+    def get_client(self, client_id: str) -> ClientRecord | None:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        client_id,
+                        display_name,
+                        enrollment_status,
+                        first_seen_at_utc,
+                        last_enrolled_at_utc,
+                        approved_at_utc,
+                        revoked_at_utc,
+                        auth_token
+                    FROM api_clients
+                    WHERE client_id = %s
+                    LIMIT 1;
+                    """,
+                    (client_id,),
+                )
+                row = cur.fetchone()
+        if row is None:
+            return None
+        return ClientRecord(
+            client_id=str(row[0]),
+            display_name=str(row[1]),
+            enrollment_status=str(row[2]),
+            first_seen_at_utc=str(row[3]),
+            last_enrolled_at_utc=str(row[4]),
+            approved_at_utc=str(row[5]) if row[5] is not None else None,
+            revoked_at_utc=str(row[6]) if row[6] is not None else None,
+            auth_token=str(row[7]) if row[7] is not None else None,
+        )
+
+    def list_clients(self, *, limit: int, offset: int) -> tuple[int, list[ClientRecord]]:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) FROM api_clients;")
+                count_row = cur.fetchone()
+                total = int(count_row[0]) if count_row is not None else 0
+                cur.execute(
+                    """
+                    SELECT
+                        client_id,
+                        display_name,
+                        enrollment_status,
+                        first_seen_at_utc,
+                        last_enrolled_at_utc,
+                        approved_at_utc,
+                        revoked_at_utc,
+                        auth_token
+                    FROM api_clients
+                    ORDER BY first_seen_at_utc DESC, client_id ASC
+                    LIMIT %s
+                    OFFSET %s;
+                    """,
+                    (limit, offset),
+                )
+                rows = cur.fetchall()
+        return total, [
+            ClientRecord(
+                client_id=str(row[0]),
+                display_name=str(row[1]),
+                enrollment_status=str(row[2]),
+                first_seen_at_utc=str(row[3]),
+                last_enrolled_at_utc=str(row[4]),
+                approved_at_utc=str(row[5]) if row[5] is not None else None,
+                revoked_at_utc=str(row[6]) if row[6] is not None else None,
+                auth_token=str(row[7]) if row[7] is not None else None,
+            )
+            for row in rows
+        ]
+
+    def approve_client(
+        self,
+        *,
+        client_id: str,
+        approved_at_utc: str,
+        auth_token: str,
+    ) -> ClientRecord | None:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE api_clients
+                    SET enrollment_status = 'approved',
+                        approved_at_utc = %s,
+                        revoked_at_utc = NULL,
+                        auth_token = %s
+                    WHERE client_id = %s
+                    RETURNING
+                        client_id,
+                        display_name,
+                        enrollment_status,
+                        first_seen_at_utc,
+                        last_enrolled_at_utc,
+                        approved_at_utc,
+                        revoked_at_utc,
+                        auth_token;
+                    """,
+                    (approved_at_utc, auth_token, client_id),
+                )
+                row = cur.fetchone()
+            conn.commit()
+        if row is None:
+            return None
+        return ClientRecord(
+            client_id=str(row[0]),
+            display_name=str(row[1]),
+            enrollment_status=str(row[2]),
+            first_seen_at_utc=str(row[3]),
+            last_enrolled_at_utc=str(row[4]),
+            approved_at_utc=str(row[5]) if row[5] is not None else None,
+            revoked_at_utc=str(row[6]) if row[6] is not None else None,
+            auth_token=str(row[7]) if row[7] is not None else None,
+        )
+
+    def revoke_client(
+        self,
+        *,
+        client_id: str,
+        revoked_at_utc: str,
+    ) -> ClientRecord | None:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE api_clients
+                    SET enrollment_status = 'revoked',
+                        revoked_at_utc = %s
+                    WHERE client_id = %s
+                    RETURNING
+                        client_id,
+                        display_name,
+                        enrollment_status,
+                        first_seen_at_utc,
+                        last_enrolled_at_utc,
+                        approved_at_utc,
+                        revoked_at_utc,
+                        auth_token;
+                    """,
+                    (revoked_at_utc, client_id),
+                )
+                row = cur.fetchone()
+            conn.commit()
+        if row is None:
+            return None
+        return ClientRecord(
+            client_id=str(row[0]),
+            display_name=str(row[1]),
+            enrollment_status=str(row[2]),
+            first_seen_at_utc=str(row[3]),
+            last_enrolled_at_utc=str(row[4]),
+            approved_at_utc=str(row[5]) if row[5] is not None else None,
+            revoked_at_utc=str(row[6]) if row[6] is not None else None,
+            auth_token=str(row[7]) if row[7] is not None else None,
+        )
 
     def remove_temp_upload(self, sha256_hex: str) -> None:
         with self._connect() as conn:

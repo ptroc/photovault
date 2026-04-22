@@ -136,6 +136,8 @@ _STATE_GUIDANCE = {
     },
 }
 
+_AUTH_BLOCK_DETAILS = {"CLIENT_AUTH_REQUIRED", "CLIENT_AUTH_INVALID"}
+
 _INGEST_BLOCKED_GUIDANCE = {
     "STAGING_COPY": {
         "summary": "A prior ingest job is still in copy/staging.",
@@ -593,6 +595,43 @@ def _daemon_health_label(state: dict[str, Any] | None, daemon_error: str | None)
     return "warning", "Unknown daemon state"
 
 
+def _derive_client_auth_guidance(state: dict[str, Any] | None) -> dict[str, str] | None:
+    if not isinstance(state, dict):
+        return None
+    auth_state = state.get("server_auth")
+    if not isinstance(auth_state, dict):
+        return None
+
+    enrollment_status = str(auth_state.get("enrollment_status", "")).strip()
+    last_error = str(auth_state.get("last_error", "")).strip()
+
+    if enrollment_status == "pending":
+        return {
+            "kind": "blocked",
+            "title": "Client enrollment pending approval",
+            "summary": "Privileged upload and verify calls are blocked until server approval is granted.",
+            "operator_action": "Approve this client from the server UI, then run one daemon tick.",
+        }
+    if enrollment_status == "revoked":
+        return {
+            "kind": "blocked",
+            "title": "Client access revoked",
+            "summary": "Server-side revocation is blocking privileged upload and verify operations.",
+            "operator_action": "Re-approve the client on the server if access should be restored.",
+        }
+    if last_error in _AUTH_BLOCK_DETAILS:
+        return {
+            "kind": "blocked",
+            "title": "Client auth rejected by server",
+            "summary": f"Privileged API calls are blocked by server auth response: {last_error}.",
+            "operator_action": (
+                "Check client enrollment/token on the server and clientd env configuration, "
+                "then run one daemon tick."
+            ),
+        }
+    return None
+
+
 def _derive_state_guidance(state: dict[str, Any] | None, daemon_error: str | None) -> dict[str, str]:
     if daemon_error:
         return {
@@ -601,6 +640,10 @@ def _derive_state_guidance(state: dict[str, Any] | None, daemon_error: str | Non
             "summary": "The UI cannot retrieve current daemon state.",
             "operator_action": "Check photovault-clientd.service and local daemon API reachability.",
         }
+
+    client_auth_guidance = _derive_client_auth_guidance(state)
+    if client_auth_guidance is not None:
+        return client_auth_guidance
 
     current_state = str((state or {}).get("current_state", "UNKNOWN"))
     if current_state in _STATE_GUIDANCE:
@@ -703,6 +746,7 @@ def _build_overview_metrics(
     daemon_health_level, daemon_health_label = _daemon_health_label(state, daemon_error)
     dependency_health_level, dependency_degraded_count = _dependency_health_label(dependencies)
     state_guidance = _derive_state_guidance(state, daemon_error)
+    client_auth_guidance = _derive_client_auth_guidance(state)
     event_summary = _summarize_recent_events(events)
 
     alerts: list[dict[str, str]] = []
@@ -734,6 +778,14 @@ def _build_overview_metrics(
                     "Jobs are paused on dependencies such as network/media; "
                     "operator wait/fix required."
                 ),
+            }
+        )
+    if client_auth_guidance is not None:
+        alerts.append(
+            {
+                "severity": "critical",
+                "title": client_auth_guidance["title"],
+                "message": client_auth_guidance["summary"],
             }
         )
     current_state = str((state or {}).get("current_state", "UNKNOWN"))
@@ -778,6 +830,7 @@ def _build_overview_metrics(
         "upload_pending_jobs_count": len(upload_pending_jobs),
         "alerts": alerts,
         "highlight_jobs": (blocked_jobs + waiting_jobs + active_jobs)[:3],
+        "client_auth_guidance": client_auth_guidance,
         "state_guidance": state_guidance,
         "event_summary": event_summary,
         "next_action": next_action,

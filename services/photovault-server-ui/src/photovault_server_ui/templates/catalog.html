@@ -1,0 +1,126 @@
+{% extends "base.html" %}
+{% set title = "Catalog" %}
+{% block content %}
+<section>
+  <h1>Media Catalog</h1>
+  <p class="muted">Operator inspection for extracted metadata state and outcomes.</p>
+</section>
+
+<section class="panel" style="margin-bottom: 0.9rem;">
+  <h2 style="margin-top: 0;">Catalog Filters</h2>
+  <form method="get" action="/catalog" class="actions-inline">
+    <label for="extraction_status">Extraction:</label>
+    <select id="extraction_status" name="extraction_status">
+      <option value="" {% if not extraction_status_filter %}selected{% endif %}>All</option>
+      <option value="pending" {% if extraction_status_filter == "pending" %}selected{% endif %}>pending</option>
+      <option value="succeeded" {% if extraction_status_filter == "succeeded" %}selected{% endif %}>succeeded</option>
+      <option value="failed" {% if extraction_status_filter == "failed" %}selected{% endif %}>failed</option>
+    </select>
+    <label for="origin_kind">Origin:</label>
+    <select id="origin_kind" name="origin_kind">
+      <option value="" {% if not origin_kind_filter %}selected{% endif %}>All</option>
+      <option value="uploaded" {% if origin_kind_filter == "uploaded" %}selected{% endif %}>uploaded</option>
+      <option value="indexed" {% if origin_kind_filter == "indexed" %}selected{% endif %}>indexed</option>
+    </select>
+    <label for="cataloged_since_utc">Cataloged Since (UTC):</label>
+    <input id="cataloged_since_utc" type="text" name="cataloged_since_utc" value="{{ cataloged_since_filter }}">
+    <label for="cataloged_before_utc">Cataloged Before (UTC):</label>
+    <input id="cataloged_before_utc" type="text" name="cataloged_before_utc" value="{{ cataloged_before_filter }}">
+    <button class="primary" type="submit">Apply</button>
+    <a href="/catalog" class="muted">Clear</a>
+  </form>
+</section>
+
+<section class="panel" style="margin-bottom: 0.9rem;">
+  <h2 style="margin-top: 0;">Extraction Actions</h2>
+  <p class="muted">Run an explicit bounded backfill for extraction states.</p>
+  <form method="post" action="/catalog/actions/backfill" class="actions-inline">
+    <input type="hidden" name="page" value="{{ page }}">
+    <input type="hidden" name="extraction_status" value="{{ extraction_status_filter }}">
+    <input type="hidden" name="origin_kind" value="{{ origin_kind_filter }}">
+    <input type="hidden" name="cataloged_since_utc" value="{{ cataloged_since_filter }}">
+    <input type="hidden" name="cataloged_before_utc" value="{{ cataloged_before_filter }}">
+    <label for="target_statuses">Statuses:</label>
+    <input id="target_statuses" type="text" name="target_statuses" value="pending,failed">
+    <label for="backfill_limit">Limit:</label>
+    <input id="backfill_limit" type="number" name="limit" min="1" max="500" value="100">
+    <button class="primary" type="submit">Run Backfill</button>
+  </form>
+</section>
+
+<section class="panel">
+  {% if assets %}
+  <p class="muted">Showing {{ start_index }}-{{ end_index }} of {{ total }} cataloged assets.</p>
+  <table>
+    <thead>
+      <tr>
+        <th>Relative Path</th>
+        <th>Origin</th>
+        <th>SHA256</th>
+        <th>Size</th>
+        <th>Extraction</th>
+        <th>Metadata</th>
+        <th>Actions</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for asset in assets %}
+      <tr>
+        <td class="mono">{{ asset.relative_path }}</td>
+        <td>{{ asset.origin_kind }}<br><span class="muted">last: {{ asset.last_observed_origin_kind }}</span></td>
+        <td class="mono">{{ asset.sha256_hex }}</td>
+        <td>{{ asset.size_human }}</td>
+        <td>
+          <span class="badge {{ asset.extraction_status }}">{{ asset.extraction_status }}</span>
+          <div class="stack mono">
+            <span>attempted: {{ asset.extraction_last_attempted_at_utc or "n/a" }}</span>
+            <span>succeeded: {{ asset.extraction_last_succeeded_at_utc or "n/a" }}</span>
+            <span>failed: {{ asset.extraction_last_failed_at_utc or "n/a" }}</span>
+          </div>
+          {% if asset.extraction_status == "failed" and asset.extraction_failure_detail %}
+          <details>
+            <summary>Failure detail</summary>
+            <div class="mono">{{ asset.extraction_failure_detail }}</div>
+          </details>
+          {% endif %}
+        </td>
+        <td>
+          {% if asset.extraction_status == "succeeded" and asset.metadata_summary %}
+          <div class="mono">{{ asset.metadata_summary }}</div>
+          {% elif asset.extraction_status == "succeeded" %}
+          <span class="muted">No extracted fields available.</span>
+          {% elif asset.extraction_status == "pending" %}
+          <span class="muted">Not attempted yet.</span>
+          {% else %}
+          <span class="muted">Extraction failed.</span>
+          {% endif %}
+        </td>
+        <td>
+          <form method="post" action="/catalog/actions/retry">
+            <input type="hidden" name="page" value="{{ page }}">
+            <input type="hidden" name="extraction_status" value="{{ extraction_status_filter }}">
+            <input type="hidden" name="origin_kind" value="{{ origin_kind_filter }}">
+            <input type="hidden" name="cataloged_since_utc" value="{{ cataloged_since_filter }}">
+            <input type="hidden" name="cataloged_before_utc" value="{{ cataloged_before_filter }}">
+            <input type="hidden" name="relative_path" value="{{ asset.relative_path }}">
+            <button type="submit">Retry</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <div class="pager">
+    {% if has_previous %}
+    <a href="/catalog?page={{ page - 1 }}{{ filter_query_suffix }}">Previous</a>
+    {% endif %}
+    <span class="muted">Page {{ page }}</span>
+    {% if has_next %}
+    <a href="/catalog?page={{ page + 1 }}{{ filter_query_suffix }}">Next</a>
+    {% endif %}
+  </div>
+  {% else %}
+  <p class="muted">No catalog assets are available yet.</p>
+  {% endif %}
+</section>
+{% endblock %}

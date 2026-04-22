@@ -9,6 +9,9 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from photovault_clientd.db import (
+    CLIENT_ENROLLMENT_APPROVED,
+    CLIENT_ENROLLMENT_PENDING,
+    CLIENT_ENROLLMENT_REVOKED,
     append_daemon_event,
     clear_ready_to_upload_error,
     count_hash_pending_files_global,
@@ -32,6 +35,7 @@ from photovault_clientd.db import (
     fetch_next_uploaded_file,
     fetch_ready_to_upload_files_global,
     fetch_reupload_target_file,
+    fetch_server_auth_state,
     fetch_wait_network_retry_candidates,
     get_daemon_state,
     local_sha_exists,
@@ -55,6 +59,7 @@ from photovault_clientd.db import (
     requeue_error_file_for_upload,
     set_job_status,
     transition_daemon_state,
+    upsert_server_auth_state,
 )
 from photovault_clientd.events import EventCategory, EventLevel, classify_copy_error, classify_hash_error
 from photovault_clientd.hashing import compute_sha256
@@ -69,6 +74,9 @@ DEFAULT_RETAIN_STAGED_FILES = True
 DEFAULT_MAX_UPLOAD_RETRIES = 3
 DEFAULT_RETRY_BACKOFF_MAX_SECONDS = 30
 DEFAULT_AUTO_PROGRESS_MAX_STEPS = 32
+DEFAULT_ENROLL_TIMEOUT_SECONDS = 5.0
+
+_CLIENT_REQUEST_AUTH_HEADERS: dict[str, str] = {}
 
 AUTO_PROGRESS_SAFE_STATES = {
     ClientState.STAGING_COPY,
@@ -85,6 +93,13 @@ AUTO_PROGRESS_SAFE_STATES = {
     ClientState.CLEANUP_STAGING,
     ClientState.JOB_COMPLETE_REMOTE,
     ClientState.JOB_COMPLETE_LOCAL,
+}
+
+_AUTH_BLOCKED_DETAILS = {
+    "CLIENT_PENDING_APPROVAL",
+    "CLIENT_REVOKED",
+    "CLIENT_AUTH_REQUIRED",
+    "CLIENT_AUTH_INVALID",
 }
 
 
@@ -129,6 +144,222 @@ def _next_online_state(conn) -> ClientState:
     return ClientState.WAIT_NETWORK
 
 
+def _set_client_request_auth_headers(headers: dict[str, str] | None) -> None:
+    global _CLIENT_REQUEST_AUTH_HEADERS
+    _CLIENT_REQUEST_AUTH_HEADERS = dict(headers or {})
+
+
+def _extract_http_error_detail(exc: HTTPError) -> str:
+    try:
+        body = exc.read().decode("utf-8")
+    except Exception:
+        body = ""
+    if not body:
+        return f"HTTP {exc.code}"
+    try:
+        decoded = json.loads(body)
+    except json.JSONDecodeError:
+        return body
+    detail = decoded.get("detail")
+    if isinstance(detail, str):
+        return detail
+    return body
+
+
+def _build_client_auth_headers(
+    conn,
+    *,
+    server_base_url: str,
+    client_id: str,
+    display_name: str,
+    bootstrap_token: str | None,
+    now_utc: str,
+) -> tuple[dict[str, str] | None, str | None]:
+    auth_state = fetch_server_auth_state(conn)
+    effective_client_id = client_id
+    effective_display_name = display_name
+    if auth_state is not None:
+        existing_client_id = str(auth_state.get("client_id", "")).strip()
+        existing_display_name = str(auth_state.get("display_name", "")).strip()
+        if existing_client_id:
+            effective_client_id = existing_client_id
+        if existing_display_name:
+            effective_display_name = existing_display_name
+
+    if (
+        auth_state is not None
+        and str(auth_state.get("enrollment_status")) == CLIENT_ENROLLMENT_APPROVED
+        and isinstance(auth_state.get("auth_token"), str)
+        and str(auth_state.get("auth_token"))
+    ):
+        return {
+            "x-photovault-client-id": str(auth_state["client_id"]),
+            "x-photovault-client-token": str(auth_state["auth_token"]),
+        }, None
+
+    if not bootstrap_token:
+        if auth_state is not None and str(auth_state.get("enrollment_status")) == CLIENT_ENROLLMENT_PENDING:
+            return None, "CLIENT_PENDING_APPROVAL"
+        if auth_state is not None and str(auth_state.get("enrollment_status")) == CLIENT_ENROLLMENT_REVOKED:
+            return None, "CLIENT_REVOKED"
+        return {}, None
+
+    request = Request(
+        url=f"{server_base_url.rstrip('/')}/v1/client/enroll/bootstrap",
+        data=json.dumps(
+            {
+                "client_id": effective_client_id,
+                "display_name": effective_display_name,
+                "bootstrap_token": bootstrap_token,
+            }
+        ).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=DEFAULT_ENROLL_TIMEOUT_SECONDS) as response:
+            body = json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        detail = _extract_http_error_detail(exc)
+        upsert_server_auth_state(
+            conn,
+            client_id=effective_client_id,
+            display_name=effective_display_name,
+            enrollment_status=CLIENT_ENROLLMENT_PENDING,
+            auth_token=None,
+            server_first_seen_at_utc=None,
+            server_last_enrolled_at_utc=None,
+            approved_at_utc=None,
+            revoked_at_utc=None,
+            last_enrollment_attempt_at_utc=now_utc,
+            last_enrollment_result_at_utc=now_utc,
+            last_error=detail,
+            updated_at_utc=now_utc,
+        )
+        conn.commit()
+        return None, detail
+    except (URLError, TimeoutError, ValueError, OSError, json.JSONDecodeError) as exc:
+        upsert_server_auth_state(
+            conn,
+            client_id=effective_client_id,
+            display_name=effective_display_name,
+            enrollment_status=CLIENT_ENROLLMENT_PENDING,
+            auth_token=None,
+            server_first_seen_at_utc=None,
+            server_last_enrolled_at_utc=None,
+            approved_at_utc=None,
+            revoked_at_utc=None,
+            last_enrollment_attempt_at_utc=now_utc,
+            last_enrollment_result_at_utc=now_utc,
+            last_error=str(exc),
+            updated_at_utc=now_utc,
+        )
+        conn.commit()
+        return None, str(exc)
+
+    enrollment_status = str(body.get("enrollment_status") or CLIENT_ENROLLMENT_PENDING)
+    auth_token = body.get("auth_token")
+    approved_at_utc = now_utc if enrollment_status == CLIENT_ENROLLMENT_APPROVED else None
+    revoked_at_utc = now_utc if enrollment_status == CLIENT_ENROLLMENT_REVOKED else None
+    upsert_server_auth_state(
+        conn,
+        client_id=str(body.get("client_id") or client_id),
+        display_name=str(body.get("display_name") or display_name),
+        enrollment_status=enrollment_status,
+        auth_token=str(auth_token) if isinstance(auth_token, str) and auth_token else None,
+        server_first_seen_at_utc=(
+            str(body.get("first_seen_at_utc")) if body.get("first_seen_at_utc") is not None else None
+        ),
+        server_last_enrolled_at_utc=(
+            str(body.get("last_enrolled_at_utc"))
+            if body.get("last_enrolled_at_utc") is not None
+            else None
+        ),
+        approved_at_utc=approved_at_utc,
+        revoked_at_utc=revoked_at_utc,
+        last_enrollment_attempt_at_utc=now_utc,
+        last_enrollment_result_at_utc=now_utc,
+        last_error=None,
+        updated_at_utc=now_utc,
+    )
+    conn.commit()
+    if enrollment_status == CLIENT_ENROLLMENT_APPROVED and isinstance(auth_token, str) and auth_token:
+        return {
+            "x-photovault-client-id": str(body.get("client_id") or effective_client_id),
+            "x-photovault-client-token": auth_token,
+        }, None
+    if enrollment_status == CLIENT_ENROLLMENT_REVOKED:
+        return None, "CLIENT_REVOKED"
+    return None, "CLIENT_PENDING_APPROVAL"
+
+
+def _update_auth_state_from_privileged_http_error(
+    conn,
+    *,
+    now_utc: str,
+    exc: HTTPError,
+) -> str | None:
+    detail = _extract_http_error_detail(exc)
+    auth_state = fetch_server_auth_state(conn)
+    if auth_state is None:
+        return None
+    if detail == "CLIENT_PENDING_APPROVAL":
+        upsert_server_auth_state(
+            conn,
+            client_id=str(auth_state["client_id"]),
+            display_name=str(auth_state["display_name"]),
+            enrollment_status=CLIENT_ENROLLMENT_PENDING,
+            auth_token=None,
+            server_first_seen_at_utc=auth_state.get("server_first_seen_at_utc"),
+            server_last_enrolled_at_utc=auth_state.get("server_last_enrolled_at_utc"),
+            approved_at_utc=None,
+            revoked_at_utc=auth_state.get("revoked_at_utc"),
+            last_enrollment_attempt_at_utc=auth_state.get("last_enrollment_attempt_at_utc"),
+            last_enrollment_result_at_utc=auth_state.get("last_enrollment_result_at_utc"),
+            last_error=detail,
+            updated_at_utc=now_utc,
+        )
+        conn.commit()
+        return detail
+    if detail == "CLIENT_REVOKED":
+        upsert_server_auth_state(
+            conn,
+            client_id=str(auth_state["client_id"]),
+            display_name=str(auth_state["display_name"]),
+            enrollment_status=CLIENT_ENROLLMENT_REVOKED,
+            auth_token=auth_state.get("auth_token"),
+            server_first_seen_at_utc=auth_state.get("server_first_seen_at_utc"),
+            server_last_enrolled_at_utc=auth_state.get("server_last_enrolled_at_utc"),
+            approved_at_utc=auth_state.get("approved_at_utc"),
+            revoked_at_utc=now_utc,
+            last_enrollment_attempt_at_utc=auth_state.get("last_enrollment_attempt_at_utc"),
+            last_enrollment_result_at_utc=auth_state.get("last_enrollment_result_at_utc"),
+            last_error=detail,
+            updated_at_utc=now_utc,
+        )
+        conn.commit()
+        return detail
+    if detail in {"CLIENT_AUTH_REQUIRED", "CLIENT_AUTH_INVALID"}:
+        upsert_server_auth_state(
+            conn,
+            client_id=str(auth_state["client_id"]),
+            display_name=str(auth_state["display_name"]),
+            enrollment_status=str(auth_state["enrollment_status"]),
+            auth_token=auth_state.get("auth_token"),
+            server_first_seen_at_utc=auth_state.get("server_first_seen_at_utc"),
+            server_last_enrolled_at_utc=auth_state.get("server_last_enrolled_at_utc"),
+            approved_at_utc=auth_state.get("approved_at_utc"),
+            revoked_at_utc=auth_state.get("revoked_at_utc"),
+            last_enrollment_attempt_at_utc=auth_state.get("last_enrollment_attempt_at_utc"),
+            last_enrollment_result_at_utc=auth_state.get("last_enrollment_result_at_utc"),
+            last_error=detail,
+            updated_at_utc=now_utc,
+        )
+        conn.commit()
+        return detail
+    return None
+
+
 def _post_metadata_handshake(
     *,
     server_base_url: str,
@@ -148,7 +379,7 @@ def _post_metadata_handshake(
     request = Request(
         url=f"{server_base_url.rstrip('/')}/v1/upload/metadata-handshake",
         data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
+        headers={"Content-Type": "application/json", **_CLIENT_REQUEST_AUTH_HEADERS},
         method="POST",
     )
     with urlopen(request, timeout=timeout_seconds) as response:
@@ -183,6 +414,7 @@ def _upload_file_content(
     timeout_seconds: float = DEFAULT_HANDSHAKE_TIMEOUT_SECONDS,
 ) -> str:
     headers = {"x-size-bytes": str(size_bytes)}
+    headers.update(_CLIENT_REQUEST_AUTH_HEADERS)
     if job_name is not None:
         headers["x-job-name"] = job_name
     if original_filename is not None:
@@ -213,7 +445,7 @@ def _post_server_verify(
     request = Request(
         url=f"{server_base_url.rstrip('/')}/v1/upload/verify",
         data=json.dumps({"sha256_hex": sha256_hex, "size_bytes": size_bytes}).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
+        headers={"Content-Type": "application/json", **_CLIENT_REQUEST_AUTH_HEADERS},
         method="POST",
     )
     with urlopen(request, timeout=timeout_seconds) as response:
@@ -859,13 +1091,21 @@ def run_job_complete_local_tick(conn) -> dict[str, object]:
         }
 
 
-def run_wait_network_tick(conn) -> dict[str, object]:
+def run_wait_network_tick(
+    conn,
+    *,
+    server_base_url: str = DEFAULT_SERVER_BASE_URL,
+    client_id: str,
+    client_display_name: str,
+    bootstrap_token: str | None,
+) -> dict[str, object]:
     """Advance from WAIT_NETWORK when retry backoff has elapsed."""
     now = datetime.now(UTC).isoformat()
     now_dt = datetime.fromisoformat(now)
     network_online = _network_is_online()
     candidates = fetch_wait_network_retry_candidates(conn)
     if not candidates:
+        _set_client_request_auth_headers(None)
         transition_daemon_state(
             conn,
             ClientState.WAIT_NETWORK,
@@ -900,6 +1140,7 @@ def run_wait_network_tick(conn) -> dict[str, object]:
             next_retry_at = due_at
 
     if due_ready_count <= 0 and due_uploaded_count <= 0:
+        _set_client_request_auth_headers(None)
         transition_daemon_state(
             conn,
             ClientState.WAIT_NETWORK,
@@ -918,6 +1159,7 @@ def run_wait_network_tick(conn) -> dict[str, object]:
         }
 
     if not network_online:
+        _set_client_request_auth_headers(None)
         transition_daemon_state(
             conn,
             ClientState.WAIT_NETWORK,
@@ -938,6 +1180,47 @@ def run_wait_network_tick(conn) -> dict[str, object]:
             "next_state": ClientState.WAIT_NETWORK.value,
         }
 
+    auth_headers, auth_block_reason = _build_client_auth_headers(
+        conn,
+        server_base_url=server_base_url,
+        client_id=client_id,
+        display_name=client_display_name,
+        bootstrap_token=bootstrap_token,
+        now_utc=now,
+    )
+    if auth_headers is None:
+        _set_client_request_auth_headers(None)
+        transition_daemon_state(
+            conn,
+            ClientState.WAIT_NETWORK,
+            now,
+            reason=f"wait network blocked by client auth state: {auth_block_reason}",
+            commit=False,
+        )
+        append_daemon_event(
+            conn,
+            level=EventLevel.WARN,
+            category="CLIENT_AUTH_BLOCKED",
+            message=f"client auth blocked privileged upload work: {auth_block_reason}",
+            created_at_utc=now,
+            from_state=ClientState.WAIT_NETWORK,
+            to_state=ClientState.WAIT_NETWORK,
+        )
+        conn.commit()
+        return {
+            "handled": True,
+            "progressed": False,
+            "errored": False,
+            "ready_to_upload": due_ready_count,
+            "uploaded": due_uploaded_count,
+            "network_online": network_online,
+            "auth_blocked": True,
+            "auth_reason": auth_block_reason,
+            "next_retry_at_utc": next_retry_at.isoformat() if next_retry_at else None,
+            "next_state": ClientState.WAIT_NETWORK.value,
+        }
+
+    _set_client_request_auth_headers(auth_headers)
     transition_daemon_state(
         conn,
         ClientState.UPLOAD_PREPARE,
@@ -1028,7 +1311,64 @@ def run_upload_prepare_tick(conn, *, server_base_url: str = DEFAULT_SERVER_BASE_
     file_ids = [int(row["file_id"]) for row in ready_rows]
     try:
         decisions = _post_metadata_handshake(server_base_url=server_base_url, files=ready_rows)
-    except (HTTPError, URLError, TimeoutError, ValueError, OSError, json.JSONDecodeError) as exc:
+    except HTTPError as exc:
+        auth_detail = _update_auth_state_from_privileged_http_error(conn, now_utc=now, exc=exc)
+        if auth_detail in _AUTH_BLOCKED_DETAILS:
+            for row in ready_rows:
+                set_job_status(conn, int(row["job_id"]), ClientState.WAIT_NETWORK.value, now)
+            transition_daemon_state(
+                conn,
+                ClientState.WAIT_NETWORK,
+                now,
+                reason=f"upload prepare blocked by client auth: {auth_detail}",
+                commit=False,
+            )
+            append_daemon_event(
+                conn,
+                level=EventLevel.WARN,
+                category="CLIENT_AUTH_BLOCKED",
+                message=f"metadata handshake blocked by server auth status: {auth_detail}",
+                created_at_utc=now,
+                from_state=ClientState.UPLOAD_PREPARE,
+                to_state=ClientState.WAIT_NETWORK,
+            )
+            conn.commit()
+            return {
+                "handled": True,
+                "progressed": False,
+                "errored": False,
+                "auth_blocked": True,
+                "auth_reason": auth_detail,
+                "next_state": ClientState.WAIT_NETWORK.value,
+            }
+        retried = mark_files_upload_retry(conn, file_ids, str(exc), now)
+        for row in ready_rows:
+            set_job_status(conn, int(row["job_id"]), ClientState.WAIT_NETWORK.value, now)
+        transition_daemon_state(
+            conn,
+            ClientState.WAIT_NETWORK,
+            now,
+            reason=f"upload prepare handshake failed; retry scheduled for {retried} file(s)",
+            commit=False,
+        )
+        append_daemon_event(
+            conn,
+            level=EventLevel.ERROR,
+            category=EventCategory.HANDSHAKE_RETRY_SCHEDULED,
+            message=f"metadata handshake failed: {exc}",
+            created_at_utc=now,
+            from_state=ClientState.UPLOAD_PREPARE,
+            to_state=ClientState.WAIT_NETWORK,
+        )
+        conn.commit()
+        return {
+            "handled": True,
+            "progressed": False,
+            "errored": True,
+            "retry_scheduled": retried,
+            "next_state": ClientState.WAIT_NETWORK.value,
+        }
+    except (URLError, TimeoutError, ValueError, OSError, json.JSONDecodeError) as exc:
         retried = mark_files_upload_retry(conn, file_ids, str(exc), now)
         for row in ready_rows:
             set_job_status(conn, int(row["job_id"]), ClientState.WAIT_NETWORK.value, now)
@@ -1313,7 +1653,63 @@ def run_upload_file_tick(conn, *, server_base_url: str = DEFAULT_SERVER_BASE_URL
                 size_bytes=size_bytes,
                 content=content,
             )
-    except (HTTPError, URLError, TimeoutError, ValueError, OSError, json.JSONDecodeError) as exc:
+    except HTTPError as exc:
+        auth_detail = _update_auth_state_from_privileged_http_error(conn, now_utc=now, exc=exc)
+        if auth_detail in _AUTH_BLOCKED_DETAILS:
+            set_job_status(conn, job_id, ClientState.WAIT_NETWORK.value, now)
+            transition_daemon_state(
+                conn,
+                ClientState.WAIT_NETWORK,
+                now,
+                reason=f"upload file blocked by client auth: {auth_detail}",
+                commit=False,
+            )
+            append_daemon_event(
+                conn,
+                level=EventLevel.WARN,
+                category="CLIENT_AUTH_BLOCKED",
+                message=f"file upload blocked by server auth status for file_id={file_id}: {auth_detail}",
+                created_at_utc=now,
+                from_state=ClientState.UPLOAD_FILE,
+                to_state=ClientState.WAIT_NETWORK,
+            )
+            conn.commit()
+            return {
+                "handled": True,
+                "progressed": False,
+                "errored": False,
+                "auth_blocked": True,
+                "auth_reason": auth_detail,
+                "file_id": file_id,
+                "next_state": ClientState.WAIT_NETWORK.value,
+            }
+        mark_ready_to_upload_retry(conn, file_id, str(exc), now)
+        set_job_status(conn, job_id, ClientState.WAIT_NETWORK.value, now)
+        transition_daemon_state(
+            conn,
+            ClientState.WAIT_NETWORK,
+            now,
+            reason=f"upload file failed for file_id={file_id}; retry scheduled",
+            commit=False,
+        )
+        append_daemon_event(
+            conn,
+            level=EventLevel.ERROR,
+            category=EventCategory.UPLOAD_RETRY_SCHEDULED,
+            message=f"upload failed for file_id={file_id}: {exc}",
+            created_at_utc=now,
+            from_state=ClientState.UPLOAD_FILE,
+            to_state=ClientState.WAIT_NETWORK,
+        )
+        conn.commit()
+        return {
+            "handled": True,
+            "progressed": False,
+            "errored": True,
+            "file_id": file_id,
+            "next_state": ClientState.WAIT_NETWORK.value,
+        }
+    except (URLError, TimeoutError, ValueError, OSError, json.JSONDecodeError) as exc:
         mark_ready_to_upload_retry(conn, file_id, str(exc), now)
         set_job_status(conn, job_id, ClientState.WAIT_NETWORK.value, now)
         transition_daemon_state(
@@ -1438,7 +1834,65 @@ def run_server_verify_tick(conn, *, server_base_url: str = DEFAULT_SERVER_BASE_U
             sha256_hex=sha256_hex,
             size_bytes=size_bytes,
         )
-    except (HTTPError, URLError, TimeoutError, ValueError, OSError, json.JSONDecodeError) as exc:
+    except HTTPError as exc:
+        auth_detail = _update_auth_state_from_privileged_http_error(conn, now_utc=now, exc=exc)
+        if auth_detail in _AUTH_BLOCKED_DETAILS:
+            set_job_status(conn, job_id, ClientState.WAIT_NETWORK.value, now)
+            transition_daemon_state(
+                conn,
+                ClientState.WAIT_NETWORK,
+                now,
+                reason=f"server verify blocked by client auth: {auth_detail}",
+                commit=False,
+            )
+            append_daemon_event(
+                conn,
+                level=EventLevel.WARN,
+                category="CLIENT_AUTH_BLOCKED",
+                message=(
+                    f"server verification blocked by auth status for file_id={file_id}: {auth_detail}"
+                ),
+                created_at_utc=now,
+                from_state=ClientState.SERVER_VERIFY,
+                to_state=ClientState.WAIT_NETWORK,
+            )
+            conn.commit()
+            return {
+                "handled": True,
+                "progressed": False,
+                "errored": False,
+                "auth_blocked": True,
+                "auth_reason": auth_detail,
+                "file_id": file_id,
+                "next_state": ClientState.WAIT_NETWORK.value,
+            }
+        mark_uploaded_retry(conn, file_id, str(exc), now)
+        set_job_status(conn, job_id, ClientState.WAIT_NETWORK.value, now)
+        transition_daemon_state(
+            conn,
+            ClientState.WAIT_NETWORK,
+            now,
+            reason=f"server verify failed for file_id={file_id}; retry scheduled",
+            commit=False,
+        )
+        append_daemon_event(
+            conn,
+            level=EventLevel.ERROR,
+            category=EventCategory.SERVER_VERIFY_RETRY_SCHEDULED,
+            message=f"server verify failed for file_id={file_id}: {exc}",
+            created_at_utc=now,
+            from_state=ClientState.SERVER_VERIFY,
+            to_state=ClientState.WAIT_NETWORK,
+        )
+        conn.commit()
+        return {
+            "handled": True,
+            "progressed": False,
+            "errored": True,
+            "file_id": file_id,
+            "next_state": ClientState.WAIT_NETWORK.value,
+        }
+    except (URLError, TimeoutError, ValueError, OSError, json.JSONDecodeError) as exc:
         mark_uploaded_retry(conn, file_id, str(exc), now)
         set_job_status(conn, job_id, ClientState.WAIT_NETWORK.value, now)
         transition_daemon_state(
@@ -1893,6 +2347,9 @@ def run_daemon_tick(
     staging_root: Path,
     *,
     server_base_url: str = DEFAULT_SERVER_BASE_URL,
+    client_id: str,
+    client_display_name: str,
+    bootstrap_token: str | None = None,
     retain_staged_files: bool = DEFAULT_RETAIN_STAGED_FILES,
     max_upload_retries: int = DEFAULT_MAX_UPLOAD_RETRIES,
 ) -> dict[str, object]:
@@ -1909,7 +2366,13 @@ def run_daemon_tick(
     if state == ClientState.QUEUE_UPLOAD:
         return run_queue_upload_tick(conn)
     if state == ClientState.WAIT_NETWORK:
-        return run_wait_network_tick(conn)
+        return run_wait_network_tick(
+            conn,
+            server_base_url=server_base_url,
+            client_id=client_id,
+            client_display_name=client_display_name,
+            bootstrap_token=bootstrap_token,
+        )
     if state == ClientState.UPLOAD_PREPARE:
         return run_upload_prepare_tick(conn, server_base_url=server_base_url)
     if state == ClientState.UPLOAD_FILE:
@@ -1951,6 +2414,9 @@ def run_recovery_dispatch(
     staging_root: Path,
     *,
     server_base_url: str = DEFAULT_SERVER_BASE_URL,
+    client_id: str,
+    client_display_name: str,
+    bootstrap_token: str | None = None,
     retain_staged_files: bool = DEFAULT_RETAIN_STAGED_FILES,
     max_upload_retries: int = DEFAULT_MAX_UPLOAD_RETRIES,
     max_steps: int = 1000,
@@ -1988,6 +2454,9 @@ def run_recovery_dispatch(
             conn,
             staging_root,
             server_base_url=server_base_url,
+            client_id=client_id,
+            client_display_name=client_display_name,
+            bootstrap_token=bootstrap_token,
             retain_staged_files=retain_staged_files,
             max_upload_retries=max_upload_retries,
         )
@@ -2039,6 +2508,9 @@ def run_auto_progress_dispatch(
     staging_root: Path,
     *,
     server_base_url: str = DEFAULT_SERVER_BASE_URL,
+    client_id: str,
+    client_display_name: str,
+    bootstrap_token: str | None = None,
     retain_staged_files: bool = DEFAULT_RETAIN_STAGED_FILES,
     max_upload_retries: int = DEFAULT_MAX_UPLOAD_RETRIES,
     max_steps: int = DEFAULT_AUTO_PROGRESS_MAX_STEPS,
@@ -2059,6 +2531,9 @@ def run_auto_progress_dispatch(
             conn,
             staging_root,
             server_base_url=server_base_url,
+            client_id=client_id,
+            client_display_name=client_display_name,
+            bootstrap_token=bootstrap_token,
             retain_staged_files=retain_staged_files,
             max_upload_retries=max_upload_retries,
         )

@@ -56,6 +56,60 @@
         padding: 0.5rem 0.7rem;
         margin-bottom: 0.8rem;
       }
+      .success {
+        color: #1f5d2c;
+        background: #e7f7eb;
+        border: 1px solid #bde7c8;
+        border-radius: 6px;
+        padding: 0.5rem 0.7rem;
+        margin-bottom: 0.8rem;
+      }
+      .badge {
+        display: inline-block;
+        padding: 0.15rem 0.45rem;
+        border-radius: 999px;
+        font-size: 0.77rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.02em;
+      }
+      .badge.pending { background: #f5efe1; color: #7a5600; }
+      .badge.approved { background: #e3f7ea; color: #1f6a35; }
+      .badge.revoked { background: #fce8e8; color: #8f1f1f; }
+      .badge.succeeded { background: #e3f7ea; color: #1f6a35; }
+      .badge.failed { background: #fce8e8; color: #8f1f1f; }
+      .stack {
+        display: flex;
+        flex-direction: column;
+        gap: 0.35rem;
+      }
+      .actions-inline {
+        display: flex;
+        gap: 0.45rem;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+      button {
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        background: var(--panel);
+        color: var(--text);
+        padding: 0.3rem 0.55rem;
+        font-size: 0.82rem;
+        cursor: pointer;
+      }
+      button.primary {
+        border-color: #145ea8;
+        background: #145ea8;
+        color: #ffffff;
+      }
+      details {
+        margin-top: 0.25rem;
+      }
+      details summary {
+        cursor: pointer;
+        color: var(--accent);
+      }
       table {
         width: 100%;
         border-collapse: collapse;
@@ -115,7 +169,9 @@
       <nav>
         <strong>photovault server</strong>
         <a href="/" class="{{ 'active' if active_page == 'home' else '' }}">Overview</a>
+        <a href="/clients" class="{{ 'active' if active_page == 'clients' else '' }}">Clients</a>
         <a href="/files" class="{{ 'active' if active_page == 'files' else '' }}">Files</a>
+        <a href="/catalog" class="{{ 'active' if active_page == 'catalog' else '' }}">Catalog</a>
         <a href="/duplicates" class="{{ 'active' if active_page == 'duplicates' else '' }}">Duplicates</a>
         <a href="/conflicts" class="{{ 'active' if active_page == 'conflicts' else '' }}">Conflicts</a>
       </nav>
@@ -123,6 +179,12 @@
     <main>
       {% if error_message %}
       <div class="error">{{ error_message }}</div>
+      {% endif %}
+      {% if action_error %}
+      <div class="error">{{ action_error }}</div>
+      {% endif %}
+      {% if action_message %}
+      <div class="success">{{ action_message }}</div>
       {% endif %}
       {% block content %}{% endblock %}
     </main>

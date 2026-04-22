@@ -1,17 +1,44 @@
 import hashlib
+import io
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import photovault_api.app as app_module
 from fastapi.testclient import TestClient
 from photovault_api.app import create_app
 from photovault_api.state_store import InMemoryUploadStateStore
+from PIL import Image
 
 TINY_PNG = (
     b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
-    b"\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\x0cIDATx\x9cc`\x00\x00"
-    b"\x00\x02\x00\x01\xe5'\xd4\xa2\x00\x00\x00\x00IEND\xaeB`\x82"
+    b"\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\rIDATx\x9cc\xf8\xcf\xc0"
+    b"\xf0\x1f\x00\x05\x00\x01\xff\x89\x99=\x1d\x00\x00\x00\x00IEND\xaeB`\x82"
 )
+
+
+def _jpeg_with_exif_bytes(
+    *,
+    width: int = 7,
+    height: int = 5,
+    capture_timestamp: str = "2026:04:21 14:15:16",
+    capture_offset: str = "+02:00",
+    camera_make: str = "Canon",
+    camera_model: str = "EOS R6",
+    orientation: int = 6,
+    lens_model: str = "RF24-70mm F2.8 L IS USM",
+) -> bytes:
+    image = Image.new("RGB", (width, height), color=(120, 80, 40))
+    exif = Image.Exif()
+    exif[36867] = capture_timestamp
+    exif[36881] = capture_offset
+    exif[271] = camera_make
+    exif[272] = camera_model
+    exif[274] = orientation
+    exif[42036] = lens_model
+    buffer = io.BytesIO()
+    image.save(buffer, format="JPEG", exif=exif)
+    return buffer.getvalue()
 
 
 def _upload_headers(
@@ -27,17 +54,255 @@ def _upload_headers(
     }
 
 
+def _client_auth_headers(*, client_id: str, client_token: str) -> dict[str, str]:
+    return {
+        "x-photovault-client-id": client_id,
+        "x-photovault-client-token": client_token,
+    }
+
+
+def _with_auth_headers(base: dict[str, str], auth: dict[str, str]) -> dict[str, str]:
+    return {**base, **auth}
+
+
+def _approve_upload_client(
+    client: TestClient,
+    *,
+    client_id: str = "pi-test",
+    display_name: str = "Pi Test",
+) -> dict[str, str]:
+    enroll = client.post(
+        "/v1/client/enroll/bootstrap",
+        json={
+            "client_id": client_id,
+            "display_name": display_name,
+            "bootstrap_token": "bootstrap-123",
+        },
+    )
+    assert enroll.status_code == 200
+    approve = client.post(f"/v1/admin/clients/{client_id}/approve")
+    assert approve.status_code == 200
+    token = approve.json()["item"]["auth_token"]
+    assert isinstance(token, str)
+    return _client_auth_headers(client_id=client_id, client_token=token)
+
+
 def test_healthz(tmp_path: Path) -> None:
-    client = TestClient(create_app(storage_root=tmp_path))
+    client = TestClient(create_app(storage_root=tmp_path, bootstrap_token="bootstrap-123"))
     response = client.get("/healthz")
     assert response.status_code == 200
 
 
+def test_bootstrap_enrollment_creates_pending_client_record(tmp_path: Path) -> None:
+    client = TestClient(create_app(storage_root=tmp_path, bootstrap_token="bootstrap-123"))
+    response = client.post(
+        "/v1/client/enroll/bootstrap",
+        json={
+            "client_id": "pi-kitchen",
+            "display_name": "Kitchen Pi",
+            "bootstrap_token": "bootstrap-123",
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["enrollment_status"] == "pending"
+    assert response.json()["auth_token"] is None
+
+    listing = client.get("/v1/admin/clients")
+    assert listing.status_code == 200
+    items = listing.json()["items"]
+    assert len(items) == 1
+    assert items[0]["client_id"] == "pi-kitchen"
+    assert items[0]["display_name"] == "Kitchen Pi"
+    assert items[0]["enrollment_status"] == "pending"
+    assert items[0]["auth_token"] is None
+
+
+def test_bootstrap_enrollment_is_idempotent_for_existing_client(tmp_path: Path) -> None:
+    client = TestClient(create_app(storage_root=tmp_path, bootstrap_token="bootstrap-123"))
+    first = client.post(
+        "/v1/client/enroll/bootstrap",
+        json={
+            "client_id": "pi-kitchen",
+            "display_name": "Kitchen Pi",
+            "bootstrap_token": "bootstrap-123",
+        },
+    )
+    assert first.status_code == 200
+    first_seen = first.json()["first_seen_at_utc"]
+
+    second = client.post(
+        "/v1/client/enroll/bootstrap",
+        json={
+            "client_id": "pi-kitchen",
+            "display_name": "Kitchen Pi Renamed",
+            "bootstrap_token": "bootstrap-123",
+        },
+    )
+    assert second.status_code == 200
+    payload = second.json()
+    assert payload["enrollment_status"] == "pending"
+    assert payload["display_name"] == "Kitchen Pi Renamed"
+    assert payload["first_seen_at_utc"] == first_seen
+
+
+def test_approve_then_revoke_client_transitions_and_token_rules(tmp_path: Path) -> None:
+    client = TestClient(create_app(storage_root=tmp_path, bootstrap_token="bootstrap-123"))
+    enroll = client.post(
+        "/v1/client/enroll/bootstrap",
+        json={
+            "client_id": "pi-kitchen",
+            "display_name": "Kitchen Pi",
+            "bootstrap_token": "bootstrap-123",
+        },
+    )
+    assert enroll.status_code == 200
+
+    approved = client.post("/v1/admin/clients/pi-kitchen/approve")
+    assert approved.status_code == 200
+    approve_item = approved.json()["item"]
+    assert approve_item["enrollment_status"] == "approved"
+    assert approve_item["auth_token"]
+
+    revoke = client.post("/v1/admin/clients/pi-kitchen/revoke")
+    assert revoke.status_code == 200
+    revoke_item = revoke.json()["item"]
+    assert revoke_item["enrollment_status"] == "revoked"
+    assert revoke_item["auth_token"] == approve_item["auth_token"]
+
+
+def test_bootstrap_enrollment_preserves_approved_client_and_returns_existing_token(tmp_path: Path) -> None:
+    client = TestClient(create_app(storage_root=tmp_path, bootstrap_token="bootstrap-123"))
+    enroll = client.post(
+        "/v1/client/enroll/bootstrap",
+        json={
+            "client_id": "pi-kitchen",
+            "display_name": "Kitchen Pi",
+            "bootstrap_token": "bootstrap-123",
+        },
+    )
+    assert enroll.status_code == 200
+    approve = client.post("/v1/admin/clients/pi-kitchen/approve")
+    assert approve.status_code == 200
+    issued_token = approve.json()["item"]["auth_token"]
+
+    reenroll = client.post(
+        "/v1/client/enroll/bootstrap",
+        json={
+            "client_id": "pi-kitchen",
+            "display_name": "Kitchen Pi Updated",
+            "bootstrap_token": "bootstrap-123",
+        },
+    )
+    assert reenroll.status_code == 200
+    payload = reenroll.json()
+    assert payload["enrollment_status"] == "approved"
+    assert payload["auth_token"] == issued_token
+    assert payload["display_name"] == "Kitchen Pi Updated"
+
+
+def test_pending_and_revoked_client_auth_is_rejected_in_upload_handshake(tmp_path: Path) -> None:
+    client = TestClient(create_app(storage_root=tmp_path, bootstrap_token="bootstrap-123"))
+    enroll = client.post(
+        "/v1/client/enroll/bootstrap",
+        json={
+            "client_id": "pi-kitchen",
+            "display_name": "Kitchen Pi",
+            "bootstrap_token": "bootstrap-123",
+        },
+    )
+    assert enroll.status_code == 200
+
+    pending_response = client.post(
+        "/v1/upload/metadata-handshake",
+        headers=_client_auth_headers(client_id="pi-kitchen", client_token="wrong-token"),
+        json={"files": [{"client_file_id": 1, "sha256_hex": "a" * 64, "size_bytes": 10}]},
+    )
+    assert pending_response.status_code == 403
+    assert pending_response.json()["detail"] == "CLIENT_PENDING_APPROVAL"
+
+    approve = client.post("/v1/admin/clients/pi-kitchen/approve")
+    assert approve.status_code == 200
+    token = approve.json()["item"]["auth_token"]
+    assert isinstance(token, str)
+
+    pending_with_valid_token = client.post(
+        "/v1/upload/metadata-handshake",
+        headers=_client_auth_headers(client_id="pi-kitchen", client_token=token),
+        json={"files": [{"client_file_id": 1, "sha256_hex": "a" * 64, "size_bytes": 10}]},
+    )
+    assert pending_with_valid_token.status_code == 200
+
+    revoked = client.post("/v1/admin/clients/pi-kitchen/revoke")
+    assert revoked.status_code == 200
+    revoked_response = client.post(
+        "/v1/upload/metadata-handshake",
+        headers=_client_auth_headers(client_id="pi-kitchen", client_token=token),
+        json={"files": [{"client_file_id": 1, "sha256_hex": "a" * 64, "size_bytes": 10}]},
+    )
+    assert revoked_response.status_code == 403
+    assert revoked_response.json()["detail"] == "CLIENT_REVOKED"
+
+
+def test_privileged_upload_endpoints_reject_missing_or_invalid_auth_headers(tmp_path: Path) -> None:
+    content = b"payload"
+    sha256_hex = hashlib.sha256(content).hexdigest()
+    client = TestClient(create_app(storage_root=tmp_path, bootstrap_token="bootstrap-123"))
+    auth_headers = _approve_upload_client(client)
+
+    missing = client.post(
+        "/v1/upload/metadata-handshake",
+        json={"files": [{"client_file_id": 1, "sha256_hex": sha256_hex, "size_bytes": len(content)}]},
+    )
+    assert missing.status_code == 401
+    assert missing.json()["detail"] == "CLIENT_AUTH_REQUIRED"
+
+    invalid = client.post(
+        "/v1/upload/metadata-handshake",
+        headers=_client_auth_headers(client_id="pi-test", client_token="wrong"),
+        json={"files": [{"client_file_id": 1, "sha256_hex": sha256_hex, "size_bytes": len(content)}]},
+    )
+    assert invalid.status_code == 401
+    assert invalid.json()["detail"] == "CLIENT_AUTH_INVALID"
+
+    upload_missing = client.put(
+        f"/v1/upload/content/{sha256_hex}",
+        content=content,
+        headers=_upload_headers(size_bytes=len(content), job_name="Auth", original_filename="a.jpg"),
+    )
+    assert upload_missing.status_code == 401
+    assert upload_missing.json()["detail"] == "CLIENT_AUTH_REQUIRED"
+
+    upload_ok = client.put(
+        f"/v1/upload/content/{sha256_hex}",
+        content=content,
+        headers=_with_auth_headers(
+            _upload_headers(size_bytes=len(content), job_name="Auth", original_filename="a.jpg"),
+            auth_headers,
+        ),
+    )
+    assert upload_ok.status_code == 200
+
+    verify_missing = client.post(
+        "/v1/upload/verify",
+        json={"sha256_hex": sha256_hex, "size_bytes": len(content)},
+    )
+    assert verify_missing.status_code == 401
+    assert verify_missing.json()["detail"] == "CLIENT_AUTH_REQUIRED"
+
+
 def test_metadata_handshake_reports_already_exists_for_known_sha(tmp_path: Path) -> None:
     known_sha = "a" * 64
-    client = TestClient(create_app(initial_known_sha256={known_sha}, storage_root=tmp_path))
+    client = TestClient(
+        create_app(
+            initial_known_sha256={known_sha},
+            storage_root=tmp_path,
+            bootstrap_token="bootstrap-123",
+        )
+    )
+    auth_headers = _approve_upload_client(client)
     response = client.post(
         "/v1/upload/metadata-handshake",
+        headers=auth_headers,
         json={
             "files": [
                 {"client_file_id": 1, "sha256_hex": known_sha, "size_bytes": 42},
@@ -118,9 +383,20 @@ def test_metadata_handshake_classifies_mixed_batch_with_single_lookup(tmp_path: 
         def remove_temp_upload(self, sha256_hex: str) -> None:
             return None
 
+        def get_client(self, client_id: str):
+            if client_id != "pi-test":
+                return None
+            return SimpleNamespace(
+                client_id=client_id,
+                display_name="Pi Test",
+                enrollment_status="approved",
+                auth_token="token-123",
+            )
+
     client = TestClient(create_app(state_store=_BatchStore(), storage_root=tmp_path))
     response = client.post(
         "/v1/upload/metadata-handshake",
+        headers=_client_auth_headers(client_id="pi-test", client_token="token-123"),
         json={
             "files": [
                 {"client_file_id": 1, "sha256_hex": known_sha, "size_bytes": 10},
@@ -144,15 +420,19 @@ def test_upload_content_and_verify_writes_filesystem_and_promotes_sha(tmp_path: 
     store = InMemoryUploadStateStore()
     content = TINY_PNG
     sha256_hex = hashlib.sha256(content).hexdigest()
-    client = TestClient(create_app(state_store=store, storage_root=tmp_path))
+    client = TestClient(create_app(state_store=store, storage_root=tmp_path, bootstrap_token="bootstrap-123"))
+    auth_headers = _approve_upload_client(client)
 
     upload_response = client.put(
         f"/v1/upload/content/{sha256_hex}",
         content=content,
-        headers=_upload_headers(
-            size_bytes=len(content),
-            job_name="Wedding Shoot",
-            original_filename="IMG_0001.PNG",
+        headers=_with_auth_headers(
+            _upload_headers(
+                size_bytes=len(content),
+                job_name="Wedding Shoot",
+                original_filename="IMG_0001.PNG",
+            ),
+            auth_headers,
         ),
     )
     assert upload_response.status_code == 200
@@ -164,12 +444,14 @@ def test_upload_content_and_verify_writes_filesystem_and_promotes_sha(tmp_path: 
     assert temp_record is not None
     verify_response = client.post(
         "/v1/upload/verify",
+        headers=auth_headers,
         json={"sha256_hex": sha256_hex, "size_bytes": len(content)},
     )
     assert verify_response.status_code == 200
     assert verify_response.json()["status"] == "VERIFIED"
     repeat_verify_response = client.post(
         "/v1/upload/verify",
+        headers=auth_headers,
         json={"sha256_hex": sha256_hex, "size_bytes": len(content)},
     )
     assert repeat_verify_response.status_code == 200
@@ -184,6 +466,7 @@ def test_upload_content_and_verify_writes_filesystem_and_promotes_sha(tmp_path: 
 
     handshake_response = client.post(
         "/v1/upload/metadata-handshake",
+        headers=auth_headers,
         json={"files": [{"client_file_id": 1, "sha256_hex": sha256_hex, "size_bytes": len(content)}]},
     )
     assert handshake_response.status_code == 200
@@ -224,16 +507,84 @@ def test_upload_content_and_verify_writes_filesystem_and_promotes_sha(tmp_path: 
     ]
 
 
-def test_verify_handles_filename_collision_with_deterministic_sha_suffix(tmp_path: Path) -> None:
+def test_upload_verify_populates_exif_metadata_when_available(tmp_path: Path) -> None:
     store = InMemoryUploadStateStore()
-    content = b"new-content"
+    content = _jpeg_with_exif_bytes()
     sha256_hex = hashlib.sha256(content).hexdigest()
-    client = TestClient(create_app(state_store=store, storage_root=tmp_path))
+    client = TestClient(create_app(state_store=store, storage_root=tmp_path, bootstrap_token="bootstrap-123"))
+    auth_headers = _approve_upload_client(client)
 
     upload_response = client.put(
         f"/v1/upload/content/{sha256_hex}",
         content=content,
-        headers=_upload_headers(size_bytes=len(content), job_name="Trip 1", original_filename="photo.jpg"),
+        headers=_with_auth_headers(
+            _upload_headers(
+                size_bytes=len(content),
+                job_name="EXIF Upload",
+                original_filename="IMG_4321.JPG",
+            ),
+            auth_headers,
+        ),
+    )
+    assert upload_response.status_code == 200
+    verify_response = client.post(
+        "/v1/upload/verify",
+        headers=auth_headers,
+        json={"sha256_hex": sha256_hex, "size_bytes": len(content)},
+    )
+    assert verify_response.status_code == 200
+    assert verify_response.json()["status"] == "VERIFIED"
+
+    catalog_response = client.get("/v1/admin/catalog")
+    assert catalog_response.status_code == 200
+    payload = catalog_response.json()
+    assert payload["total"] == 1
+    item = payload["items"][0]
+    assert item["extraction_status"] == "succeeded"
+    assert item["capture_timestamp_utc"] == "2026-04-21T12:15:16+00:00"
+    assert item["camera_make"] == "Canon"
+    assert item["camera_model"] == "EOS R6"
+    assert item["orientation"] == 6
+    assert item["lens_model"] == "RF24-70mm F2.8 L IS USM"
+    assert item["image_width"] == 7
+    assert item["image_height"] == 5
+    assert item["extraction_last_attempted_at_utc"] is not None
+    assert item["extraction_last_succeeded_at_utc"] is not None
+    assert item["extraction_last_failed_at_utc"] is None
+    assert item["extraction_failure_detail"] is None
+
+    # A repeated verify should be a no-op for extraction metadata.
+    repeat_verify_response = client.post(
+        "/v1/upload/verify",
+        headers=auth_headers,
+        json={"sha256_hex": sha256_hex, "size_bytes": len(content)},
+    )
+    assert repeat_verify_response.status_code == 200
+    assert repeat_verify_response.json()["status"] == "ALREADY_EXISTS"
+    repeat_catalog_item = client.get("/v1/admin/catalog").json()["items"][0]
+    assert repeat_catalog_item["capture_timestamp_utc"] == "2026-04-21T12:15:16+00:00"
+    assert repeat_catalog_item["camera_make"] == "Canon"
+    assert repeat_catalog_item["camera_model"] == "EOS R6"
+    assert repeat_catalog_item["orientation"] == 6
+    assert repeat_catalog_item["lens_model"] == "RF24-70mm F2.8 L IS USM"
+    assert repeat_catalog_item["image_width"] == 7
+    assert repeat_catalog_item["image_height"] == 5
+
+
+def test_verify_handles_filename_collision_with_deterministic_sha_suffix(tmp_path: Path) -> None:
+    store = InMemoryUploadStateStore()
+    content = b"new-content"
+    sha256_hex = hashlib.sha256(content).hexdigest()
+    client = TestClient(create_app(state_store=store, storage_root=tmp_path, bootstrap_token="bootstrap-123"))
+    auth_headers = _approve_upload_client(client)
+
+    upload_response = client.put(
+        f"/v1/upload/content/{sha256_hex}",
+        content=content,
+        headers=_with_auth_headers(
+            _upload_headers(size_bytes=len(content), job_name="Trip 1", original_filename="photo.jpg"),
+            auth_headers,
+        ),
     )
     assert upload_response.status_code == 200
     temp_record = store.get_temp_upload(sha256_hex)
@@ -245,6 +596,7 @@ def test_verify_handles_filename_collision_with_deterministic_sha_suffix(tmp_pat
 
     verify_response = client.post(
         "/v1/upload/verify",
+        headers=auth_headers,
         json={"sha256_hex": sha256_hex, "size_bytes": len(content)},
     )
     assert verify_response.status_code == 200
@@ -262,7 +614,8 @@ def test_storage_index_registers_existing_files_and_reindex_is_idempotent(tmp_pa
     first.write_bytes(content)
     second.write_bytes(content)
 
-    client = TestClient(create_app(storage_root=tmp_path))
+    client = TestClient(create_app(storage_root=tmp_path, bootstrap_token="bootstrap-123"))
+    auth_headers = _approve_upload_client(client)
     first_index = client.post("/v1/storage/index")
     assert first_index.status_code == 200
     assert first_index.json() == {
@@ -276,6 +629,7 @@ def test_storage_index_registers_existing_files_and_reindex_is_idempotent(tmp_pa
 
     handshake_response = client.post(
         "/v1/upload/metadata-handshake",
+        headers=auth_headers,
         json={"files": [{"client_file_id": 5, "sha256_hex": sha256_hex, "size_bytes": len(content)}]},
     )
     assert handshake_response.status_code == 200
@@ -312,7 +666,7 @@ def test_storage_index_records_extraction_failure_without_invalidating_catalog(t
     bad_path.parent.mkdir(parents=True, exist_ok=True)
     bad_path.write_text("not-an-image", encoding="utf-8")
 
-    client = TestClient(create_app(storage_root=tmp_path))
+    client = TestClient(create_app(storage_root=tmp_path, bootstrap_token="bootstrap-123"))
     response = client.post("/v1/storage/index")
     assert response.status_code == 200
     assert response.json()["indexed_files"] == 1
@@ -327,6 +681,271 @@ def test_storage_index_records_extraction_failure_without_invalidating_catalog(t
     assert item["extraction_status"] == "failed"
     assert item["extraction_last_failed_at_utc"] is not None
     assert "unsupported media format for extraction" in str(item["extraction_failure_detail"])
+
+
+def test_storage_index_records_invalid_jpeg_extraction_failure_without_invalidating_catalog(
+    tmp_path: Path,
+) -> None:
+    bad_path = tmp_path / "2026" / "04" / "Job_A" / "broken.jpg"
+    bad_path.parent.mkdir(parents=True, exist_ok=True)
+    bad_path.write_bytes(b"not-a-real-jpeg")
+
+    client = TestClient(create_app(storage_root=tmp_path, bootstrap_token="bootstrap-123"))
+    response = client.post("/v1/storage/index")
+    assert response.status_code == 200
+    assert response.json()["indexed_files"] == 1
+    assert response.json()["errors"] == 0
+
+    catalog_response = client.get("/v1/admin/catalog")
+    assert catalog_response.status_code == 200
+    payload = catalog_response.json()
+    assert payload["total"] == 1
+    item = payload["items"][0]
+    assert item["relative_path"] == "2026/04/Job_A/broken.jpg"
+    assert item["extraction_status"] == "failed"
+    assert item["extraction_last_failed_at_utc"] is not None
+    assert "invalid media content for extraction" in str(item["extraction_failure_detail"])
+    assert item["capture_timestamp_utc"] is None
+    assert item["camera_make"] is None
+    assert item["camera_model"] is None
+    assert item["orientation"] is None
+    assert item["lens_model"] is None
+    assert item["image_width"] is None
+    assert item["image_height"] is None
+
+
+def test_storage_index_populates_exif_metadata_via_shared_extraction_path(tmp_path: Path) -> None:
+    content = _jpeg_with_exif_bytes(
+        width=9,
+        height=4,
+        capture_timestamp="2026:04:21 10:11:12",
+        capture_offset="-05:00",
+        camera_make="NIKON CORPORATION",
+        camera_model="NIKON Zf",
+        orientation=1,
+        lens_model="NIKKOR Z 40mm f/2",
+    )
+    first = tmp_path / "2026" / "04" / "Job_A" / "exif-a.jpg"
+    second = tmp_path / "2026" / "04" / "Job_B" / "exif-b.jpg"
+    first.parent.mkdir(parents=True, exist_ok=True)
+    second.parent.mkdir(parents=True, exist_ok=True)
+    first.write_bytes(content)
+    second.write_bytes(content)
+
+    client = TestClient(create_app(storage_root=tmp_path))
+    first_index = client.post("/v1/storage/index")
+    assert first_index.status_code == 200
+    second_index = client.post("/v1/storage/index")
+    assert second_index.status_code == 200
+
+    catalog_response = client.get("/v1/admin/catalog")
+    assert catalog_response.status_code == 200
+    payload = catalog_response.json()
+    assert payload["total"] == 2
+    for item in payload["items"]:
+        assert item["extraction_status"] == "succeeded"
+        assert item["capture_timestamp_utc"] == "2026-04-21T15:11:12+00:00"
+        assert item["camera_make"] == "NIKON CORPORATION"
+        assert item["camera_model"] == "NIKON Zf"
+        assert item["orientation"] == 1
+        assert item["lens_model"] == "NIKKOR Z 40mm f/2"
+        assert item["image_width"] == 9
+        assert item["image_height"] == 4
+
+
+def test_admin_retry_extraction_for_failed_asset_succeeds_after_file_is_fixed(tmp_path: Path) -> None:
+    broken = tmp_path / "2026" / "04" / "Job_A" / "broken.jpg"
+    broken.parent.mkdir(parents=True, exist_ok=True)
+    broken.write_bytes(b"not-a-real-jpeg")
+    client = TestClient(create_app(storage_root=tmp_path))
+
+    first_index = client.post("/v1/storage/index")
+    assert first_index.status_code == 200
+    failed_item = client.get("/v1/admin/catalog").json()["items"][0]
+    assert failed_item["extraction_status"] == "failed"
+    first_failure_detail = failed_item["extraction_failure_detail"]
+    assert first_failure_detail is not None
+
+    broken.write_bytes(
+        _jpeg_with_exif_bytes(
+            width=12,
+            height=8,
+            capture_timestamp="2026:04:22 07:08:09",
+            capture_offset="+00:00",
+            camera_make="SONY",
+            camera_model="ILCE-7M4",
+            orientation=1,
+            lens_model="FE 35mm F1.8",
+        )
+    )
+    retry_response = client.post(
+        "/v1/admin/catalog/extraction/retry",
+        json={"relative_path": "2026/04/Job_A/broken.jpg"},
+    )
+    assert retry_response.status_code == 200
+    retried_item = retry_response.json()["item"]
+    assert retried_item["extraction_status"] == "succeeded"
+    assert retried_item["extraction_failure_detail"] is None
+    assert retried_item["camera_make"] == "SONY"
+    assert retried_item["camera_model"] == "ILCE-7M4"
+    assert retried_item["lens_model"] == "FE 35mm F1.8"
+    assert retried_item["image_width"] == 12
+    assert retried_item["image_height"] == 8
+    assert retried_item["extraction_last_succeeded_at_utc"] is not None
+    assert retried_item["extraction_last_failed_at_utc"] is None
+
+    catalog_item = client.get("/v1/admin/catalog").json()["items"][0]
+    assert catalog_item["extraction_status"] == "succeeded"
+    assert catalog_item["extraction_failure_detail"] is None
+
+
+def test_admin_retry_extraction_for_invalid_asset_stays_failed_and_updates_failure_detail(
+    tmp_path: Path, monkeypatch
+) -> None:
+    broken = tmp_path / "2026" / "04" / "Job_A" / "broken.jpg"
+    broken.parent.mkdir(parents=True, exist_ok=True)
+    broken.write_bytes(b"still-invalid")
+    client = TestClient(create_app(storage_root=tmp_path))
+
+    first_index = client.post("/v1/storage/index")
+    assert first_index.status_code == 200
+    before = client.get("/v1/admin/catalog").json()["items"][0]
+    assert before["extraction_status"] == "failed"
+    assert before["extraction_last_attempted_at_utc"] is not None
+
+    def _forced_failure(_: Path) -> dict[str, str | int | None]:
+        raise ValueError("forced retry failure detail")
+
+    monkeypatch.setattr(app_module, "_extract_media_metadata", _forced_failure)
+    retry_response = client.post(
+        "/v1/admin/catalog/extraction/retry",
+        json={"relative_path": "2026/04/Job_A/broken.jpg"},
+    )
+    assert retry_response.status_code == 200
+    after = retry_response.json()["item"]
+    assert after["extraction_status"] == "failed"
+    assert after["extraction_failure_detail"] == "forced retry failure detail"
+    assert after["extraction_last_attempted_at_utc"] is not None
+    assert after["extraction_last_failed_at_utc"] is not None
+    assert after["extraction_last_succeeded_at_utc"] is None
+
+    before_attempted = datetime.fromisoformat(before["extraction_last_attempted_at_utc"])
+    after_attempted = datetime.fromisoformat(after["extraction_last_attempted_at_utc"])
+    assert after_attempted >= before_attempted
+
+
+def test_admin_backfill_processes_pending_and_failed_assets_via_shared_extraction_path(
+    tmp_path: Path,
+) -> None:
+    pending_path = "2026/04/Job_A/pending.jpg"
+    failed_path = "2026/04/Job_A/failed.jpg"
+    pending_file = tmp_path / pending_path
+    failed_file = tmp_path / failed_path
+    pending_file.parent.mkdir(parents=True, exist_ok=True)
+    pending_content = _jpeg_with_exif_bytes(camera_make="FUJIFILM", camera_model="X-T5")
+    failed_content = _jpeg_with_exif_bytes(camera_make="Nikon", camera_model="Z 6II")
+    pending_file.write_bytes(pending_content)
+    failed_file.write_bytes(failed_content)
+
+    pending_sha = hashlib.sha256(pending_content).hexdigest()
+    failed_sha = hashlib.sha256(failed_content).hexdigest()
+    now = "2026-04-22T08:00:00+00:00"
+    store = InMemoryUploadStateStore()
+    store.mark_sha_verified(pending_sha)
+    store.mark_sha_verified(failed_sha)
+    store.upsert_stored_file(
+        relative_path=pending_path,
+        sha256_hex=pending_sha,
+        size_bytes=len(pending_content),
+        source_kind="index_scan",
+        seen_at_utc=now,
+    )
+    store.upsert_media_asset(
+        relative_path=pending_path,
+        sha256_hex=pending_sha,
+        size_bytes=len(pending_content),
+        origin_kind="indexed",
+        observed_at_utc=now,
+    )
+    store.upsert_stored_file(
+        relative_path=failed_path,
+        sha256_hex=failed_sha,
+        size_bytes=len(failed_content),
+        source_kind="index_scan",
+        seen_at_utc=now,
+    )
+    store.upsert_media_asset(
+        relative_path=failed_path,
+        sha256_hex=failed_sha,
+        size_bytes=len(failed_content),
+        origin_kind="indexed",
+        observed_at_utc=now,
+    )
+    store.upsert_media_asset_extraction(
+        relative_path=failed_path,
+        extraction_status="failed",
+        attempted_at_utc=now,
+        succeeded_at_utc=None,
+        failed_at_utc=now,
+        failure_detail="old failure",
+        capture_timestamp_utc=None,
+        camera_make=None,
+        camera_model=None,
+        image_width=None,
+        image_height=None,
+        orientation=None,
+        lens_model=None,
+        recorded_at_utc=now,
+    )
+
+    client = TestClient(create_app(state_store=store, storage_root=tmp_path))
+    response = client.post(
+        "/v1/admin/catalog/extraction/backfill",
+        json={"target_statuses": ["pending", "failed"], "limit": 10},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["requested_statuses"] == ["pending", "failed"]
+    assert payload["selected_count"] == 2
+    assert payload["processed_count"] == 2
+    assert payload["succeeded_count"] == 2
+    assert payload["failed_count"] == 0
+    assert all(item["extraction_status"] == "succeeded" for item in payload["items"])
+
+    catalog_response = client.get("/v1/admin/catalog")
+    assert catalog_response.status_code == 200
+    catalog_by_path = {item["relative_path"]: item for item in catalog_response.json()["items"]}
+    assert catalog_by_path[pending_path]["extraction_status"] == "succeeded"
+    assert catalog_by_path[failed_path]["extraction_status"] == "succeeded"
+    assert catalog_by_path[pending_path]["camera_make"] == "FUJIFILM"
+    assert catalog_by_path[failed_path]["camera_model"] == "Z 6II"
+
+
+def test_admin_backfill_is_sane_for_repeated_runs(tmp_path: Path) -> None:
+    file_path = tmp_path / "2026" / "04" / "Job_A" / "one.jpg"
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    content = _jpeg_with_exif_bytes()
+    file_path.write_bytes(content)
+
+    client = TestClient(create_app(storage_root=tmp_path))
+    first_index = client.post("/v1/storage/index")
+    assert first_index.status_code == 200
+    first_backfill = client.post("/v1/admin/catalog/extraction/backfill", json={})
+    assert first_backfill.status_code == 200
+    assert first_backfill.json()["selected_count"] == 0
+    assert first_backfill.json()["processed_count"] == 0
+
+    retry_response = client.post(
+        "/v1/admin/catalog/extraction/retry",
+        json={"relative_path": "2026/04/Job_A/one.jpg"},
+    )
+    assert retry_response.status_code == 200
+    assert retry_response.json()["item"]["extraction_status"] == "succeeded"
+
+    second_backfill = client.post("/v1/admin/catalog/extraction/backfill", json={})
+    assert second_backfill.status_code == 200
+    assert second_backfill.json()["selected_count"] == 0
+    assert second_backfill.json()["processed_count"] == 0
 
 
 def test_storage_index_counts_same_path_conflict_and_updates_metadata(tmp_path: Path) -> None:
@@ -384,7 +1003,8 @@ def test_storage_index_ignores_temp_uploads_content(tmp_path: Path) -> None:
     real_file.write_bytes(stored_content)
     temp_file.write_bytes(temp_content)
 
-    client = TestClient(create_app(storage_root=tmp_path))
+    client = TestClient(create_app(storage_root=tmp_path, bootstrap_token="bootstrap-123"))
+    auth_headers = _approve_upload_client(client)
     response = client.post("/v1/storage/index")
 
     assert response.status_code == 200
@@ -399,6 +1019,7 @@ def test_storage_index_ignores_temp_uploads_content(tmp_path: Path) -> None:
 
     handshake_response = client.post(
         "/v1/upload/metadata-handshake",
+        headers=auth_headers,
         json={"files": [{"client_file_id": 9, "sha256_hex": stored_sha, "size_bytes": len(stored_content)}]},
     )
     assert handshake_response.status_code == 200
@@ -523,9 +1144,11 @@ def test_admin_latest_index_run_is_none_before_any_scan(tmp_path: Path) -> None:
 
 
 def test_verify_returns_verify_failed_when_content_not_uploaded(tmp_path: Path) -> None:
-    client = TestClient(create_app(storage_root=tmp_path))
+    client = TestClient(create_app(storage_root=tmp_path, bootstrap_token="bootstrap-123"))
+    auth_headers = _approve_upload_client(client)
     response = client.post(
         "/v1/upload/verify",
+        headers=auth_headers,
         json={"sha256_hex": "f" * 64, "size_bytes": 10},
     )
     assert response.status_code == 200
@@ -715,6 +1338,157 @@ def test_admin_catalog_returns_paged_results(tmp_path: Path) -> None:
             }
         ],
     }
+
+
+def test_admin_catalog_filters_by_extraction_status_and_origin(tmp_path: Path) -> None:
+    store = InMemoryUploadStateStore()
+    t1 = "2026-04-22T09:00:00+00:00"
+    t2 = "2026-04-22T10:00:00+00:00"
+    t3 = "2026-04-22T11:00:00+00:00"
+    store.upsert_stored_file(
+        relative_path="2026/04/Job_A/pending.jpg",
+        sha256_hex="a" * 64,
+        size_bytes=100,
+        source_kind="index_scan",
+        seen_at_utc=t1,
+    )
+    store.upsert_media_asset(
+        relative_path="2026/04/Job_A/pending.jpg",
+        sha256_hex="a" * 64,
+        size_bytes=100,
+        origin_kind="indexed",
+        observed_at_utc=t1,
+    )
+    store.upsert_stored_file(
+        relative_path="2026/04/Job_A/failed.jpg",
+        sha256_hex="b" * 64,
+        size_bytes=200,
+        source_kind="upload_verify",
+        seen_at_utc=t2,
+    )
+    store.upsert_media_asset(
+        relative_path="2026/04/Job_A/failed.jpg",
+        sha256_hex="b" * 64,
+        size_bytes=200,
+        origin_kind="uploaded",
+        observed_at_utc=t2,
+    )
+    store.upsert_media_asset_extraction(
+        relative_path="2026/04/Job_A/failed.jpg",
+        extraction_status="failed",
+        attempted_at_utc=t2,
+        succeeded_at_utc=None,
+        failed_at_utc=t2,
+        failure_detail="invalid media content",
+        capture_timestamp_utc=None,
+        camera_make=None,
+        camera_model=None,
+        image_width=None,
+        image_height=None,
+        orientation=None,
+        lens_model=None,
+        recorded_at_utc=t2,
+    )
+    store.upsert_stored_file(
+        relative_path="2026/04/Job_A/succeeded.jpg",
+        sha256_hex="c" * 64,
+        size_bytes=300,
+        source_kind="upload_verify",
+        seen_at_utc=t3,
+    )
+    store.upsert_media_asset(
+        relative_path="2026/04/Job_A/succeeded.jpg",
+        sha256_hex="c" * 64,
+        size_bytes=300,
+        origin_kind="uploaded",
+        observed_at_utc=t3,
+    )
+    store.upsert_media_asset_extraction(
+        relative_path="2026/04/Job_A/succeeded.jpg",
+        extraction_status="succeeded",
+        attempted_at_utc=t3,
+        succeeded_at_utc=t3,
+        failed_at_utc=None,
+        failure_detail=None,
+        capture_timestamp_utc="2026-04-22T10:50:00+00:00",
+        camera_make="Canon",
+        camera_model="R6",
+        image_width=1000,
+        image_height=800,
+        orientation=1,
+        lens_model="RF 24-70",
+        recorded_at_utc=t3,
+    )
+
+    client = TestClient(create_app(state_store=store, storage_root=tmp_path))
+    pending_response = client.get("/v1/admin/catalog?extraction_status=pending")
+    assert pending_response.status_code == 200
+    assert [item["relative_path"] for item in pending_response.json()["items"]] == [
+        "2026/04/Job_A/pending.jpg"
+    ]
+
+    failed_response = client.get("/v1/admin/catalog?extraction_status=failed")
+    assert failed_response.status_code == 200
+    assert [item["relative_path"] for item in failed_response.json()["items"]] == [
+        "2026/04/Job_A/failed.jpg"
+    ]
+
+    origin_response = client.get("/v1/admin/catalog?origin_kind=indexed")
+    assert origin_response.status_code == 200
+    assert [item["relative_path"] for item in origin_response.json()["items"]] == [
+        "2026/04/Job_A/pending.jpg"
+    ]
+
+
+def test_admin_catalog_filters_by_catalog_date_and_pagination(tmp_path: Path) -> None:
+    store = InMemoryUploadStateStore()
+    t1 = "2026-04-22T09:00:00+00:00"
+    t2 = "2026-04-22T10:00:00+00:00"
+    t3 = "2026-04-22T11:00:00+00:00"
+    for idx, seen_at in enumerate((t1, t2, t3), start=1):
+        rel = f"2026/04/Job_A/{idx}.jpg"
+        sha = f"{idx:x}" * 64
+        store.upsert_stored_file(
+            relative_path=rel,
+            sha256_hex=sha,
+            size_bytes=100 + idx,
+            source_kind="index_scan",
+            seen_at_utc=seen_at,
+        )
+        store.upsert_media_asset(
+            relative_path=rel,
+            sha256_hex=sha,
+            size_bytes=100 + idx,
+            origin_kind="indexed",
+            observed_at_utc=seen_at,
+        )
+
+    client = TestClient(create_app(state_store=store, storage_root=tmp_path))
+    filtered = client.get("/v1/admin/catalog?cataloged_since_utc=2026-04-22T10:00:00+00:00")
+    assert filtered.status_code == 200
+    assert filtered.json()["total"] == 2
+    assert [item["relative_path"] for item in filtered.json()["items"]] == [
+        "2026/04/Job_A/3.jpg",
+        "2026/04/Job_A/2.jpg",
+    ]
+
+    paged = client.get(
+        "/v1/admin/catalog?cataloged_since_utc=2026-04-22T09:00:00+00:00&limit=1&offset=1"
+    )
+    assert paged.status_code == 200
+    assert paged.json()["total"] == 3
+    assert [item["relative_path"] for item in paged.json()["items"]] == ["2026/04/Job_A/2.jpg"]
+
+
+def test_admin_catalog_rejects_invalid_filter_values(tmp_path: Path) -> None:
+    client = TestClient(create_app(storage_root=tmp_path))
+    bad_status = client.get("/v1/admin/catalog?extraction_status=unknown")
+    assert bad_status.status_code == 400
+    assert "invalid extraction_status filter" in str(bad_status.json().get("detail"))
+
+    bad_origin = client.get("/v1/admin/catalog?origin_kind=other")
+    assert bad_origin.status_code == 400
+    assert "invalid origin_kind filter" in str(bad_origin.json().get("detail"))
 
 
 def test_admin_files_empty_state(tmp_path: Path) -> None:

@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+{% set title = "Clients" %}
+{% block content %}
+<section class="panel">
+  <h1 style="margin-top:0;">Client Approval</h1>
+  <p class="muted" style="margin-top:0.25rem;">Showing {{ start_index }}-{{ end_index }} of {{ total }} enrolled clients.</p>
+
+  {% if clients %}
+  <table>
+    <thead>
+      <tr>
+        <th>Client</th>
+        <th>Status</th>
+        <th>First Seen</th>
+        <th>Last Enrolled</th>
+        <th>Approved At</th>
+        <th>Revoked At</th>
+        <th>Token</th>
+        <th>Actions</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for client in clients %}
+      <tr>
+        <td>
+          <div class="stack">
+            <strong>{{ client.display_name }}</strong>
+            <span class="mono">{{ client.client_id }}</span>
+          </div>
+        </td>
+        <td><span class="badge {{ client.enrollment_status }}">{{ client.enrollment_status }}</span></td>
+        <td class="mono">{{ client.first_seen_at_utc }}</td>
+        <td class="mono">{{ client.last_enrolled_at_utc }}</td>
+        <td class="mono">{{ client.approved_at_utc or "-" }}</td>
+        <td class="mono">{{ client.revoked_at_utc or "-" }}</td>
+        <td class="mono">{{ "issued" if client.auth_token else "-" }}</td>
+        <td>
+          <div class="actions-inline">
+            <form method="post" action="/clients/actions/approve">
+              <input type="hidden" name="client_id" value="{{ client.client_id }}">
+              <input type="hidden" name="page" value="{{ page }}">
+              <button class="primary" type="submit">Approve</button>
+            </form>
+            <form method="post" action="/clients/actions/revoke">
+              <input type="hidden" name="client_id" value="{{ client.client_id }}">
+              <input type="hidden" name="page" value="{{ page }}">
+              <button type="submit">Revoke</button>
+            </form>
+          </div>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">No enrolled clients yet.</p>
+  {% endif %}
+
+  <div class="pager">
+    {% if has_previous %}
+    <a href="/clients?page={{ page - 1 }}">Previous</a>
+    {% endif %}
+    <span class="muted">Page {{ page }}</span>
+    {% if has_next %}
+    <a href="/clients?page={{ page + 1 }}">Next</a>
+    {% endif %}
+  </div>
+</section>
+{% endblock %}

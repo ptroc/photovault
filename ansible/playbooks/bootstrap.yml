@@ -78,6 +78,20 @@
         line: "PHOTOVAULT_API_STORAGE_ROOT="
         insertafter: EOF
 
+    - name: Ensure photovault-clientd server base URL variable exists in env file
+      ansible.builtin.lineinfile:
+        path: "{{ photovault_env_dir }}/photovault-clientd.env"
+        regexp: "^PHOTOVAULT_SERVER_BASE_URL="
+        line: "PHOTOVAULT_SERVER_BASE_URL="
+        insertafter: EOF
+
+    - name: Ensure photovault-clientd bootstrap token variable exists in env file
+      ansible.builtin.lineinfile:
+        path: "{{ photovault_env_dir }}/photovault-clientd.env"
+        regexp: "^PHOTOVAULT_CLIENT_BOOTSTRAP_TOKEN="
+        line: "PHOTOVAULT_CLIENT_BOOTSTRAP_TOKEN="
+        insertafter: EOF
+
     - name: Install systemd unit files
       ansible.builtin.copy:
         src: "{{ playbook_dir }}/../../deploy/systemd/{{ item }}"

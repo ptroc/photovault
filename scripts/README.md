@@ -13,7 +13,8 @@ The deploy path now validates:
 - `PHOTOVAULT_API_STORAGE_ROOT` is configured, defaulting to `/storage/photovault` if unset
 - the storage root exists and is writable by the `photovault` service user
 - API/client/server UI health endpoints respond after post-restart retry polling
-- a deterministic M4 smoke file can be indexed and then deduplicated by SHA
+- a deterministic M4 smoke file can be indexed and observed via admin files/latest-index-run
+- privileged upload handshake enforces client auth (`CLIENT_AUTH_REQUIRED`)
 
 Examples:
 
@@ -34,5 +35,6 @@ source .venv/bin/activate
 ```
 
 The helper writes a deterministic fixture at `_photovault_smoke/m4/manual-smoke.txt`,
-runs `POST /v1/storage/index`, checks that metadata handshake returns `ALREADY_EXISTS`
-for that fixture SHA, and confirms the latest index run plus admin files view reflect it.
+runs `POST /v1/storage/index`, confirms the latest index run plus admin files view reflect
+the fixture SHA/path, and verifies unauthenticated metadata handshake is rejected with
+`CLIENT_AUTH_REQUIRED`.

@@ -80,7 +80,15 @@ DETECTED_MEDIA_EVENT_TYPES = (
     DETECTED_MEDIA_EVENT_REMOVED,
 )
 
-LATEST_SCHEMA_VERSION = 5
+LATEST_SCHEMA_VERSION = 6
+CLIENT_ENROLLMENT_PENDING = "pending"
+CLIENT_ENROLLMENT_APPROVED = "approved"
+CLIENT_ENROLLMENT_REVOKED = "revoked"
+CLIENT_ENROLLMENT_STATUSES = (
+    CLIENT_ENROLLMENT_PENDING,
+    CLIENT_ENROLLMENT_APPROVED,
+    CLIENT_ENROLLMENT_REVOKED,
+)
 
 
 def validate_recovery_policy() -> None:
@@ -268,12 +276,35 @@ def _apply_migration_v5(conn: sqlite3.Connection) -> None:
     )
 
 
+def _apply_migration_v6(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS server_auth_state (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            client_id TEXT NOT NULL,
+            display_name TEXT NOT NULL,
+            enrollment_status TEXT NOT NULL,
+            auth_token TEXT,
+            server_first_seen_at_utc TEXT,
+            server_last_enrolled_at_utc TEXT,
+            approved_at_utc TEXT,
+            revoked_at_utc TEXT,
+            last_enrollment_attempt_at_utc TEXT,
+            last_enrollment_result_at_utc TEXT,
+            last_error TEXT,
+            updated_at_utc TEXT NOT NULL
+        );
+        """
+    )
+
+
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     1: _apply_migration_v1,
     2: _apply_migration_v2,
     3: _apply_migration_v3,
     4: _apply_migration_v4,
     5: _apply_migration_v5,
+    6: _apply_migration_v6,
 }
 
 
@@ -544,7 +575,123 @@ def run_state_invariant_checks(conn: sqlite3.Connection) -> list[str]:
     if row and row[0] > 0:
         issues.append(f"detected_media_events has rows with missing media reference: {row[0]} row(s)")
 
+    client_enrollment_statuses = tuple(CLIENT_ENROLLMENT_STATUSES)
+    client_enrollment_placeholders = ",".join("?" for _ in client_enrollment_statuses)
+    row = conn.execute(
+        f"""
+        SELECT COUNT(1)
+        FROM server_auth_state
+        WHERE enrollment_status NOT IN ({client_enrollment_placeholders});
+        """,
+        client_enrollment_statuses,
+    ).fetchone()
+    if row and row[0] > 0:
+        issues.append(f"server_auth_state contains unknown enrollment_status values: {row[0]} row(s)")
+
     return issues
+
+
+def fetch_server_auth_state(conn: sqlite3.Connection) -> dict[str, object] | None:
+    row = conn.execute(
+        """
+        SELECT
+            client_id,
+            display_name,
+            enrollment_status,
+            auth_token,
+            server_first_seen_at_utc,
+            server_last_enrolled_at_utc,
+            approved_at_utc,
+            revoked_at_utc,
+            last_enrollment_attempt_at_utc,
+            last_enrollment_result_at_utc,
+            last_error,
+            updated_at_utc
+        FROM server_auth_state
+        WHERE id = 1;
+        """
+    ).fetchone()
+    if row is None:
+        return None
+    return {
+        "client_id": str(row[0]),
+        "display_name": str(row[1]),
+        "enrollment_status": str(row[2]),
+        "auth_token": row[3],
+        "server_first_seen_at_utc": row[4],
+        "server_last_enrolled_at_utc": row[5],
+        "approved_at_utc": row[6],
+        "revoked_at_utc": row[7],
+        "last_enrollment_attempt_at_utc": row[8],
+        "last_enrollment_result_at_utc": row[9],
+        "last_error": row[10],
+        "updated_at_utc": str(row[11]),
+    }
+
+
+def upsert_server_auth_state(
+    conn: sqlite3.Connection,
+    *,
+    client_id: str,
+    display_name: str,
+    enrollment_status: str,
+    auth_token: str | None,
+    server_first_seen_at_utc: str | None,
+    server_last_enrolled_at_utc: str | None,
+    approved_at_utc: str | None,
+    revoked_at_utc: str | None,
+    last_enrollment_attempt_at_utc: str | None,
+    last_enrollment_result_at_utc: str | None,
+    last_error: str | None,
+    updated_at_utc: str,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO server_auth_state (
+            id,
+            client_id,
+            display_name,
+            enrollment_status,
+            auth_token,
+            server_first_seen_at_utc,
+            server_last_enrolled_at_utc,
+            approved_at_utc,
+            revoked_at_utc,
+            last_enrollment_attempt_at_utc,
+            last_enrollment_result_at_utc,
+            last_error,
+            updated_at_utc
+        )
+        VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE
+        SET client_id = excluded.client_id,
+            display_name = excluded.display_name,
+            enrollment_status = excluded.enrollment_status,
+            auth_token = excluded.auth_token,
+            server_first_seen_at_utc = excluded.server_first_seen_at_utc,
+            server_last_enrolled_at_utc = excluded.server_last_enrolled_at_utc,
+            approved_at_utc = excluded.approved_at_utc,
+            revoked_at_utc = excluded.revoked_at_utc,
+            last_enrollment_attempt_at_utc = excluded.last_enrollment_attempt_at_utc,
+            last_enrollment_result_at_utc = excluded.last_enrollment_result_at_utc,
+            last_error = excluded.last_error,
+            updated_at_utc = excluded.updated_at_utc;
+        """,
+        (
+            client_id,
+            display_name,
+            enrollment_status,
+            auth_token,
+            server_first_seen_at_utc,
+            server_last_enrolled_at_utc,
+            approved_at_utc,
+            revoked_at_utc,
+            last_enrollment_attempt_at_utc,
+            last_enrollment_result_at_utc,
+            last_error,
+            updated_at_utc,
+        ),
+    )
 
 
 def fetch_network_ap_config(conn: sqlite3.Connection) -> dict[str, object] | None:

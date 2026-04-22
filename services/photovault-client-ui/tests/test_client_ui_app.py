@@ -60,11 +60,27 @@ def _dependency_snapshot() -> list[dict[str, str]]:
     ]
 
 
-def _overview_payloads(daemon_state: str = "WAIT_NETWORK") -> dict[str, object]:
+def _overview_payloads(
+    daemon_state: str = "WAIT_NETWORK",
+    *,
+    server_auth: dict[str, object] | None = None,
+) -> dict[str, object]:
+    effective_server_auth: dict[str, object] = (
+        server_auth
+        if server_auth is not None
+        else {
+            "client_id": "pi-test",
+            "display_name": "Pi Test",
+            "enrollment_status": "approved",
+            "auth_token": "token-1",
+            "last_error": None,
+        }
+    )
     return {
         "/state": {
             "current_state": daemon_state,
             "updated_at_utc": "2026-04-19T16:51:44.120670+00:00",
+            "server_auth": effective_server_auth,
         },
         "/diagnostics/m0": {
             "ok": True,
@@ -371,6 +387,81 @@ def test_overview_surfaces_blocked_state_guidance_for_storage_pause() -> None:
     assert "Storage health pause" in body
     assert "Restore storage health, then run one daemon tick to resume." in body
     assert "Resolve blocked conditions first, then run one daemon tick to confirm recovery." in body
+
+
+def test_overview_surfaces_pending_client_auth_block_guidance() -> None:
+    payloads = _overview_payloads(
+        server_auth={
+            "client_id": "pi-test",
+            "display_name": "Pi Test",
+            "enrollment_status": "pending",
+            "auth_token": None,
+            "last_error": "CLIENT_PENDING_APPROVAL",
+        }
+    )
+
+    def fake_daemon_get(_: str, path: str) -> object:
+        return payloads[path]
+
+    app = create_app(
+        daemon_get=fake_daemon_get,
+        network_snapshot_get=_network_snapshot,
+        dependency_snapshot_get=_dependency_snapshot,
+    )
+    body = app.test_client().get("/").get_data(as_text=True)
+
+    assert "Client enrollment pending approval" in body
+    assert "Approve this client from the server UI, then run one daemon tick." in body
+
+
+def test_overview_surfaces_revoked_client_auth_block_guidance() -> None:
+    payloads = _overview_payloads(
+        server_auth={
+            "client_id": "pi-test",
+            "display_name": "Pi Test",
+            "enrollment_status": "revoked",
+            "auth_token": "token-1",
+            "last_error": "CLIENT_REVOKED",
+        }
+    )
+
+    def fake_daemon_get(_: str, path: str) -> object:
+        return payloads[path]
+
+    app = create_app(
+        daemon_get=fake_daemon_get,
+        network_snapshot_get=_network_snapshot,
+        dependency_snapshot_get=_dependency_snapshot,
+    )
+    body = app.test_client().get("/").get_data(as_text=True)
+
+    assert "Client access revoked" in body
+    assert "Re-approve the client on the server if access should be restored." in body
+
+
+def test_overview_surfaces_invalid_client_auth_block_guidance() -> None:
+    payloads = _overview_payloads(
+        server_auth={
+            "client_id": "pi-test",
+            "display_name": "Pi Test",
+            "enrollment_status": "approved",
+            "auth_token": "token-1",
+            "last_error": "CLIENT_AUTH_INVALID",
+        }
+    )
+
+    def fake_daemon_get(_: str, path: str) -> object:
+        return payloads[path]
+
+    app = create_app(
+        daemon_get=fake_daemon_get,
+        network_snapshot_get=_network_snapshot,
+        dependency_snapshot_get=_dependency_snapshot,
+    )
+    body = app.test_client().get("/").get_data(as_text=True)
+
+    assert "Client auth rejected by server" in body
+    assert "CLIENT_AUTH_INVALID" in body
 
 
 def test_jobs_page_renders_filtered_views() -> None:

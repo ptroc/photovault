@@ -50,6 +50,9 @@ def test_open_db_upgrades_legacy_v1_schema_to_latest(tmp_path: Path) -> None:
     detected_media_events_table = upgraded.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='detected_media_events';"
     ).fetchone()
+    server_auth_state_table = upgraded.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='server_auth_state';"
+    ).fetchone()
     legacy_row = upgraded.execute("SELECT media_label FROM ingest_jobs WHERE id = 1;").fetchone()
     upgraded.close()
 
@@ -59,6 +62,7 @@ def test_open_db_upgrades_legacy_v1_schema_to_latest(tmp_path: Path) -> None:
     assert network_ap_config_table is not None
     assert detected_media_table is not None
     assert detected_media_events_table is not None
+    assert server_auth_state_table is not None
     assert legacy_row is not None
     assert legacy_row[0] == "legacy-sd"
 

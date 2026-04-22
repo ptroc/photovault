@@ -3,15 +3,17 @@
 import hashlib
 import os
 import re
-import struct
+import secrets
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query, Request
+from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel, Field
 
 from photovault_api.state_store import (
+    ClientRecord,
     InMemoryUploadStateStore,
     PostgresUploadStateStore,
     StorageIndexRunRecord,
@@ -125,6 +127,28 @@ class AdminCatalogListResponse(BaseModel):
     items: list[AdminCatalogItem]
 
 
+class AdminRetryExtractionRequest(BaseModel):
+    relative_path: str = Field(min_length=1)
+
+
+class AdminRetryExtractionResponse(BaseModel):
+    item: AdminCatalogItem
+
+
+class AdminBackfillExtractionRequest(BaseModel):
+    target_statuses: list[str] = Field(default_factory=lambda: ["pending", "failed"], min_length=1)
+    limit: int = Field(default=100, ge=1, le=500)
+
+
+class AdminBackfillExtractionResponse(BaseModel):
+    requested_statuses: list[str]
+    selected_count: int
+    processed_count: int
+    succeeded_count: int
+    failed_count: int
+    items: list[AdminCatalogItem]
+
+
 class LatestIndexRunResponse(BaseModel):
     scanned_files: int
     indexed_files: int
@@ -168,6 +192,49 @@ class PathConflictListResponse(BaseModel):
     items: list[PathConflictItem]
 
 
+class ClientEnrollmentStatus(StrEnum):
+    PENDING = "pending"
+    APPROVED = "approved"
+    REVOKED = "revoked"
+
+
+class BootstrapEnrollRequest(BaseModel):
+    client_id: str = Field(min_length=1, max_length=200)
+    display_name: str = Field(min_length=1, max_length=200)
+    bootstrap_token: str = Field(min_length=1)
+
+
+class BootstrapEnrollResponse(BaseModel):
+    client_id: str
+    display_name: str
+    enrollment_status: ClientEnrollmentStatus
+    auth_token: str | None
+    first_seen_at_utc: str
+    last_enrolled_at_utc: str
+
+
+class AdminClientItem(BaseModel):
+    client_id: str
+    display_name: str
+    enrollment_status: ClientEnrollmentStatus
+    first_seen_at_utc: str
+    last_enrolled_at_utc: str
+    approved_at_utc: str | None
+    revoked_at_utc: str | None
+    auth_token: str | None
+
+
+class AdminClientListResponse(BaseModel):
+    total: int
+    limit: int
+    offset: int
+    items: list[AdminClientItem]
+
+
+class AdminClientActionResponse(BaseModel):
+    item: AdminClientItem
+
+
 def _sanitize_component(raw_value: str, *, default_value: str) -> str:
     normalized = raw_value.strip()
     if not normalized:
@@ -209,79 +276,78 @@ def _catalog_origin_for_source_kind(source_kind: str) -> str:
     return "indexed"
 
 
-def _extract_png_dimensions(path: Path) -> tuple[int, int]:
-    with path.open("rb") as handle:
-        header = handle.read(24)
-    if len(header) < 24 or header[:8] != b"\x89PNG\r\n\x1a\n" or header[12:16] != b"IHDR":
-        raise ValueError("invalid PNG structure")
-    width, height = struct.unpack(">II", header[16:24])
-    return int(width), int(height)
+def _normalize_exif_text(value: object) -> str | None:
+    if isinstance(value, bytes):
+        decoded = value.decode("utf-8", errors="ignore").strip()
+        return decoded or None
+    if isinstance(value, str):
+        stripped = value.strip()
+        return stripped or None
+    return None
 
 
-def _extract_jpeg_dimensions(path: Path) -> tuple[int, int]:
-    with path.open("rb") as handle:
-        if handle.read(2) != b"\xff\xd8":
-            raise ValueError("invalid JPEG header")
-        while True:
-            marker_prefix = handle.read(1)
-            if not marker_prefix:
-                break
-            if marker_prefix != b"\xff":
-                continue
-            marker = handle.read(1)
-            while marker == b"\xff":
-                marker = handle.read(1)
-            if not marker:
-                break
-            marker_value = marker[0]
-            if marker_value in (0xD8, 0xD9):
-                continue
-            length_bytes = handle.read(2)
-            if len(length_bytes) != 2:
-                break
-            segment_length = struct.unpack(">H", length_bytes)[0]
-            if segment_length < 2:
-                raise ValueError("invalid JPEG segment length")
-            if marker_value in (
-                0xC0,
-                0xC1,
-                0xC2,
-                0xC3,
-                0xC5,
-                0xC6,
-                0xC7,
-                0xC9,
-                0xCA,
-                0xCB,
-                0xCD,
-                0xCE,
-                0xCF,
-            ):
-                payload = handle.read(segment_length - 2)
-                if len(payload) < 5:
-                    break
-                height, width = struct.unpack(">HH", payload[1:5])
-                return int(width), int(height)
-            handle.seek(segment_length - 2, os.SEEK_CUR)
-    raise ValueError("unable to locate JPEG dimensions")
+def _normalize_exif_int(value: object) -> int | None:
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return None
+        try:
+            return int(stripped)
+        except ValueError:
+            return None
+    return None
+
+
+def _extract_capture_timestamp_utc(exif_map: object) -> str | None:
+    if not hasattr(exif_map, "get"):
+        return None
+
+    # EXIF DateTimeOriginal and OffsetTimeOriginal.
+    raw_timestamp = _normalize_exif_text(exif_map.get(36867) or exif_map.get(306))
+    raw_offset = _normalize_exif_text(exif_map.get(36881) or exif_map.get(36880))
+    if raw_timestamp is None:
+        return None
+
+    try:
+        parsed = datetime.strptime(raw_timestamp, "%Y:%m:%d %H:%M:%S")
+    except ValueError:
+        return None
+
+    if raw_offset:
+        try:
+            parsed_offset = datetime.strptime(raw_offset, "%z").tzinfo
+        except ValueError:
+            parsed_offset = None
+        if parsed_offset is not None:
+            return parsed.replace(tzinfo=parsed_offset).astimezone(UTC).isoformat()
+
+    # If EXIF omits timezone, keep deterministic behavior by treating it as UTC.
+    return parsed.replace(tzinfo=UTC).isoformat()
 
 
 def _extract_media_metadata(path: Path) -> dict[str, str | int | None]:
     file_suffix = path.suffix.lower()
-    if file_suffix == ".png":
-        width, height = _extract_png_dimensions(path)
-    elif file_suffix in {".jpg", ".jpeg"}:
-        width, height = _extract_jpeg_dimensions(path)
-    else:
+    if file_suffix not in {".png", ".jpg", ".jpeg"}:
         raise ValueError(f"unsupported media format for extraction: {file_suffix or 'unknown'}")
+
+    try:
+        with Image.open(path) as image:
+            image.load()
+            width, height = image.size
+            exif_map = image.getexif()
+    except (UnidentifiedImageError, OSError, SyntaxError, ValueError) as exc:
+        raise ValueError(f"invalid media content for extraction: {exc}") from exc
+
     return {
-        "capture_timestamp_utc": None,
-        "camera_make": None,
-        "camera_model": None,
-        "image_width": width,
-        "image_height": height,
-        "orientation": None,
-        "lens_model": None,
+        "capture_timestamp_utc": _extract_capture_timestamp_utc(exif_map),
+        "camera_make": _normalize_exif_text(exif_map.get(271)),
+        "camera_model": _normalize_exif_text(exif_map.get(272)),
+        "image_width": int(width),
+        "image_height": int(height),
+        "orientation": _normalize_exif_int(exif_map.get(274)),
+        "lens_model": _normalize_exif_text(exif_map.get(42036)),
     }
 
 
@@ -366,12 +432,91 @@ def _attempt_media_extraction(
     )
 
 
+def _to_admin_catalog_item(record: object) -> AdminCatalogItem:
+    return AdminCatalogItem(
+        relative_path=str(record.relative_path),
+        sha256_hex=str(record.sha256_hex),
+        size_bytes=int(record.size_bytes),
+        origin_kind=str(record.origin_kind),
+        last_observed_origin_kind=str(record.last_observed_origin_kind),
+        provenance_job_name=(
+            str(record.provenance_job_name) if record.provenance_job_name is not None else None
+        ),
+        provenance_original_filename=(
+            str(record.provenance_original_filename)
+            if record.provenance_original_filename is not None
+            else None
+        ),
+        first_cataloged_at_utc=str(record.first_cataloged_at_utc),
+        last_cataloged_at_utc=str(record.last_cataloged_at_utc),
+        extraction_status=str(record.extraction_status),
+        extraction_last_attempted_at_utc=(
+            str(record.extraction_last_attempted_at_utc)
+            if record.extraction_last_attempted_at_utc is not None
+            else None
+        ),
+        extraction_last_succeeded_at_utc=(
+            str(record.extraction_last_succeeded_at_utc)
+            if record.extraction_last_succeeded_at_utc is not None
+            else None
+        ),
+        extraction_last_failed_at_utc=(
+            str(record.extraction_last_failed_at_utc)
+            if record.extraction_last_failed_at_utc is not None
+            else None
+        ),
+        extraction_failure_detail=(
+            str(record.extraction_failure_detail) if record.extraction_failure_detail is not None else None
+        ),
+        capture_timestamp_utc=(
+            str(record.capture_timestamp_utc) if record.capture_timestamp_utc is not None else None
+        ),
+        camera_make=str(record.camera_make) if record.camera_make is not None else None,
+        camera_model=str(record.camera_model) if record.camera_model is not None else None,
+        image_width=int(record.image_width) if record.image_width is not None else None,
+        image_height=int(record.image_height) if record.image_height is not None else None,
+        orientation=int(record.orientation) if record.orientation is not None else None,
+        lens_model=str(record.lens_model) if record.lens_model is not None else None,
+    )
+
+
+def _to_admin_client_item(record: ClientRecord) -> AdminClientItem:
+    return AdminClientItem(
+        client_id=record.client_id,
+        display_name=record.display_name,
+        enrollment_status=ClientEnrollmentStatus(record.enrollment_status),
+        first_seen_at_utc=record.first_seen_at_utc,
+        last_enrolled_at_utc=record.last_enrolled_at_utc,
+        approved_at_utc=record.approved_at_utc,
+        revoked_at_utc=record.revoked_at_utc,
+        auth_token=record.auth_token,
+    )
+
+
+def _require_approved_client(request: Request, store: UploadStateStore) -> None:
+    client_id = request.headers.get("x-photovault-client-id", "").strip()
+    auth_token = request.headers.get("x-photovault-client-token", "").strip()
+    if not client_id or not auth_token:
+        raise HTTPException(status_code=401, detail="CLIENT_AUTH_REQUIRED")
+
+    client = store.get_client(client_id)
+    if client is None:
+        raise HTTPException(status_code=401, detail="CLIENT_AUTH_INVALID")
+    if client.enrollment_status == ClientEnrollmentStatus.PENDING.value:
+        raise HTTPException(status_code=403, detail="CLIENT_PENDING_APPROVAL")
+    if client.enrollment_status == ClientEnrollmentStatus.REVOKED.value:
+        raise HTTPException(status_code=403, detail="CLIENT_REVOKED")
+    if client.auth_token is None or client.auth_token != auth_token:
+        raise HTTPException(status_code=401, detail="CLIENT_AUTH_INVALID")
+
+
 def create_app(
     initial_known_sha256: set[str] | None = None,
     *,
     state_store: UploadStateStore | None = None,
     database_url: str | None = None,
     storage_root: str | Path | None = None,
+    bootstrap_token: str | None = None,
 ) -> FastAPI:
     resolved_storage_root = storage_root or os.getenv("PHOTOVAULT_API_STORAGE_ROOT")
     if not resolved_storage_root:
@@ -393,15 +538,41 @@ def create_app(
     app.state.upload_state_store = store
     app.state.storage_root = storage_root_path
     app.state.storage_temp_root = temp_root
+    app.state.bootstrap_token = bootstrap_token or os.getenv("PHOTOVAULT_API_BOOTSTRAP_TOKEN", "")
 
     @app.get("/healthz")
     def healthz() -> dict[str, str]:
         return {"status": "ok"}
 
+    @app.post("/v1/client/enroll/bootstrap", response_model=BootstrapEnrollResponse)
+    def bootstrap_enroll(payload: BootstrapEnrollRequest) -> BootstrapEnrollResponse:
+        configured_bootstrap_token = str(app.state.bootstrap_token)
+        if not configured_bootstrap_token:
+            raise HTTPException(status_code=503, detail="bootstrap enrollment is disabled")
+        if payload.bootstrap_token != configured_bootstrap_token:
+            raise HTTPException(status_code=401, detail="invalid bootstrap token")
+
+        store: UploadStateStore = app.state.upload_state_store
+        now = datetime.now(UTC).isoformat()
+        record = store.upsert_client_pending(
+            client_id=payload.client_id,
+            display_name=payload.display_name,
+            enrolled_at_utc=now,
+        )
+        return BootstrapEnrollResponse(
+            client_id=record.client_id,
+            display_name=record.display_name,
+            enrollment_status=ClientEnrollmentStatus(record.enrollment_status),
+            auth_token=record.auth_token,
+            first_seen_at_utc=record.first_seen_at_utc,
+            last_enrolled_at_utc=record.last_enrolled_at_utc,
+        )
+
     @app.post("/v1/upload/metadata-handshake", response_model=MetadataHandshakeResponse)
-    def metadata_handshake(payload: MetadataHandshakeRequest) -> MetadataHandshakeResponse:
+    def metadata_handshake(payload: MetadataHandshakeRequest, request: Request) -> MetadataHandshakeResponse:
         results: list[HandshakeFileResult] = []
         store: UploadStateStore = app.state.upload_state_store
+        _require_approved_client(request, store)
         known_shas = store.has_shas([file_item.sha256_hex for file_item in payload.files])
 
         for file_item in payload.files:
@@ -425,6 +596,7 @@ def create_app(
             raise HTTPException(status_code=400, detail="sha256_hex must be 64 hex characters")
 
         store: UploadStateStore = app.state.upload_state_store
+        _require_approved_client(request, store)
         if store.has_sha(sha256_hex):
             return UploadContentResponse(status="ALREADY_EXISTS")
 
@@ -469,8 +641,9 @@ def create_app(
         return UploadContentResponse(status="STORED_TEMP")
 
     @app.post("/v1/upload/verify", response_model=VerifyResponse)
-    def verify_upload(payload: VerifyRequest) -> VerifyResponse:
+    def verify_upload(payload: VerifyRequest, request: Request) -> VerifyResponse:
         store: UploadStateStore = app.state.upload_state_store
+        _require_approved_client(request, store)
 
         if store.has_sha(payload.sha256_hex):
             return VerifyResponse(status="ALREADY_EXISTS")
@@ -621,6 +794,45 @@ def create_app(
             last_uploaded_at_utc=summary.last_uploaded_at_utc,
         )
 
+    @app.get("/v1/admin/clients", response_model=AdminClientListResponse)
+    def admin_clients(
+        limit: int = Query(default=50, ge=1, le=200),
+        offset: int = Query(default=0, ge=0),
+    ) -> AdminClientListResponse:
+        store: UploadStateStore = app.state.upload_state_store
+        total, clients = store.list_clients(limit=limit, offset=offset)
+        return AdminClientListResponse(
+            total=total,
+            limit=limit,
+            offset=offset,
+            items=[_to_admin_client_item(client) for client in clients],
+        )
+
+    @app.post("/v1/admin/clients/{client_id}/approve", response_model=AdminClientActionResponse)
+    def admin_approve_client(client_id: str) -> AdminClientActionResponse:
+        store: UploadStateStore = app.state.upload_state_store
+        existing = store.get_client(client_id)
+        if existing is None:
+            raise HTTPException(status_code=404, detail="client not found")
+
+        issued_token = existing.auth_token or secrets.token_urlsafe(32)
+        approved = store.approve_client(
+            client_id=client_id,
+            approved_at_utc=datetime.now(UTC).isoformat(),
+            auth_token=issued_token,
+        )
+        if approved is None:
+            raise HTTPException(status_code=404, detail="client not found")
+        return AdminClientActionResponse(item=_to_admin_client_item(approved))
+
+    @app.post("/v1/admin/clients/{client_id}/revoke", response_model=AdminClientActionResponse)
+    def admin_revoke_client(client_id: str) -> AdminClientActionResponse:
+        store: UploadStateStore = app.state.upload_state_store
+        revoked = store.revoke_client(client_id=client_id, revoked_at_utc=datetime.now(UTC).isoformat())
+        if revoked is None:
+            raise HTTPException(status_code=404, detail="client not found")
+        return AdminClientActionResponse(item=_to_admin_client_item(revoked))
+
     @app.get("/v1/admin/files", response_model=AdminFileListResponse)
     def admin_files(
         limit: int = Query(default=50, ge=1, le=200),
@@ -649,39 +861,89 @@ def create_app(
     def admin_catalog(
         limit: int = Query(default=50, ge=1, le=200),
         offset: int = Query(default=0, ge=0),
+        extraction_status: str | None = Query(default=None),
+        origin_kind: str | None = Query(default=None),
+        cataloged_since_utc: str | None = Query(default=None),
+        cataloged_before_utc: str | None = Query(default=None),
     ) -> AdminCatalogListResponse:
+        allowed_extraction_status = {"pending", "succeeded", "failed"}
+        if extraction_status is not None and extraction_status not in allowed_extraction_status:
+            raise HTTPException(status_code=400, detail="invalid extraction_status filter")
+        allowed_origin_kind = {"uploaded", "indexed"}
+        if origin_kind is not None and origin_kind not in allowed_origin_kind:
+            raise HTTPException(status_code=400, detail="invalid origin_kind filter")
+
         store: UploadStateStore = app.state.upload_state_store
-        total, records = store.list_media_assets(limit=limit, offset=offset)
+        total, records = store.list_media_assets(
+            limit=limit,
+            offset=offset,
+            extraction_status=extraction_status,
+            origin_kind=origin_kind,
+            cataloged_since_utc=cataloged_since_utc,
+            cataloged_before_utc=cataloged_before_utc,
+        )
         return AdminCatalogListResponse(
             total=total,
             limit=limit,
             offset=offset,
-            items=[
-                AdminCatalogItem(
-                    relative_path=record.relative_path,
-                    sha256_hex=record.sha256_hex,
-                    size_bytes=record.size_bytes,
-                    origin_kind=record.origin_kind,
-                    last_observed_origin_kind=record.last_observed_origin_kind,
-                    provenance_job_name=record.provenance_job_name,
-                    provenance_original_filename=record.provenance_original_filename,
-                    first_cataloged_at_utc=record.first_cataloged_at_utc,
-                    last_cataloged_at_utc=record.last_cataloged_at_utc,
-                    extraction_status=record.extraction_status,
-                    extraction_last_attempted_at_utc=record.extraction_last_attempted_at_utc,
-                    extraction_last_succeeded_at_utc=record.extraction_last_succeeded_at_utc,
-                    extraction_last_failed_at_utc=record.extraction_last_failed_at_utc,
-                    extraction_failure_detail=record.extraction_failure_detail,
-                    capture_timestamp_utc=record.capture_timestamp_utc,
-                    camera_make=record.camera_make,
-                    camera_model=record.camera_model,
-                    image_width=record.image_width,
-                    image_height=record.image_height,
-                    orientation=record.orientation,
-                    lens_model=record.lens_model,
-                )
-                for record in records
-            ],
+            items=[_to_admin_catalog_item(record) for record in records],
+        )
+
+    @app.post("/v1/admin/catalog/extraction/retry", response_model=AdminRetryExtractionResponse)
+    def admin_retry_catalog_extraction(payload: AdminRetryExtractionRequest) -> AdminRetryExtractionResponse:
+        store: UploadStateStore = app.state.upload_state_store
+        existing = store.get_media_asset_by_path(payload.relative_path)
+        if existing is None:
+            raise HTTPException(status_code=404, detail="catalog asset not found")
+
+        _attempt_media_extraction(
+            store=store,
+            storage_root_path=storage_root_path,
+            relative_path=payload.relative_path,
+        )
+        updated = store.get_media_asset_by_path(payload.relative_path)
+        if updated is None:
+            raise HTTPException(status_code=404, detail="catalog asset not found after retry")
+        return AdminRetryExtractionResponse(item=_to_admin_catalog_item(updated))
+
+    @app.post("/v1/admin/catalog/extraction/backfill", response_model=AdminBackfillExtractionResponse)
+    def admin_backfill_catalog_extraction(
+        payload: AdminBackfillExtractionRequest,
+    ) -> AdminBackfillExtractionResponse:
+        allowed_statuses = {"pending", "failed"}
+        requested_statuses = list(dict.fromkeys(payload.target_statuses))
+        invalid_statuses = [status for status in requested_statuses if status not in allowed_statuses]
+        if invalid_statuses:
+            raise HTTPException(
+                status_code=400,
+                detail=f"invalid target_statuses: {','.join(invalid_statuses)}",
+            )
+
+        store: UploadStateStore = app.state.upload_state_store
+        candidates = store.list_media_assets_for_extraction(
+            extraction_statuses=requested_statuses,
+            limit=payload.limit,
+        )
+        updated_items: list[AdminCatalogItem] = []
+        for candidate in candidates:
+            _attempt_media_extraction(
+                store=store,
+                storage_root_path=storage_root_path,
+                relative_path=candidate.relative_path,
+            )
+            updated = store.get_media_asset_by_path(candidate.relative_path)
+            if updated is not None:
+                updated_items.append(_to_admin_catalog_item(updated))
+
+        succeeded_count = sum(1 for item in updated_items if item.extraction_status == "succeeded")
+        failed_count = sum(1 for item in updated_items if item.extraction_status == "failed")
+        return AdminBackfillExtractionResponse(
+            requested_statuses=requested_statuses,
+            selected_count=len(candidates),
+            processed_count=len(updated_items),
+            succeeded_count=succeeded_count,
+            failed_count=failed_count,
+            items=updated_items,
         )
 
     @app.get("/v1/admin/duplicates", response_model=DuplicateShaGroupListResponse)
