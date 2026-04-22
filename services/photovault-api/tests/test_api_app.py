@@ -65,6 +65,39 @@ def _with_auth_headers(base: dict[str, str], auth: dict[str, str]) -> dict[str, 
     return {**base, **auth}
 
 
+def _heartbeat_payload(**overrides: object) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "last_seen_at_utc": "2026-04-22T10:10:00+00:00",
+        "daemon_state": "WAIT_NETWORK",
+        "workload_status": "waiting",
+        "active_job": {
+            "job_id": 11,
+            "media_label": "SD-Card A",
+            "job_status": "UPLOAD_PREPARE",
+            "ready_to_upload": 4,
+            "uploaded": 1,
+            "retrying": 1,
+            "total_files": 9,
+            "non_terminal_files": 5,
+            "error_files": 1,
+            "blocking_reason": "WAIT_NETWORK",
+        },
+        "retry_backoff": {
+            "pending_count": 2,
+            "next_retry_at_utc": "2026-04-22T10:11:00+00:00",
+            "reason": "upload offline",
+        },
+        "auth_block_reason": None,
+        "recent_error": {
+            "category": "UPLOAD_RETRY_SCHEDULED",
+            "message": "temporary upload failure",
+            "created_at_utc": "2026-04-22T10:09:00+00:00",
+        },
+    }
+    payload.update(overrides)
+    return payload
+
+
 def _approve_upload_client(
     client: TestClient,
     *,
@@ -288,6 +321,243 @@ def test_privileged_upload_endpoints_reject_missing_or_invalid_auth_headers(tmp_
     )
     assert verify_missing.status_code == 401
     assert verify_missing.json()["detail"] == "CLIENT_AUTH_REQUIRED"
+
+
+def test_approved_client_heartbeat_persists_latest_snapshot_and_surfaces_in_admin_clients(
+    tmp_path: Path,
+) -> None:
+    client = TestClient(create_app(storage_root=tmp_path, bootstrap_token="bootstrap-123"))
+    auth_headers = _approve_upload_client(client, client_id="pi-heart", display_name="Heart Pi")
+
+    first = client.post(
+        "/v1/client/heartbeat",
+        headers=auth_headers,
+        json=_heartbeat_payload(),
+    )
+    assert first.status_code == 200
+    assert first.json()["status"] == "RECORDED"
+    assert first.json()["client_id"] == "pi-heart"
+    assert first.json()["daemon_state"] == "WAIT_NETWORK"
+    assert first.json()["workload_status"] == "waiting"
+
+    second = client.post(
+        "/v1/client/heartbeat",
+        headers=auth_headers,
+        json=_heartbeat_payload(
+            last_seen_at_utc="2026-04-22T10:12:00+00:00",
+            daemon_state="UPLOAD_FILE",
+            workload_status="working",
+            active_job={
+                "job_id": 11,
+                "media_label": "SD-Card A",
+                "job_status": "UPLOAD_FILE",
+                "ready_to_upload": 3,
+                "uploaded": 2,
+                "retrying": 0,
+                "total_files": 9,
+                "non_terminal_files": 3,
+                "error_files": 0,
+                "blocking_reason": None,
+            },
+            retry_backoff={"pending_count": 1, "next_retry_at_utc": None, "reason": "n/a"},
+        ),
+    )
+    assert second.status_code == 200
+    assert second.json()["daemon_state"] == "UPLOAD_FILE"
+
+    listing = client.get("/v1/admin/clients")
+    assert listing.status_code == 200
+    items = listing.json()["items"]
+    assert len(items) == 1
+    item = items[0]
+    assert item["client_id"] == "pi-heart"
+    assert item["heartbeat_last_seen_at_utc"] == "2026-04-22T10:12:00+00:00"
+    assert item["heartbeat_daemon_state"] == "UPLOAD_FILE"
+    assert item["heartbeat_workload_status"] == "working"
+    assert "status=UPLOAD_FILE" in str(item["heartbeat_active_job_summary"])
+    assert "total=9" in str(item["heartbeat_active_job_summary"])
+    assert "non_terminal=3" in str(item["heartbeat_active_job_summary"])
+    assert item["heartbeat_auth_block_reason"] is None
+    assert item["heartbeat_recent_error_summary"] is not None
+
+
+def test_heartbeat_rejects_missing_pending_and_revoked_auth(tmp_path: Path) -> None:
+    client = TestClient(create_app(storage_root=tmp_path, bootstrap_token="bootstrap-123"))
+    payload = _heartbeat_payload()
+
+    missing = client.post("/v1/client/heartbeat", json=payload)
+    assert missing.status_code == 401
+    assert missing.json()["detail"] == "CLIENT_AUTH_REQUIRED"
+
+    enroll = client.post(
+        "/v1/client/enroll/bootstrap",
+        json={
+            "client_id": "pi-heart",
+            "display_name": "Heart Pi",
+            "bootstrap_token": "bootstrap-123",
+        },
+    )
+    assert enroll.status_code == 200
+    pending = client.post(
+        "/v1/client/heartbeat",
+        headers=_client_auth_headers(client_id="pi-heart", client_token="token"),
+        json=payload,
+    )
+    assert pending.status_code == 403
+    assert pending.json()["detail"] == "CLIENT_PENDING_APPROVAL"
+
+    approve = client.post("/v1/admin/clients/pi-heart/approve")
+    assert approve.status_code == 200
+    token = approve.json()["item"]["auth_token"]
+    revoke = client.post("/v1/admin/clients/pi-heart/revoke")
+    assert revoke.status_code == 200
+
+    revoked = client.post(
+        "/v1/client/heartbeat",
+        headers=_client_auth_headers(client_id="pi-heart", client_token=token),
+        json=payload,
+    )
+    assert revoked.status_code == 403
+    assert revoked.json()["detail"] == "CLIENT_REVOKED"
+
+
+def test_heartbeat_presence_status_thresholds_are_deterministic() -> None:
+    now_utc = datetime(2026, 4, 22, 10, 15, 0, tzinfo=UTC)
+    online = app_module.ClientHeartbeatRecord(
+        client_id="online",
+        last_seen_at_utc="2026-04-22T10:13:45+00:00",
+        daemon_state="WAIT_NETWORK",
+        workload_status="waiting",
+        active_job_id=None,
+        active_job_label=None,
+        active_job_status=None,
+        active_job_ready_to_upload=None,
+        active_job_uploaded=None,
+        active_job_retrying=None,
+        active_job_total_files=None,
+        active_job_non_terminal_files=None,
+        active_job_error_files=None,
+        active_job_blocking_reason=None,
+        retry_pending_count=None,
+        retry_next_at_utc=None,
+        retry_reason=None,
+        auth_block_reason=None,
+        recent_error_category=None,
+        recent_error_message=None,
+        recent_error_at_utc=None,
+        updated_at_utc="2026-04-22T10:13:45+00:00",
+    )
+    stale = app_module.ClientHeartbeatRecord(
+        client_id="stale",
+        last_seen_at_utc="2026-04-22T10:13:20+00:00",
+        daemon_state="WAIT_NETWORK",
+        workload_status="waiting",
+        active_job_id=None,
+        active_job_label=None,
+        active_job_status=None,
+        active_job_ready_to_upload=None,
+        active_job_uploaded=None,
+        active_job_retrying=None,
+        active_job_total_files=None,
+        active_job_non_terminal_files=None,
+        active_job_error_files=None,
+        active_job_blocking_reason=None,
+        retry_pending_count=None,
+        retry_next_at_utc=None,
+        retry_reason=None,
+        auth_block_reason=None,
+        recent_error_category=None,
+        recent_error_message=None,
+        recent_error_at_utc=None,
+        updated_at_utc="2026-04-22T10:13:20+00:00",
+    )
+
+    assert app_module._heartbeat_presence_status(online, now_utc=now_utc) == "online"
+    assert app_module._heartbeat_presence_status(stale, now_utc=now_utc) == "stale"
+    assert app_module._heartbeat_presence_status(None, now_utc=now_utc) == "unknown"
+
+
+def test_admin_clients_filtering_and_sorting_for_presence_and_workload(
+    tmp_path: Path, monkeypatch
+) -> None:
+    fixed_now = datetime(2026, 4, 22, 10, 15, 0, tzinfo=UTC)
+
+    class _FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            if tz is None:
+                return fixed_now.replace(tzinfo=None)
+            return fixed_now.astimezone(tz)
+
+    monkeypatch.setattr(app_module, "datetime", _FixedDatetime)
+    client = TestClient(create_app(storage_root=tmp_path, bootstrap_token="bootstrap-123"))
+    online_headers = _approve_upload_client(client, client_id="pi-online", display_name="Online Pi")
+    stale_headers = _approve_upload_client(client, client_id="pi-stale", display_name="Stale Pi")
+    _approve_upload_client(client, client_id="pi-unknown", display_name="Unknown Pi")
+
+    online_hb = client.post(
+        "/v1/client/heartbeat",
+        headers=online_headers,
+        json=_heartbeat_payload(
+            last_seen_at_utc="2026-04-22T10:14:40+00:00",
+            workload_status="working",
+            active_job={
+                "job_id": 2,
+                "media_label": "Online Job",
+                "job_status": "UPLOAD_FILE",
+                "ready_to_upload": 4,
+                "uploaded": 3,
+                "retrying": 0,
+                "total_files": 10,
+                "non_terminal_files": 2,
+                "error_files": 0,
+                "blocking_reason": None,
+            },
+        ),
+    )
+    assert online_hb.status_code == 200
+    stale_hb = client.post(
+        "/v1/client/heartbeat",
+        headers=stale_headers,
+        json=_heartbeat_payload(
+            last_seen_at_utc="2026-04-22T10:12:00+00:00",
+            workload_status="blocked",
+            active_job={
+                "job_id": 3,
+                "media_label": "Stale Job",
+                "job_status": "WAIT_NETWORK",
+                "ready_to_upload": 1,
+                "uploaded": 0,
+                "retrying": 1,
+                "total_files": 4,
+                "non_terminal_files": 4,
+                "error_files": 1,
+                "blocking_reason": "WAIT_NETWORK",
+            },
+        ),
+    )
+    assert stale_hb.status_code == 200
+
+    online_listing = client.get("/v1/admin/clients?presence_status=online")
+    assert online_listing.status_code == 200
+    online_items = online_listing.json()["items"]
+    assert len(online_items) == 1
+    assert online_items[0]["client_id"] == "pi-online"
+
+    blocked_listing = client.get("/v1/admin/clients?workload_status=blocked")
+    assert blocked_listing.status_code == 200
+    blocked_items = blocked_listing.json()["items"]
+    assert len(blocked_items) == 1
+    assert blocked_items[0]["client_id"] == "pi-stale"
+
+    sorted_listing = client.get("/v1/admin/clients?sort_by=presence_status&sort_order=asc")
+    assert sorted_listing.status_code == 200
+    sorted_ids = [item["client_id"] for item in sorted_listing.json()["items"]]
+    assert sorted_ids == ["pi-online", "pi-stale", "pi-unknown"]
+
+    invalid_filter = client.get("/v1/admin/clients?presence_status=bad")
+    assert invalid_filter.status_code == 400
+    assert invalid_filter.json()["detail"] == "invalid presence_status filter"
 
 
 def test_metadata_handshake_reports_already_exists_for_known_sha(tmp_path: Path) -> None:

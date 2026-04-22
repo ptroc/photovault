@@ -34,6 +34,7 @@ from photovault_clientd.db import (
     fetch_next_copy_candidate,
     fetch_recent_daemon_events,
     fetch_server_auth_state,
+    fetch_server_heartbeat_state,
     get_daemon_state,
     get_daemon_state_safe,
     get_schema_version,
@@ -53,6 +54,7 @@ from photovault_clientd.db import (
 )
 from photovault_clientd.engine import (
     DEFAULT_AUTO_PROGRESS_MAX_STEPS,
+    DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
     DEFAULT_RETAIN_STAGED_FILES,
     DEFAULT_SERVER_BASE_URL,
     run_auto_progress_dispatch,
@@ -271,6 +273,7 @@ def create_app(
     retain_staged_files: bool = DEFAULT_RETAIN_STAGED_FILES,
     auto_progress_interval_seconds: float = DEFAULT_AUTO_PROGRESS_INTERVAL_SECONDS,
     auto_progress_max_steps: int = DEFAULT_AUTO_PROGRESS_MAX_STEPS,
+    heartbeat_interval_seconds: int = DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
     network_manager: NetworkManagerAdapter | None = None,
     block_device_adapter: BlockDeviceAdapter | None = None,
 ) -> FastAPI:
@@ -283,6 +286,10 @@ def create_app(
         bootstrap_token
         if bootstrap_token is not None
         else os.getenv("PHOTOVAULT_CLIENT_BOOTSTRAP_TOKEN")
+    )
+    resolved_heartbeat_interval_seconds = max(
+        1,
+        int(os.getenv("PHOTOVAULT_CLIENT_HEARTBEAT_INTERVAL_SECONDS", str(heartbeat_interval_seconds))),
     )
 
     resolved_network_manager = network_manager or NetworkManagerAdapter()
@@ -408,6 +415,7 @@ def create_app(
                 client_display_name=resolved_client_display_name,
                 bootstrap_token=resolved_bootstrap_token,
                 retain_staged_files=retain_staged_files,
+                heartbeat_interval_seconds=resolved_heartbeat_interval_seconds,
             )
             try:
                 ensure_result = _ensure_ap_baseline(conn, now)
@@ -473,6 +481,7 @@ def create_app(
                         client_display_name=resolved_client_display_name,
                         bootstrap_token=resolved_bootstrap_token,
                         retain_staged_files=retain_staged_files,
+                        heartbeat_interval_seconds=resolved_heartbeat_interval_seconds,
                         max_steps=auto_progress_max_steps,
                     )
                     if outcome["progressed_steps"] > 0:
@@ -552,14 +561,21 @@ def create_app(
         conn = open_db(db_path)
         row = conn.execute("SELECT current_state, updated_at_utc FROM daemon_state WHERE id = 1;").fetchone()
         auth_state = fetch_server_auth_state(conn)
+        heartbeat_state = fetch_server_heartbeat_state(conn)
         conn.close()
         if row is None:
             return {
                 "current_state": ClientState.ERROR_DAEMON.value,
                 "updated_at_utc": "",
                 "server_auth": auth_state,
+                "server_heartbeat": heartbeat_state,
             }
-        return {"current_state": row[0], "updated_at_utc": row[1], "server_auth": auth_state}
+        return {
+            "current_state": row[0],
+            "updated_at_utc": row[1],
+            "server_auth": auth_state,
+            "server_heartbeat": heartbeat_state,
+        }
 
     @app.get("/network/status")
     def network_status() -> dict[str, object]:
@@ -800,6 +816,7 @@ def create_app(
                 client_display_name=resolved_client_display_name,
                 bootstrap_token=resolved_bootstrap_token,
                 retain_staged_files=retain_staged_files,
+                heartbeat_interval_seconds=resolved_heartbeat_interval_seconds,
             )
             return outcome
         finally:

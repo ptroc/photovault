@@ -106,6 +106,14 @@ def test_clients_page_renders_statuses_and_actions() -> None:
                     "approved_at_utc": None,
                     "revoked_at_utc": None,
                     "auth_token": None,
+                    "heartbeat_last_seen_at_utc": None,
+                    "heartbeat_presence_status": "unknown",
+                    "heartbeat_daemon_state": None,
+                    "heartbeat_workload_status": None,
+                    "heartbeat_active_job_summary": None,
+                    "heartbeat_retry_backoff_summary": None,
+                    "heartbeat_auth_block_reason": None,
+                    "heartbeat_recent_error_summary": None,
                 },
                 {
                     "client_id": "pi-studio",
@@ -116,6 +124,21 @@ def test_clients_page_renders_statuses_and_actions() -> None:
                     "approved_at_utc": "2026-04-22T09:05:00+00:00",
                     "revoked_at_utc": None,
                     "auth_token": "token",
+                    "heartbeat_last_seen_at_utc": "2026-04-22T09:10:00+00:00",
+                    "heartbeat_presence_status": "online",
+                    "heartbeat_daemon_state": "UPLOAD_FILE",
+                    "heartbeat_workload_status": "working",
+                    "heartbeat_active_job_summary": (
+                        "Wedding SD (id=8, status=UPLOAD_FILE, ready=2, uploaded=1, retrying=0,"
+                        " total=6, non_terminal=2, errors=0)"
+                    ),
+                    "heartbeat_retry_backoff_summary": (
+                        "pending=1, next=2026-04-22T09:11:00+00:00, reason=upload offline"
+                    ),
+                    "heartbeat_auth_block_reason": None,
+                    "heartbeat_recent_error_summary": (
+                        "UPLOAD_RETRY_SCHEDULED at 2026-04-22T09:09:00+00:00: upload retry"
+                    ),
                 },
             ],
         }
@@ -124,14 +147,44 @@ def test_clients_page_renders_statuses_and_actions() -> None:
     response = app.test_client().get("/clients")
     assert response.status_code == 200
     html = response.get_data(as_text=True)
-    assert "Client Approval" in html
+    assert "Client Presence" in html
     assert "Kitchen Pi" in html
     assert "Studio Pi" in html
     assert "pending" in html
     assert "approved" in html
     assert "issued" in html
+    assert "UPLOAD_FILE" in html
+    assert "Wedding SD" in html
+    assert "total=6" in html
+    assert "non_terminal=2" in html
+    assert "unknown" in html
+    assert "online" in html
     assert "/clients/actions/approve" in html
     assert "/clients/actions/revoke" in html
+
+
+def test_clients_page_forwards_filter_and_sort_query() -> None:
+    def _fetcher(path: str, query: dict[str, str]) -> dict:
+        assert path == "/v1/admin/clients"
+        assert query == {
+            "limit": "50",
+            "offset": "50",
+            "presence_status": "online",
+            "workload_status": "working",
+            "enrollment_status": "approved",
+            "sort_by": "presence_status",
+            "sort_order": "asc",
+        }
+        return {"total": 0, "limit": 50, "offset": 50, "items": []}
+
+    app = create_app(api_fetcher=_fetcher)
+    response = app.test_client().get(
+        (
+            "/clients?page=2&presence_status=online&workload_status=working"
+            "&enrollment_status=approved&sort_by=presence_status&sort_order=asc"
+        )
+    )
+    assert response.status_code == 200
 
 
 def test_clients_approve_action_posts_to_api_and_sets_message() -> None:
@@ -180,6 +233,45 @@ def test_clients_revoke_action_posts_to_api_and_sets_message() -> None:
     assert observed["path"] == "/v1/admin/clients/pi-kitchen/revoke"
     assert observed["payload"] == {}
     assert "Revoked client pi-kitchen." in response.get_data(as_text=True)
+
+
+def test_clients_actions_preserve_filter_sort_state_in_redirect() -> None:
+    observed: dict[str, object] = {}
+
+    def _fetcher(path: str, query: dict[str, str]) -> dict:
+        observed["query"] = query
+        assert path == "/v1/admin/clients"
+        return {"total": 0, "limit": 50, "offset": 0, "items": []}
+
+    def _poster(path: str, payload: dict) -> dict:
+        assert path == "/v1/admin/clients/pi-kitchen/approve"
+        assert payload == {}
+        return {"item": {"client_id": "pi-kitchen"}}
+
+    app = create_app(api_fetcher=_fetcher, api_poster=_poster)
+    response = app.test_client().post(
+        "/clients/actions/approve",
+        data={
+            "client_id": "pi-kitchen",
+            "page": "1",
+            "presence_status": "online",
+            "workload_status": "working",
+            "enrollment_status": "approved",
+            "sort_by": "presence_status",
+            "sort_order": "asc",
+        },
+        follow_redirects=True,
+    )
+    assert response.status_code == 200
+    assert observed["query"] == {
+        "limit": "50",
+        "offset": "0",
+        "presence_status": "online",
+        "workload_status": "working",
+        "enrollment_status": "approved",
+        "sort_by": "presence_status",
+        "sort_order": "asc",
+    }
 
 
 def test_dashboard_error_state_is_clear() -> None:

@@ -2,8 +2,59 @@
 {% set title = "Clients" %}
 {% block content %}
 <section class="panel">
-  <h1 style="margin-top:0;">Client Approval</h1>
+  <h1 style="margin-top:0;">Client Presence</h1>
   <p class="muted" style="margin-top:0.25rem;">Showing {{ start_index }}-{{ end_index }} of {{ total }} enrolled clients.</p>
+  <form method="get" action="/clients" class="filter-grid" style="margin: 0.75rem 0 1rem;">
+    <input type="hidden" name="page" value="1">
+    <label>
+      Presence
+      <select name="presence_status">
+        <option value="">all</option>
+        <option value="online" {% if clients_query_state.presence_status == "online" %}selected{% endif %}>online</option>
+        <option value="stale" {% if clients_query_state.presence_status == "stale" %}selected{% endif %}>stale</option>
+        <option value="unknown" {% if clients_query_state.presence_status == "unknown" %}selected{% endif %}>unknown</option>
+      </select>
+    </label>
+    <label>
+      Workload
+      <select name="workload_status">
+        <option value="">all</option>
+        <option value="working" {% if clients_query_state.workload_status == "working" %}selected{% endif %}>working</option>
+        <option value="blocked" {% if clients_query_state.workload_status == "blocked" %}selected{% endif %}>blocked</option>
+        <option value="waiting" {% if clients_query_state.workload_status == "waiting" %}selected{% endif %}>waiting</option>
+        <option value="idle" {% if clients_query_state.workload_status == "idle" %}selected{% endif %}>idle</option>
+      </select>
+    </label>
+    <label>
+      Enrollment
+      <select name="enrollment_status">
+        <option value="">all</option>
+        <option value="approved" {% if clients_query_state.enrollment_status == "approved" %}selected{% endif %}>approved</option>
+        <option value="pending" {% if clients_query_state.enrollment_status == "pending" %}selected{% endif %}>pending</option>
+        <option value="revoked" {% if clients_query_state.enrollment_status == "revoked" %}selected{% endif %}>revoked</option>
+      </select>
+    </label>
+    <label>
+      Sort
+      <select name="sort_by">
+        <option value="last_seen" {% if clients_query_state.sort_by == "last_seen" %}selected{% endif %}>last seen</option>
+        <option value="presence_status" {% if clients_query_state.sort_by == "presence_status" %}selected{% endif %}>presence</option>
+        <option value="workload_status" {% if clients_query_state.sort_by == "workload_status" %}selected{% endif %}>workload</option>
+        <option value="client_id" {% if clients_query_state.sort_by == "client_id" %}selected{% endif %}>client id</option>
+      </select>
+    </label>
+    <label>
+      Order
+      <select name="sort_order">
+        <option value="desc" {% if clients_query_state.sort_order == "desc" %}selected{% endif %}>desc</option>
+        <option value="asc" {% if clients_query_state.sort_order == "asc" %}selected{% endif %}>asc</option>
+      </select>
+    </label>
+    <div class="actions-inline">
+      <button class="primary" type="submit">Apply</button>
+      <a href="/clients">Reset</a>
+    </div>
+  </form>
 
   {% if clients %}
   <table>
@@ -16,6 +67,11 @@
         <th>Approved At</th>
         <th>Revoked At</th>
         <th>Token</th>
+        <th>Presence</th>
+        <th>Daemon State</th>
+        <th>Workload</th>
+        <th>Active Job</th>
+        <th>Backoff/Auth/Error</th>
         <th>Actions</th>
       </tr>
     </thead>
@@ -35,15 +91,46 @@
         <td class="mono">{{ client.revoked_at_utc or "-" }}</td>
         <td class="mono">{{ "issued" if client.auth_token else "-" }}</td>
         <td>
+          <span class="badge {{ client.heartbeat_presence_status }}">{{ client.heartbeat_presence_status }}</span>
+          <div class="mono">{{ client.heartbeat_last_seen_at_utc or "n/a" }}</div>
+        </td>
+        <td class="mono">{{ client.heartbeat_daemon_state or "n/a" }}</td>
+        <td>{{ client.heartbeat_workload_status or "n/a" }}</td>
+        <td class="mono">{{ client.heartbeat_active_job_summary or "n/a" }}</td>
+        <td class="mono">
+          {% if client.heartbeat_retry_backoff_summary %}
+          <div>{{ client.heartbeat_retry_backoff_summary }}</div>
+          {% endif %}
+          {% if client.heartbeat_auth_block_reason %}
+          <div>auth: {{ client.heartbeat_auth_block_reason }}</div>
+          {% endif %}
+          {% if client.heartbeat_recent_error_summary %}
+          <div>{{ client.heartbeat_recent_error_summary }}</div>
+          {% endif %}
+          {% if not client.heartbeat_retry_backoff_summary and not client.heartbeat_auth_block_reason and not client.heartbeat_recent_error_summary %}
+          <div>n/a</div>
+          {% endif %}
+        </td>
+        <td>
           <div class="actions-inline">
             <form method="post" action="/clients/actions/approve">
               <input type="hidden" name="client_id" value="{{ client.client_id }}">
               <input type="hidden" name="page" value="{{ page }}">
+              <input type="hidden" name="presence_status" value="{{ clients_query_state.presence_status }}">
+              <input type="hidden" name="workload_status" value="{{ clients_query_state.workload_status }}">
+              <input type="hidden" name="enrollment_status" value="{{ clients_query_state.enrollment_status }}">
+              <input type="hidden" name="sort_by" value="{{ clients_query_state.sort_by }}">
+              <input type="hidden" name="sort_order" value="{{ clients_query_state.sort_order }}">
               <button class="primary" type="submit">Approve</button>
             </form>
             <form method="post" action="/clients/actions/revoke">
               <input type="hidden" name="client_id" value="{{ client.client_id }}">
               <input type="hidden" name="page" value="{{ page }}">
+              <input type="hidden" name="presence_status" value="{{ clients_query_state.presence_status }}">
+              <input type="hidden" name="workload_status" value="{{ clients_query_state.workload_status }}">
+              <input type="hidden" name="enrollment_status" value="{{ clients_query_state.enrollment_status }}">
+              <input type="hidden" name="sort_by" value="{{ clients_query_state.sort_by }}">
+              <input type="hidden" name="sort_order" value="{{ clients_query_state.sort_order }}">
               <button type="submit">Revoke</button>
             </form>
           </div>
@@ -57,13 +144,9 @@
   {% endif %}
 
   <div class="pager">
-    {% if has_previous %}
-    <a href="/clients?page={{ page - 1 }}">Previous</a>
-    {% endif %}
+    {% if previous_url %}<a href="{{ previous_url }}">Previous</a>{% endif %}
     <span class="muted">Page {{ page }}</span>
-    {% if has_next %}
-    <a href="/clients?page={{ page + 1 }}">Next</a>
-    {% endif %}
+    {% if next_url %}<a href="{{ next_url }}">Next</a>{% endif %}
   </div>
 </section>
 {% endblock %}

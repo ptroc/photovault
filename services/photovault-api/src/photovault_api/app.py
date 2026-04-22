@@ -13,6 +13,7 @@ from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel, Field
 
 from photovault_api.state_store import (
+    ClientHeartbeatRecord,
     ClientRecord,
     InMemoryUploadStateStore,
     PostgresUploadStateStore,
@@ -198,6 +199,19 @@ class ClientEnrollmentStatus(StrEnum):
     REVOKED = "revoked"
 
 
+class ClientWorkloadStatus(StrEnum):
+    IDLE = "idle"
+    WORKING = "working"
+    WAITING = "waiting"
+    BLOCKED = "blocked"
+
+
+class ClientPresenceStatus(StrEnum):
+    ONLINE = "online"
+    STALE = "stale"
+    UNKNOWN = "unknown"
+
+
 class BootstrapEnrollRequest(BaseModel):
     client_id: str = Field(min_length=1, max_length=200)
     display_name: str = Field(min_length=1, max_length=200)
@@ -222,6 +236,14 @@ class AdminClientItem(BaseModel):
     approved_at_utc: str | None
     revoked_at_utc: str | None
     auth_token: str | None
+    heartbeat_last_seen_at_utc: str | None
+    heartbeat_presence_status: str
+    heartbeat_daemon_state: str | None
+    heartbeat_workload_status: ClientWorkloadStatus | None
+    heartbeat_active_job_summary: str | None
+    heartbeat_retry_backoff_summary: str | None
+    heartbeat_auth_block_reason: str | None
+    heartbeat_recent_error_summary: str | None
 
 
 class AdminClientListResponse(BaseModel):
@@ -233,6 +255,54 @@ class AdminClientListResponse(BaseModel):
 
 class AdminClientActionResponse(BaseModel):
     item: AdminClientItem
+
+
+class HeartbeatActiveJobSummary(BaseModel):
+    job_id: int = Field(ge=1)
+    media_label: str | None = Field(default=None, max_length=255)
+    job_status: str = Field(min_length=1, max_length=128)
+    ready_to_upload: int = Field(default=0, ge=0)
+    uploaded: int = Field(default=0, ge=0)
+    retrying: int = Field(default=0, ge=0)
+    total_files: int | None = Field(default=None, ge=0)
+    non_terminal_files: int | None = Field(default=None, ge=0)
+    error_files: int | None = Field(default=None, ge=0)
+    blocking_reason: str | None = Field(default=None, max_length=256)
+
+
+class HeartbeatRetryBackoffSummary(BaseModel):
+    pending_count: int = Field(ge=0)
+    next_retry_at_utc: datetime | None = None
+    reason: str | None = Field(default=None, max_length=512)
+
+
+class HeartbeatRecentErrorSummary(BaseModel):
+    category: str = Field(min_length=1, max_length=128)
+    message: str = Field(min_length=1, max_length=512)
+    created_at_utc: datetime
+
+
+class ClientHeartbeatRequest(BaseModel):
+    last_seen_at_utc: datetime
+    daemon_state: str = Field(min_length=1, max_length=128)
+    workload_status: ClientWorkloadStatus
+    active_job: HeartbeatActiveJobSummary | None = None
+    retry_backoff: HeartbeatRetryBackoffSummary | None = None
+    auth_block_reason: str | None = Field(default=None, max_length=128)
+    recent_error: HeartbeatRecentErrorSummary | None = None
+
+
+class ClientHeartbeatResponse(BaseModel):
+    status: str
+    client_id: str
+    last_seen_at_utc: str
+    daemon_state: str
+    workload_status: ClientWorkloadStatus
+
+
+_HEARTBEAT_ONLINE_MAX_AGE_SECONDS = 90
+_CLIENT_LIST_SCAN_MAX = 5000
+_CLIENT_LIST_SCAN_PAGE_SIZE = 200
 
 
 def _sanitize_component(raw_value: str, *, default_value: str) -> str:
@@ -480,7 +550,65 @@ def _to_admin_catalog_item(record: object) -> AdminCatalogItem:
     )
 
 
-def _to_admin_client_item(record: ClientRecord) -> AdminClientItem:
+def _heartbeat_presence_status(record: ClientHeartbeatRecord | None, *, now_utc: datetime) -> str:
+    if record is None:
+        return ClientPresenceStatus.UNKNOWN.value
+    try:
+        last_seen = datetime.fromisoformat(record.last_seen_at_utc)
+        if last_seen.tzinfo is None:
+            last_seen = last_seen.replace(tzinfo=UTC)
+    except ValueError:
+        return ClientPresenceStatus.UNKNOWN.value
+    age_seconds = max(0.0, (now_utc - last_seen).total_seconds())
+    if age_seconds <= _HEARTBEAT_ONLINE_MAX_AGE_SECONDS:
+        return ClientPresenceStatus.ONLINE.value
+    return ClientPresenceStatus.STALE.value
+
+
+def _to_admin_client_item(
+    record: ClientRecord,
+    *,
+    heartbeat: ClientHeartbeatRecord | None = None,
+    now_utc: datetime,
+) -> AdminClientItem:
+    active_job_summary = None
+    if heartbeat is not None and heartbeat.active_job_id is not None:
+        job_label = heartbeat.active_job_label or "job"
+        active_job_parts = [
+            f"{job_label} (id={heartbeat.active_job_id}, status={heartbeat.active_job_status or 'unknown'}, "
+            f"ready={heartbeat.active_job_ready_to_upload or 0}, "
+            f"uploaded={heartbeat.active_job_uploaded or 0}, "
+            f"retrying={heartbeat.active_job_retrying or 0}"
+        ]
+        if heartbeat.active_job_total_files is not None:
+            active_job_parts.append(f", total={heartbeat.active_job_total_files}")
+        if heartbeat.active_job_non_terminal_files is not None:
+            active_job_parts.append(f", non_terminal={heartbeat.active_job_non_terminal_files}")
+        if heartbeat.active_job_error_files is not None:
+            active_job_parts.append(f", errors={heartbeat.active_job_error_files}")
+        active_job_parts.append(")")
+        if heartbeat.active_job_blocking_reason:
+            active_job_parts.append(f" blocked={heartbeat.active_job_blocking_reason}")
+        active_job_summary = "".join(active_job_parts)
+    retry_backoff_summary = None
+    if heartbeat is not None and heartbeat.retry_pending_count is not None:
+        retry_backoff_summary = (
+            f"pending={heartbeat.retry_pending_count}, next={heartbeat.retry_next_at_utc or 'n/a'}, "
+            f"reason={heartbeat.retry_reason or 'n/a'}"
+        )
+    recent_error_summary = None
+    if heartbeat is not None and heartbeat.recent_error_message is not None:
+        recent_error_summary = (
+            f"{heartbeat.recent_error_category or 'error'} at "
+            f"{heartbeat.recent_error_at_utc or 'unknown'}: {heartbeat.recent_error_message}"
+        )
+    heartbeat_workload_status = None
+    if heartbeat is not None:
+        try:
+            heartbeat_workload_status = ClientWorkloadStatus(heartbeat.workload_status)
+        except ValueError:
+            heartbeat_workload_status = None
+
     return AdminClientItem(
         client_id=record.client_id,
         display_name=record.display_name,
@@ -490,10 +618,54 @@ def _to_admin_client_item(record: ClientRecord) -> AdminClientItem:
         approved_at_utc=record.approved_at_utc,
         revoked_at_utc=record.revoked_at_utc,
         auth_token=record.auth_token,
+        heartbeat_last_seen_at_utc=heartbeat.last_seen_at_utc if heartbeat is not None else None,
+        heartbeat_presence_status=_heartbeat_presence_status(heartbeat, now_utc=now_utc),
+        heartbeat_daemon_state=heartbeat.daemon_state if heartbeat is not None else None,
+        heartbeat_workload_status=heartbeat_workload_status,
+        heartbeat_active_job_summary=active_job_summary,
+        heartbeat_retry_backoff_summary=retry_backoff_summary,
+        heartbeat_auth_block_reason=heartbeat.auth_block_reason if heartbeat is not None else None,
+        heartbeat_recent_error_summary=recent_error_summary,
     )
 
 
-def _require_approved_client(request: Request, store: UploadStateStore) -> None:
+def _list_clients_for_admin_view(store: UploadStateStore) -> list[ClientRecord]:
+    clients: list[ClientRecord] = []
+    offset = 0
+    while offset < _CLIENT_LIST_SCAN_MAX:
+        batch_limit = min(_CLIENT_LIST_SCAN_PAGE_SIZE, _CLIENT_LIST_SCAN_MAX - offset)
+        total, batch = store.list_clients(limit=batch_limit, offset=offset)
+        if not batch:
+            break
+        clients.extend(batch)
+        offset += len(batch)
+        if len(clients) >= total:
+            break
+    return clients
+
+
+def _presence_sort_rank(value: str) -> int:
+    ranks = {
+        ClientPresenceStatus.ONLINE.value: 0,
+        ClientPresenceStatus.STALE.value: 1,
+        ClientPresenceStatus.UNKNOWN.value: 2,
+    }
+    return ranks.get(value, 99)
+
+
+def _workload_sort_rank(value: str | None) -> int:
+    ranks = {
+        ClientWorkloadStatus.WORKING.value: 0,
+        ClientWorkloadStatus.BLOCKED.value: 1,
+        ClientWorkloadStatus.WAITING.value: 2,
+        ClientWorkloadStatus.IDLE.value: 3,
+    }
+    if value is None:
+        return 99
+    return ranks.get(value, 98)
+
+
+def _require_approved_client(request: Request, store: UploadStateStore) -> ClientRecord:
     client_id = request.headers.get("x-photovault-client-id", "").strip()
     auth_token = request.headers.get("x-photovault-client-token", "").strip()
     if not client_id or not auth_token:
@@ -508,6 +680,7 @@ def _require_approved_client(request: Request, store: UploadStateStore) -> None:
         raise HTTPException(status_code=403, detail="CLIENT_REVOKED")
     if client.auth_token is None or client.auth_token != auth_token:
         raise HTTPException(status_code=401, detail="CLIENT_AUTH_INVALID")
+    return client
 
 
 def create_app(
@@ -566,6 +739,62 @@ def create_app(
             auth_token=record.auth_token,
             first_seen_at_utc=record.first_seen_at_utc,
             last_enrolled_at_utc=record.last_enrolled_at_utc,
+        )
+
+    @app.post("/v1/client/heartbeat", response_model=ClientHeartbeatResponse)
+    def client_heartbeat(payload: ClientHeartbeatRequest, request: Request) -> ClientHeartbeatResponse:
+        store: UploadStateStore = app.state.upload_state_store
+        client = _require_approved_client(request, store)
+        updated = store.upsert_client_heartbeat(
+            client_id=client.client_id,
+            last_seen_at_utc=payload.last_seen_at_utc.astimezone(UTC).isoformat(),
+            daemon_state=payload.daemon_state,
+            workload_status=payload.workload_status.value,
+            active_job_id=payload.active_job.job_id if payload.active_job is not None else None,
+            active_job_label=payload.active_job.media_label if payload.active_job is not None else None,
+            active_job_status=payload.active_job.job_status if payload.active_job is not None else None,
+            active_job_ready_to_upload=(
+                payload.active_job.ready_to_upload if payload.active_job is not None else None
+            ),
+            active_job_uploaded=payload.active_job.uploaded if payload.active_job is not None else None,
+            active_job_retrying=payload.active_job.retrying if payload.active_job is not None else None,
+            active_job_total_files=payload.active_job.total_files if payload.active_job is not None else None,
+            active_job_non_terminal_files=(
+                payload.active_job.non_terminal_files if payload.active_job is not None else None
+            ),
+            active_job_error_files=payload.active_job.error_files if payload.active_job is not None else None,
+            active_job_blocking_reason=(
+                payload.active_job.blocking_reason if payload.active_job is not None else None
+            ),
+            retry_pending_count=(
+                payload.retry_backoff.pending_count if payload.retry_backoff is not None else None
+            ),
+            retry_next_at_utc=(
+                payload.retry_backoff.next_retry_at_utc.astimezone(UTC).isoformat()
+                if payload.retry_backoff is not None and payload.retry_backoff.next_retry_at_utc is not None
+                else None
+            ),
+            retry_reason=payload.retry_backoff.reason if payload.retry_backoff is not None else None,
+            auth_block_reason=payload.auth_block_reason,
+            recent_error_category=(
+                payload.recent_error.category if payload.recent_error is not None else None
+            ),
+            recent_error_message=(
+                payload.recent_error.message if payload.recent_error is not None else None
+            ),
+            recent_error_at_utc=(
+                payload.recent_error.created_at_utc.astimezone(UTC).isoformat()
+                if payload.recent_error is not None
+                else None
+            ),
+            updated_at_utc=datetime.now(UTC).isoformat(),
+        )
+        return ClientHeartbeatResponse(
+            status="RECORDED",
+            client_id=updated.client_id,
+            last_seen_at_utc=updated.last_seen_at_utc,
+            daemon_state=updated.daemon_state,
+            workload_status=ClientWorkloadStatus(updated.workload_status),
         )
 
     @app.post("/v1/upload/metadata-handshake", response_model=MetadataHandshakeResponse)
@@ -798,14 +1027,96 @@ def create_app(
     def admin_clients(
         limit: int = Query(default=50, ge=1, le=200),
         offset: int = Query(default=0, ge=0),
+        presence_status: str | None = Query(default=None),
+        workload_status: str | None = Query(default=None),
+        enrollment_status: str | None = Query(default=None),
+        sort_by: str = Query(default="last_seen"),
+        sort_order: str = Query(default="desc"),
     ) -> AdminClientListResponse:
+        allowed_presence = {status.value for status in ClientPresenceStatus}
+        if presence_status is not None and presence_status not in allowed_presence:
+            raise HTTPException(status_code=400, detail="invalid presence_status filter")
+        allowed_workload = {status.value for status in ClientWorkloadStatus}
+        if workload_status is not None and workload_status not in allowed_workload:
+            raise HTTPException(status_code=400, detail="invalid workload_status filter")
+        allowed_enrollment = {status.value for status in ClientEnrollmentStatus}
+        if enrollment_status is not None and enrollment_status not in allowed_enrollment:
+            raise HTTPException(status_code=400, detail="invalid enrollment_status filter")
+        if sort_by not in {"last_seen", "presence_status", "workload_status", "client_id"}:
+            raise HTTPException(status_code=400, detail="invalid sort_by value")
+        if sort_order not in {"asc", "desc"}:
+            raise HTTPException(status_code=400, detail="invalid sort_order value")
+
         store: UploadStateStore = app.state.upload_state_store
-        total, clients = store.list_clients(limit=limit, offset=offset)
+        now_utc = datetime.now(UTC)
+        client_items = [
+            _to_admin_client_item(
+                client,
+                heartbeat=store.get_client_heartbeat(client.client_id),
+                now_utc=now_utc,
+            )
+            for client in _list_clients_for_admin_view(store)
+        ]
+
+        if presence_status is not None:
+            client_items = [
+                item for item in client_items if item.heartbeat_presence_status == presence_status
+            ]
+        if workload_status is not None:
+            client_items = [
+                item
+                for item in client_items
+                if (
+                    item.heartbeat_workload_status is not None
+                    and item.heartbeat_workload_status.value == workload_status
+                )
+            ]
+        if enrollment_status is not None:
+            client_items = [
+                item for item in client_items if item.enrollment_status.value == enrollment_status
+            ]
+
+        if sort_by == "presence_status":
+            client_items.sort(
+                key=lambda item: (
+                    _presence_sort_rank(item.heartbeat_presence_status),
+                    item.heartbeat_last_seen_at_utc or "",
+                    item.client_id,
+                ),
+                reverse=(sort_order == "desc"),
+            )
+        elif sort_by == "workload_status":
+            client_items.sort(
+                key=lambda item: (
+                    _workload_sort_rank(
+                        item.heartbeat_workload_status.value
+                        if item.heartbeat_workload_status is not None
+                        else None
+                    ),
+                    item.heartbeat_last_seen_at_utc or "",
+                    item.client_id,
+                ),
+                reverse=(sort_order == "desc"),
+            )
+        elif sort_by == "client_id":
+            client_items.sort(key=lambda item: item.client_id, reverse=(sort_order == "desc"))
+        else:
+            client_items.sort(
+                key=lambda item: (
+                    1 if item.heartbeat_last_seen_at_utc is not None else 0,
+                    item.heartbeat_last_seen_at_utc or "",
+                    item.client_id,
+                ),
+                reverse=(sort_order == "desc"),
+            )
+
+        total = len(client_items)
+        paged_items = client_items[offset : offset + limit]
         return AdminClientListResponse(
             total=total,
             limit=limit,
             offset=offset,
-            items=[_to_admin_client_item(client) for client in clients],
+            items=paged_items,
         )
 
     @app.post("/v1/admin/clients/{client_id}/approve", response_model=AdminClientActionResponse)
@@ -823,7 +1134,13 @@ def create_app(
         )
         if approved is None:
             raise HTTPException(status_code=404, detail="client not found")
-        return AdminClientActionResponse(item=_to_admin_client_item(approved))
+        return AdminClientActionResponse(
+            item=_to_admin_client_item(
+                approved,
+                heartbeat=store.get_client_heartbeat(approved.client_id),
+                now_utc=datetime.now(UTC),
+            )
+        )
 
     @app.post("/v1/admin/clients/{client_id}/revoke", response_model=AdminClientActionResponse)
     def admin_revoke_client(client_id: str) -> AdminClientActionResponse:
@@ -831,7 +1148,13 @@ def create_app(
         revoked = store.revoke_client(client_id=client_id, revoked_at_utc=datetime.now(UTC).isoformat())
         if revoked is None:
             raise HTTPException(status_code=404, detail="client not found")
-        return AdminClientActionResponse(item=_to_admin_client_item(revoked))
+        return AdminClientActionResponse(
+            item=_to_admin_client_item(
+                revoked,
+                heartbeat=store.get_client_heartbeat(revoked.client_id),
+                now_utc=datetime.now(UTC),
+            )
+        )
 
     @app.get("/v1/admin/files", response_model=AdminFileListResponse)
     def admin_files(

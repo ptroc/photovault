@@ -80,7 +80,7 @@ DETECTED_MEDIA_EVENT_TYPES = (
     DETECTED_MEDIA_EVENT_REMOVED,
 )
 
-LATEST_SCHEMA_VERSION = 6
+LATEST_SCHEMA_VERSION = 7
 CLIENT_ENROLLMENT_PENDING = "pending"
 CLIENT_ENROLLMENT_APPROVED = "approved"
 CLIENT_ENROLLMENT_REVOKED = "revoked"
@@ -89,6 +89,7 @@ CLIENT_ENROLLMENT_STATUSES = (
     CLIENT_ENROLLMENT_APPROVED,
     CLIENT_ENROLLMENT_REVOKED,
 )
+HEARTBEAT_STATUS_NEVER = "never"
 
 
 def validate_recovery_policy() -> None:
@@ -298,6 +299,23 @@ def _apply_migration_v6(conn: sqlite3.Connection) -> None:
     )
 
 
+def _apply_migration_v7(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS server_heartbeat_state (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            heartbeat_interval_seconds INTEGER NOT NULL,
+            last_attempt_at_utc TEXT,
+            last_success_at_utc TEXT,
+            last_error TEXT,
+            last_status TEXT NOT NULL,
+            next_due_at_utc TEXT,
+            updated_at_utc TEXT NOT NULL
+        );
+        """
+    )
+
+
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     1: _apply_migration_v1,
     2: _apply_migration_v2,
@@ -305,6 +323,7 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     4: _apply_migration_v4,
     5: _apply_migration_v5,
     6: _apply_migration_v6,
+    7: _apply_migration_v7,
 }
 
 
@@ -588,6 +607,16 @@ def run_state_invariant_checks(conn: sqlite3.Connection) -> list[str]:
     if row and row[0] > 0:
         issues.append(f"server_auth_state contains unknown enrollment_status values: {row[0]} row(s)")
 
+    row = conn.execute(
+        """
+        SELECT COUNT(1)
+        FROM server_heartbeat_state
+        WHERE heartbeat_interval_seconds <= 0 OR last_status = '';
+        """
+    ).fetchone()
+    if row and row[0] > 0:
+        issues.append(f"server_heartbeat_state contains invalid interval or status values: {row[0]} row(s)")
+
     return issues
 
 
@@ -689,6 +718,79 @@ def upsert_server_auth_state(
             last_enrollment_attempt_at_utc,
             last_enrollment_result_at_utc,
             last_error,
+            updated_at_utc,
+        ),
+    )
+
+
+def fetch_server_heartbeat_state(conn: sqlite3.Connection) -> dict[str, object] | None:
+    row = conn.execute(
+        """
+        SELECT
+            heartbeat_interval_seconds,
+            last_attempt_at_utc,
+            last_success_at_utc,
+            last_error,
+            last_status,
+            next_due_at_utc,
+            updated_at_utc
+        FROM server_heartbeat_state
+        WHERE id = 1;
+        """
+    ).fetchone()
+    if row is None:
+        return None
+    return {
+        "heartbeat_interval_seconds": int(row[0]),
+        "last_attempt_at_utc": row[1],
+        "last_success_at_utc": row[2],
+        "last_error": row[3],
+        "last_status": str(row[4]),
+        "next_due_at_utc": row[5],
+        "updated_at_utc": str(row[6]),
+    }
+
+
+def upsert_server_heartbeat_state(
+    conn: sqlite3.Connection,
+    *,
+    heartbeat_interval_seconds: int,
+    last_attempt_at_utc: str | None,
+    last_success_at_utc: str | None,
+    last_error: str | None,
+    last_status: str,
+    next_due_at_utc: str | None,
+    updated_at_utc: str,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO server_heartbeat_state (
+            id,
+            heartbeat_interval_seconds,
+            last_attempt_at_utc,
+            last_success_at_utc,
+            last_error,
+            last_status,
+            next_due_at_utc,
+            updated_at_utc
+        )
+        VALUES (1, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE
+        SET heartbeat_interval_seconds = excluded.heartbeat_interval_seconds,
+            last_attempt_at_utc = excluded.last_attempt_at_utc,
+            last_success_at_utc = excluded.last_success_at_utc,
+            last_error = excluded.last_error,
+            last_status = excluded.last_status,
+            next_due_at_utc = excluded.next_due_at_utc,
+            updated_at_utc = excluded.updated_at_utc;
+        """,
+        (
+            heartbeat_interval_seconds,
+            last_attempt_at_utc,
+            last_success_at_utc,
+            last_error,
+            last_status,
+            next_due_at_utc,
             updated_at_utc,
         ),
     )
@@ -1112,7 +1214,7 @@ def fetch_next_uploaded_file(conn: sqlite3.Connection) -> dict[str, object] | No
 def fetch_wait_network_retry_candidates(conn: sqlite3.Connection) -> list[dict[str, object]]:
     rows = conn.execute(
         """
-        SELECT id, job_id, status, retry_count, updated_at_utc
+        SELECT id, job_id, status, retry_count, last_error, updated_at_utc
         FROM ingest_files
         WHERE status IN (?, ?)
         ORDER BY id ASC;
@@ -1125,7 +1227,8 @@ def fetch_wait_network_retry_candidates(conn: sqlite3.Connection) -> list[dict[s
             "job_id": int(row[1]),
             "status": row[2],
             "retry_count": int(row[3]),
-            "updated_at_utc": row[4],
+            "last_error": row[4],
+            "updated_at_utc": row[5],
         }
         for row in rows
     ]

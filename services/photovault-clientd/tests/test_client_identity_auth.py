@@ -1,5 +1,6 @@
 import json
 import sqlite3
+import time
 from io import BytesIO
 from pathlib import Path
 from urllib.error import HTTPError
@@ -243,6 +244,113 @@ def test_approved_client_uses_auth_headers_for_handshake_and_upload_flow(tmp_pat
     assert observed["handshake_headers"] == {"id": "pi-kitchen", "token": "issued-token"}
     assert observed["upload_headers"] == {"id": "pi-kitchen", "token": "issued-token"}
     assert observed["verify_headers"] == {"id": "pi-kitchen", "token": "issued-token"}
+
+
+def test_heartbeat_sender_is_deterministic_and_does_not_break_upload_flow(
+    tmp_path: Path, monkeypatch
+) -> None:
+    observed = {
+        "heartbeat_calls": 0,
+        "heartbeat_headers": [],
+        "heartbeat_payloads": [],
+    }
+
+    def fake_urlopen(request, timeout=5.0):
+        if request.full_url.endswith("/v1/client/enroll/bootstrap"):
+            return _FakeResponse(
+                {
+                    "client_id": "pi-kitchen",
+                    "display_name": "Kitchen Pi",
+                    "enrollment_status": "approved",
+                    "auth_token": "issued-token",
+                    "first_seen_at_utc": "2026-04-22T10:00:00+00:00",
+                    "last_enrolled_at_utc": "2026-04-22T10:00:00+00:00",
+                }
+            )
+        if request.full_url.endswith("/v1/client/heartbeat"):
+            observed["heartbeat_calls"] += 1
+            observed["heartbeat_headers"].append(
+                {
+                    "id": _request_header(request, "x-photovault-client-id"),
+                    "token": _request_header(request, "x-photovault-client-token"),
+                }
+            )
+            observed["heartbeat_payloads"].append(json.loads(request.data.decode("utf-8")))
+            return _FakeResponse(
+                {
+                    "status": "RECORDED",
+                    "client_id": "pi-kitchen",
+                    "last_seen_at_utc": "2026-04-22T10:00:00+00:00",
+                    "daemon_state": "WAIT_NETWORK",
+                    "workload_status": "waiting",
+                }
+            )
+        if request.full_url.endswith("/v1/upload/metadata-handshake"):
+            payload = json.loads(request.data.decode("utf-8"))
+            return _FakeResponse(
+                {
+                    "results": [
+                        {
+                            "client_file_id": int(payload["files"][0]["client_file_id"]),
+                            "decision": "UPLOAD_REQUIRED",
+                        }
+                    ]
+                }
+            )
+        if "/v1/upload/content/" in request.full_url:
+            return _FakeResponse({"status": "STORED_TEMP"})
+        if request.full_url.endswith("/v1/upload/verify"):
+            return _FakeResponse({"status": "VERIFIED"})
+        raise AssertionError(f"unexpected URL: {request.full_url}")
+
+    monkeypatch.setattr(engine, "urlopen", fake_urlopen)
+
+    source = tmp_path / "media" / "heartbeat.jpg"
+    _write_source(source, b"heartbeat-flow")
+
+    app = create_app(
+        db_path=tmp_path / "state.sqlite3",
+        staging_root=tmp_path / "staging",
+        server_base_url="http://fake",
+        client_id="pi-kitchen",
+        client_display_name="Kitchen Pi",
+        bootstrap_token="bootstrap-123",
+        heartbeat_interval_seconds=1,
+    )
+    with TestClient(app) as client:
+        create = client.post(
+            "/ingest/jobs",
+            json={"media_label": "sd-heartbeat", "source_paths": [str(source)]},
+        )
+        assert create.status_code == 200
+        _tick_until_state(client, "WAIT_NETWORK")
+
+        # First online tick initializes heartbeat cadence.
+        first_tick = client.post("/daemon/tick")
+        assert first_tick.status_code == 200
+        time.sleep(1.1)
+        # Next tick sends heartbeat and continues normal upload flow.
+        second_tick = client.post("/daemon/tick")
+        assert second_tick.status_code == 200
+
+        _tick_until_state(client, "IDLE", max_steps=40)
+
+        state = client.get("/state").json()
+        assert state["server_heartbeat"] is not None
+        assert state["server_heartbeat"]["last_status"] == "sent"
+        assert state["server_heartbeat"]["last_error"] is None
+
+    assert observed["heartbeat_calls"] >= 1
+    assert observed["heartbeat_headers"][0] == {"id": "pi-kitchen", "token": "issued-token"}
+    assert observed["heartbeat_payloads"][0]["daemon_state"]
+    assert observed["heartbeat_payloads"][0]["workload_status"] in {"idle", "working", "waiting", "blocked"}
+    active_job = observed["heartbeat_payloads"][0]["active_job"]
+    if active_job is not None:
+        assert isinstance(active_job, dict)
+        assert "total_files" in active_job
+        assert "non_terminal_files" in active_job
+        assert "error_files" in active_job
+        assert "blocking_reason" in active_job
 
 
 def test_invalid_auth_error_blocks_privileged_work_and_persists_reason(tmp_path: Path, monkeypatch) -> None:

@@ -160,6 +160,72 @@ def test_in_memory_upsert_client_pending_preserves_approved_status_and_token() -
     assert seen_again.display_name == "Kitchen Pi Updated"
 
 
+def test_in_memory_client_heartbeat_upsert_and_fetch_latest_snapshot() -> None:
+    from photovault_api.state_store import InMemoryUploadStateStore
+
+    store = InMemoryUploadStateStore()
+    first = store.upsert_client_heartbeat(
+        client_id="pi-kitchen",
+        last_seen_at_utc="2026-04-22T10:00:00+00:00",
+        daemon_state="WAIT_NETWORK",
+        workload_status="waiting",
+        active_job_id=1,
+        active_job_label="SD-A",
+        active_job_status="UPLOAD_PREPARE",
+        active_job_ready_to_upload=4,
+        active_job_uploaded=0,
+        active_job_retrying=1,
+        active_job_total_files=9,
+        active_job_non_terminal_files=5,
+        active_job_error_files=1,
+        active_job_blocking_reason=None,
+        retry_pending_count=2,
+        retry_next_at_utc="2026-04-22T10:01:00+00:00",
+        retry_reason="upload offline",
+        auth_block_reason=None,
+        recent_error_category="UPLOAD_RETRY_SCHEDULED",
+        recent_error_message="temporary upload failure",
+        recent_error_at_utc="2026-04-22T09:59:00+00:00",
+        updated_at_utc="2026-04-22T10:00:00+00:00",
+    )
+    assert first.daemon_state == "WAIT_NETWORK"
+
+    second = store.upsert_client_heartbeat(
+        client_id="pi-kitchen",
+        last_seen_at_utc="2026-04-22T10:02:00+00:00",
+        daemon_state="UPLOAD_FILE",
+        workload_status="working",
+        active_job_id=1,
+        active_job_label="SD-A",
+        active_job_status="UPLOAD_FILE",
+        active_job_ready_to_upload=3,
+        active_job_uploaded=1,
+        active_job_retrying=0,
+        active_job_total_files=9,
+        active_job_non_terminal_files=4,
+        active_job_error_files=0,
+        active_job_blocking_reason=None,
+        retry_pending_count=1,
+        retry_next_at_utc=None,
+        retry_reason="n/a",
+        auth_block_reason=None,
+        recent_error_category=None,
+        recent_error_message=None,
+        recent_error_at_utc=None,
+        updated_at_utc="2026-04-22T10:02:00+00:00",
+    )
+    assert second.daemon_state == "UPLOAD_FILE"
+
+    fetched = store.get_client_heartbeat("pi-kitchen")
+    assert fetched is not None
+    assert fetched.last_seen_at_utc == "2026-04-22T10:02:00+00:00"
+    assert fetched.workload_status == "working"
+    assert fetched.active_job_uploaded == 1
+    assert fetched.active_job_total_files == 9
+    assert fetched.active_job_non_terminal_files == 4
+    assert fetched.active_job_error_files == 0
+
+
 def test_postgres_upsert_client_pending_uses_conflict_update() -> None:
     observed: dict[str, object] = {}
 
@@ -220,6 +286,123 @@ def test_postgres_upsert_client_pending_uses_conflict_update() -> None:
     )
     assert observed["committed"] is True
     assert record.enrollment_status == "pending"
+
+
+def test_postgres_upsert_client_heartbeat_uses_conflict_update() -> None:
+    observed: dict[str, object] = {}
+
+    class _FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def execute(self, query: str, params: tuple[object, ...]) -> None:
+            observed["query"] = query
+            observed["params"] = params
+
+        def fetchone(self):
+            return (
+                "pi-kitchen",
+                "2026-04-22T10:00:00+00:00",
+                "WAIT_NETWORK",
+                "waiting",
+                3,
+                "SD-A",
+                "UPLOAD_PREPARE",
+                4,
+                0,
+                1,
+                9,
+                5,
+                1,
+                "WAIT_NETWORK",
+                2,
+                "2026-04-22T10:01:00+00:00",
+                "upload offline",
+                None,
+                "UPLOAD_RETRY_SCHEDULED",
+                "temporary upload failure",
+                "2026-04-22T09:59:00+00:00",
+                "2026-04-22T10:00:00+00:00",
+            )
+
+    class _FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def cursor(self) -> _FakeCursor:
+            return _FakeCursor()
+
+        def commit(self) -> None:
+            observed["committed"] = True
+
+    class _TestStore(PostgresUploadStateStore):
+        def _connect(self):  # type: ignore[override]
+            return _FakeConnection()
+
+    store = _TestStore(database_url="postgresql://unused")
+    record = store.upsert_client_heartbeat(
+        client_id="pi-kitchen",
+        last_seen_at_utc="2026-04-22T10:00:00+00:00",
+        daemon_state="WAIT_NETWORK",
+        workload_status="waiting",
+        active_job_id=3,
+        active_job_label="SD-A",
+        active_job_status="UPLOAD_PREPARE",
+        active_job_ready_to_upload=4,
+        active_job_uploaded=0,
+        active_job_retrying=1,
+        active_job_total_files=9,
+        active_job_non_terminal_files=5,
+        active_job_error_files=1,
+        active_job_blocking_reason="WAIT_NETWORK",
+        retry_pending_count=2,
+        retry_next_at_utc="2026-04-22T10:01:00+00:00",
+        retry_reason="upload offline",
+        auth_block_reason=None,
+        recent_error_category="UPLOAD_RETRY_SCHEDULED",
+        recent_error_message="temporary upload failure",
+        recent_error_at_utc="2026-04-22T09:59:00+00:00",
+        updated_at_utc="2026-04-22T10:00:00+00:00",
+    )
+
+    assert "INSERT INTO api_client_heartbeats" in str(observed["query"])
+    assert "ON CONFLICT (client_id) DO UPDATE" in str(observed["query"])
+    assert observed["params"] == (
+        "pi-kitchen",
+        "2026-04-22T10:00:00+00:00",
+        "WAIT_NETWORK",
+        "waiting",
+        3,
+        "SD-A",
+        "UPLOAD_PREPARE",
+        4,
+        0,
+        1,
+        9,
+        5,
+        1,
+        "WAIT_NETWORK",
+        2,
+        "2026-04-22T10:01:00+00:00",
+        "upload offline",
+        None,
+        "UPLOAD_RETRY_SCHEDULED",
+        "temporary upload failure",
+        "2026-04-22T09:59:00+00:00",
+        "2026-04-22T10:00:00+00:00",
+    )
+    assert observed["committed"] is True
+    assert record.client_id == "pi-kitchen"
+    assert record.daemon_state == "WAIT_NETWORK"
+    assert record.active_job_total_files == 9
+    assert record.active_job_non_terminal_files == 5
+    assert record.active_job_error_files == 1
 
 
 def test_postgres_has_shas_uses_single_query_and_returns_known_set() -> None:

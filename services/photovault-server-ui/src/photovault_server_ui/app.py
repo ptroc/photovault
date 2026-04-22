@@ -134,11 +134,34 @@ def create_app(*, api_fetcher: ApiFetcher | None = None, api_poster: ApiPoster |
         except ValueError:
             page = 1
         offset = (page - 1) * page_size
+        presence_status_filter = request.args.get("presence_status", "").strip()
+        workload_status_filter = request.args.get("workload_status", "").strip()
+        enrollment_status_filter = request.args.get("enrollment_status", "").strip()
+        sort_by = request.args.get("sort_by", "").strip() or "last_seen"
+        sort_order = request.args.get("sort_order", "").strip() or "desc"
+        clients_query_state = {
+            "presence_status": presence_status_filter,
+            "workload_status": workload_status_filter,
+            "enrollment_status": enrollment_status_filter,
+            "sort_by": sort_by,
+            "sort_order": sort_order,
+        }
         action_message = request.args.get("action_message")
         action_error = request.args.get("action_error")
         error_message: str | None = None
+        query: dict[str, str] = {"limit": str(page_size), "offset": str(offset)}
+        if presence_status_filter:
+            query["presence_status"] = presence_status_filter
+        if workload_status_filter:
+            query["workload_status"] = workload_status_filter
+        if enrollment_status_filter:
+            query["enrollment_status"] = enrollment_status_filter
+        if request.args.get("sort_by", "").strip():
+            query["sort_by"] = sort_by
+        if request.args.get("sort_order", "").strip():
+            query["sort_order"] = sort_order
         try:
-            payload = fetcher("/v1/admin/clients", {"limit": str(page_size), "offset": str(offset)})
+            payload = fetcher("/v1/admin/clients", query)
         except (URLError, TimeoutError, ValueError):
             payload = {"total": 0, "limit": page_size, "offset": offset, "items": []}
             error_message = "Unable to reach photovault-api client registry endpoint."
@@ -149,6 +172,16 @@ def create_app(*, api_fetcher: ApiFetcher | None = None, api_poster: ApiPoster |
         has_next = offset + len(items) < total
         start_index = offset + 1 if total > 0 and items else 0
         end_index = offset + len(items)
+        previous_url = (
+            url_for("clients", page=page - 1, **clients_query_state)
+            if has_previous
+            else None
+        )
+        next_url = (
+            url_for("clients", page=page + 1, **clients_query_state)
+            if has_next
+            else None
+        )
 
         return render_template(
             "clients.html",
@@ -163,6 +196,9 @@ def create_app(*, api_fetcher: ApiFetcher | None = None, api_poster: ApiPoster |
             error_message=error_message,
             action_message=action_message,
             action_error=action_error,
+            clients_query_state=clients_query_state,
+            previous_url=previous_url,
+            next_url=next_url,
             active_page="clients",
         )
 
@@ -170,25 +206,81 @@ def create_app(*, api_fetcher: ApiFetcher | None = None, api_poster: ApiPoster |
     def approve_client_action():
         client_id = request.form.get("client_id", "").strip()
         page = request.form.get("page", "1")
+        clients_query_state = {
+            "presence_status": request.form.get("presence_status", "").strip(),
+            "workload_status": request.form.get("workload_status", "").strip(),
+            "enrollment_status": request.form.get("enrollment_status", "").strip(),
+            "sort_by": request.form.get("sort_by", "").strip() or "last_seen",
+            "sort_order": request.form.get("sort_order", "").strip() or "desc",
+        }
         if not client_id:
-            return redirect(url_for("clients", page=page, action_error="Missing client id for approval."))
+            return redirect(
+                url_for(
+                    "clients",
+                    page=page,
+                    action_error="Missing client id for approval.",
+                    **clients_query_state,
+                )
+            )
         try:
             poster(f"/v1/admin/clients/{client_id}/approve", {})
         except (URLError, TimeoutError, ValueError):
-            return redirect(url_for("clients", page=page, action_error=f"Approval failed for {client_id}."))
-        return redirect(url_for("clients", page=page, action_message=f"Approved client {client_id}."))
+            return redirect(
+                url_for(
+                    "clients",
+                    page=page,
+                    action_error=f"Approval failed for {client_id}.",
+                    **clients_query_state,
+                )
+            )
+        return redirect(
+            url_for(
+                "clients",
+                page=page,
+                action_message=f"Approved client {client_id}.",
+                **clients_query_state,
+            )
+        )
 
     @app.post("/clients/actions/revoke")
     def revoke_client_action():
         client_id = request.form.get("client_id", "").strip()
         page = request.form.get("page", "1")
+        clients_query_state = {
+            "presence_status": request.form.get("presence_status", "").strip(),
+            "workload_status": request.form.get("workload_status", "").strip(),
+            "enrollment_status": request.form.get("enrollment_status", "").strip(),
+            "sort_by": request.form.get("sort_by", "").strip() or "last_seen",
+            "sort_order": request.form.get("sort_order", "").strip() or "desc",
+        }
         if not client_id:
-            return redirect(url_for("clients", page=page, action_error="Missing client id for revocation."))
+            return redirect(
+                url_for(
+                    "clients",
+                    page=page,
+                    action_error="Missing client id for revocation.",
+                    **clients_query_state,
+                )
+            )
         try:
             poster(f"/v1/admin/clients/{client_id}/revoke", {})
         except (URLError, TimeoutError, ValueError):
-            return redirect(url_for("clients", page=page, action_error=f"Revocation failed for {client_id}."))
-        return redirect(url_for("clients", page=page, action_message=f"Revoked client {client_id}."))
+            return redirect(
+                url_for(
+                    "clients",
+                    page=page,
+                    action_error=f"Revocation failed for {client_id}.",
+                    **clients_query_state,
+                )
+            )
+        return redirect(
+            url_for(
+                "clients",
+                page=page,
+                action_message=f"Revoked client {client_id}.",
+                **clients_query_state,
+            )
+        )
 
     @app.get("/duplicates")
     def duplicates() -> str:

@@ -12,6 +12,7 @@ from photovault_clientd.db import (
     CLIENT_ENROLLMENT_APPROVED,
     CLIENT_ENROLLMENT_PENDING,
     CLIENT_ENROLLMENT_REVOKED,
+    TERMINAL_FILE_STATUSES,
     append_daemon_event,
     clear_ready_to_upload_error,
     count_hash_pending_files_global,
@@ -26,6 +27,7 @@ from photovault_clientd.db import (
     count_uploaded_files_global,
     fetch_cleanup_remote_terminal_files,
     fetch_hashed_files_for_job,
+    fetch_ingest_job_detail,
     fetch_next_copy_candidate,
     fetch_next_hash_candidate,
     fetch_next_hashing_job_with_pending_hash,
@@ -34,8 +36,10 @@ from photovault_clientd.db import (
     fetch_next_staging_job_with_pending_copy,
     fetch_next_uploaded_file,
     fetch_ready_to_upload_files_global,
+    fetch_recent_daemon_events,
     fetch_reupload_target_file,
     fetch_server_auth_state,
+    fetch_server_heartbeat_state,
     fetch_wait_network_retry_candidates,
     get_daemon_state,
     local_sha_exists,
@@ -60,6 +64,7 @@ from photovault_clientd.db import (
     set_job_status,
     transition_daemon_state,
     upsert_server_auth_state,
+    upsert_server_heartbeat_state,
 )
 from photovault_clientd.events import EventCategory, EventLevel, classify_copy_error, classify_hash_error
 from photovault_clientd.hashing import compute_sha256
@@ -75,10 +80,12 @@ DEFAULT_MAX_UPLOAD_RETRIES = 3
 DEFAULT_RETRY_BACKOFF_MAX_SECONDS = 30
 DEFAULT_AUTO_PROGRESS_MAX_STEPS = 32
 DEFAULT_ENROLL_TIMEOUT_SECONDS = 5.0
+DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 15
 
 _CLIENT_REQUEST_AUTH_HEADERS: dict[str, str] = {}
 
 AUTO_PROGRESS_SAFE_STATES = {
+    ClientState.IDLE,
     ClientState.STAGING_COPY,
     ClientState.HASHING,
     ClientState.DEDUP_SESSION_SHA,
@@ -455,6 +462,330 @@ def _post_server_verify(
     if status not in {"VERIFIED", "ALREADY_EXISTS", "VERIFY_FAILED"}:
         raise ValueError("verify response has invalid status")
     return str(status)
+
+
+def _post_client_heartbeat(
+    *,
+    server_base_url: str,
+    headers: dict[str, str],
+    payload: dict[str, object],
+    timeout_seconds: float = DEFAULT_HANDSHAKE_TIMEOUT_SECONDS,
+) -> dict[str, object]:
+    request = Request(
+        url=f"{server_base_url.rstrip('/')}/v1/client/heartbeat",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json", **headers},
+        method="POST",
+    )
+    with urlopen(request, timeout=timeout_seconds) as response:
+        body = json.loads(response.read().decode("utf-8"))
+    if not isinstance(body, dict):
+        raise ValueError("heartbeat response must be a JSON object")
+    return body
+
+
+def _heartbeat_workload_status(*, state: ClientState | None, auth_block_reason: str | None) -> str:
+    if auth_block_reason:
+        return "blocked"
+    if state in {
+        ClientState.ERROR_DAEMON,
+        ClientState.ERROR_FILE,
+        ClientState.ERROR_JOB,
+        ClientState.PAUSED_STORAGE,
+    }:
+        return "blocked"
+    if state == ClientState.IDLE:
+        return "idle"
+    if state == ClientState.WAIT_NETWORK:
+        return "waiting"
+    return "working"
+
+
+def _heartbeat_auth_block_reason(conn) -> str | None:
+    auth_state = fetch_server_auth_state(conn)
+    if auth_state is None:
+        return None
+    enrollment_status = str(auth_state.get("enrollment_status") or "")
+    if enrollment_status == CLIENT_ENROLLMENT_PENDING:
+        return "CLIENT_PENDING_APPROVAL"
+    if enrollment_status == CLIENT_ENROLLMENT_REVOKED:
+        return "CLIENT_REVOKED"
+    last_error = str(auth_state.get("last_error") or "")
+    if last_error in _AUTH_BLOCKED_DETAILS:
+        return last_error
+    return None
+
+
+def _heartbeat_active_job_summary(conn) -> dict[str, object] | None:
+    current_state = get_daemon_state(conn)
+    job_id: int | None = None
+    if current_state in {
+        ClientState.STAGING_COPY,
+        ClientState.HASHING,
+        ClientState.DEDUP_SESSION_SHA,
+        ClientState.DEDUP_LOCAL_SHA,
+        ClientState.QUEUE_UPLOAD,
+        ClientState.UPLOAD_PREPARE,
+        ClientState.UPLOAD_FILE,
+        ClientState.SERVER_VERIFY,
+        ClientState.REUPLOAD_OR_QUARANTINE,
+        ClientState.POST_UPLOAD_VERIFY,
+        ClientState.CLEANUP_STAGING,
+        ClientState.JOB_COMPLETE_REMOTE,
+        ClientState.JOB_COMPLETE_LOCAL,
+        ClientState.WAIT_NETWORK,
+    }:
+        job_id = fetch_next_job_with_status(conn, current_state)
+    if job_id is None:
+        if fetch_next_ready_to_upload_file(conn) is not None:
+            candidate = fetch_next_ready_to_upload_file(conn)
+            if candidate is not None:
+                job_id = int(candidate["job_id"])
+        elif fetch_next_uploaded_file(conn) is not None:
+            uploaded = fetch_next_uploaded_file(conn)
+            if uploaded is not None:
+                job_id = int(uploaded["job_id"])
+    if job_id is None:
+        return None
+
+    detail = fetch_ingest_job_detail(conn, job_id)
+    if detail is None:
+        return None
+    status_counts = detail.get("status_counts") or {}
+    total_files = sum(int(count) for count in status_counts.values())
+    terminal_files = sum(
+        int(status_counts.get(terminal_status, 0))
+        for terminal_status in TERMINAL_FILE_STATUSES
+    )
+    non_terminal_files = max(0, total_files - terminal_files)
+    retrying = int(status_counts.get(FileStatus.NEEDS_RETRY_COPY.value, 0)) + int(
+        status_counts.get(FileStatus.NEEDS_RETRY_HASH.value, 0)
+    )
+    error_files = int(status_counts.get(FileStatus.ERROR_FILE.value, 0))
+    blocking_reason: str | None = None
+    if current_state in {
+        ClientState.WAIT_NETWORK,
+        ClientState.PAUSED_STORAGE,
+        ClientState.ERROR_DAEMON,
+        ClientState.ERROR_FILE,
+        ClientState.ERROR_JOB,
+    }:
+        blocking_reason = current_state.value
+    elif error_files > 0:
+        blocking_reason = "ERROR_FILE_PRESENT"
+    return {
+        "job_id": int(detail["job_id"]),
+        "media_label": detail.get("media_label"),
+        "job_status": str(detail.get("status") or "unknown"),
+        "ready_to_upload": int(status_counts.get(FileStatus.READY_TO_UPLOAD.value, 0)),
+        "uploaded": int(status_counts.get(FileStatus.UPLOADED.value, 0)),
+        "retrying": retrying,
+        "total_files": total_files,
+        "non_terminal_files": non_terminal_files,
+        "error_files": error_files,
+        "blocking_reason": blocking_reason,
+    }
+
+
+def _heartbeat_retry_backoff_summary(conn) -> dict[str, object] | None:
+    candidates = fetch_wait_network_retry_candidates(conn)
+    if not candidates:
+        return None
+    retried_rows = [row for row in candidates if int(row["retry_count"]) > 0]
+    if not retried_rows:
+        return None
+
+    next_retry_at: datetime | None = None
+    most_recent_error: tuple[datetime, str] | None = None
+    for row in retried_rows:
+        retry_due_at = _retry_due_time(str(row["updated_at_utc"]), int(row["retry_count"]))
+        if next_retry_at is None or retry_due_at < next_retry_at:
+            next_retry_at = retry_due_at
+        last_error = str(row.get("last_error") or "").strip()
+        if not last_error:
+            continue
+        try:
+            updated_at = datetime.fromisoformat(str(row["updated_at_utc"]))
+        except ValueError:
+            continue
+        if most_recent_error is None or updated_at > most_recent_error[0]:
+            most_recent_error = (updated_at, last_error)
+    return {
+        "pending_count": len(retried_rows),
+        "next_retry_at_utc": next_retry_at.isoformat() if next_retry_at is not None else None,
+        "reason": most_recent_error[1] if most_recent_error is not None else None,
+    }
+
+
+def _heartbeat_recent_error(conn) -> dict[str, object] | None:
+    for event in fetch_recent_daemon_events(conn, limit=25):
+        if str(event.get("level")) != EventLevel.ERROR.value:
+            continue
+        message = str(event.get("message") or "").strip()
+        if not message:
+            continue
+        return {
+            "category": str(event.get("category") or "ERROR"),
+            "message": message[:512],
+            "created_at_utc": str(event.get("created_at_utc") or ""),
+        }
+    return None
+
+
+def _build_client_heartbeat_payload(conn, *, now_utc: str) -> dict[str, object]:
+    state = get_daemon_state(conn)
+    auth_block_reason = _heartbeat_auth_block_reason(conn)
+    payload: dict[str, object] = {
+        "last_seen_at_utc": now_utc,
+        "daemon_state": state.value if state is not None else ClientState.ERROR_DAEMON.value,
+        "workload_status": _heartbeat_workload_status(state=state, auth_block_reason=auth_block_reason),
+        "active_job": _heartbeat_active_job_summary(conn),
+        "retry_backoff": _heartbeat_retry_backoff_summary(conn),
+        "auth_block_reason": auth_block_reason,
+        "recent_error": _heartbeat_recent_error(conn),
+    }
+    return payload
+
+
+def run_client_heartbeat_tick(
+    conn,
+    *,
+    server_base_url: str,
+    client_id: str,
+    client_display_name: str,
+    bootstrap_token: str | None,
+    heartbeat_interval_seconds: int = DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
+) -> dict[str, object]:
+    now = datetime.now(UTC)
+    now_utc = now.isoformat()
+    interval_seconds = max(1, heartbeat_interval_seconds)
+    current = fetch_server_heartbeat_state(conn)
+
+    if current is None:
+        next_due = (now + timedelta(seconds=interval_seconds)).isoformat()
+        upsert_server_heartbeat_state(
+            conn,
+            heartbeat_interval_seconds=interval_seconds,
+            last_attempt_at_utc=None,
+            last_success_at_utc=None,
+            last_error=None,
+            last_status="initialized",
+            next_due_at_utc=next_due,
+            updated_at_utc=now_utc,
+        )
+        conn.commit()
+        return {
+            "handled": True,
+            "sent": False,
+            "reason": "initialized",
+            "next_due_at_utc": next_due,
+        }
+
+    next_due_raw = current.get("next_due_at_utc")
+    if isinstance(next_due_raw, str) and next_due_raw:
+        try:
+            next_due_at = datetime.fromisoformat(next_due_raw)
+        except ValueError:
+            next_due_at = None
+        if next_due_at is not None and now < next_due_at:
+            return {
+                "handled": True,
+                "sent": False,
+                "reason": "not_due",
+                "next_due_at_utc": next_due_at.isoformat(),
+            }
+
+    auth_headers, auth_block_reason = _build_client_auth_headers(
+        conn,
+        server_base_url=server_base_url,
+        client_id=client_id,
+        display_name=client_display_name,
+        bootstrap_token=bootstrap_token,
+        now_utc=now_utc,
+    )
+    next_due_at_utc = (now + timedelta(seconds=interval_seconds)).isoformat()
+    if auth_headers is None:
+        blocked_reason = auth_block_reason or "CLIENT_AUTH_REQUIRED"
+        upsert_server_heartbeat_state(
+            conn,
+            heartbeat_interval_seconds=interval_seconds,
+            last_attempt_at_utc=now_utc,
+            last_success_at_utc=current.get("last_success_at_utc"),
+            last_error=blocked_reason,
+            last_status="auth_blocked",
+            next_due_at_utc=next_due_at_utc,
+            updated_at_utc=now_utc,
+        )
+        conn.commit()
+        return {
+            "handled": True,
+            "sent": False,
+            "reason": "auth_blocked",
+            "auth_reason": blocked_reason,
+            "next_due_at_utc": next_due_at_utc,
+        }
+
+    payload = _build_client_heartbeat_payload(conn, now_utc=now_utc)
+    try:
+        _post_client_heartbeat(server_base_url=server_base_url, headers=auth_headers, payload=payload)
+    except HTTPError as exc:
+        auth_detail = _update_auth_state_from_privileged_http_error(conn, now_utc=now_utc, exc=exc)
+        detail = auth_detail or _extract_http_error_detail(exc)
+        upsert_server_heartbeat_state(
+            conn,
+            heartbeat_interval_seconds=interval_seconds,
+            last_attempt_at_utc=now_utc,
+            last_success_at_utc=current.get("last_success_at_utc"),
+            last_error=detail,
+            last_status="error",
+            next_due_at_utc=next_due_at_utc,
+            updated_at_utc=now_utc,
+        )
+        conn.commit()
+        return {
+            "handled": True,
+            "sent": False,
+            "reason": "error",
+            "error": detail,
+            "next_due_at_utc": next_due_at_utc,
+        }
+    except (URLError, TimeoutError, ValueError, OSError, json.JSONDecodeError) as exc:
+        upsert_server_heartbeat_state(
+            conn,
+            heartbeat_interval_seconds=interval_seconds,
+            last_attempt_at_utc=now_utc,
+            last_success_at_utc=current.get("last_success_at_utc"),
+            last_error=str(exc),
+            last_status="error",
+            next_due_at_utc=next_due_at_utc,
+            updated_at_utc=now_utc,
+        )
+        conn.commit()
+        return {
+            "handled": True,
+            "sent": False,
+            "reason": "error",
+            "error": str(exc),
+            "next_due_at_utc": next_due_at_utc,
+        }
+
+    upsert_server_heartbeat_state(
+        conn,
+        heartbeat_interval_seconds=interval_seconds,
+        last_attempt_at_utc=now_utc,
+        last_success_at_utc=now_utc,
+        last_error=None,
+        last_status="sent",
+        next_due_at_utc=next_due_at_utc,
+        updated_at_utc=now_utc,
+    )
+    conn.commit()
+    return {
+        "handled": True,
+        "sent": True,
+        "reason": "sent",
+        "next_due_at_utc": next_due_at_utc,
+    }
 
 
 def _retry_backoff_seconds(retry_count: int) -> int:
@@ -2352,8 +2683,18 @@ def run_daemon_tick(
     bootstrap_token: str | None = None,
     retain_staged_files: bool = DEFAULT_RETAIN_STAGED_FILES,
     max_upload_retries: int = DEFAULT_MAX_UPLOAD_RETRIES,
+    heartbeat_interval_seconds: int = DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
 ) -> dict[str, object]:
     """Run one daemon tick for the current state."""
+    run_client_heartbeat_tick(
+        conn,
+        server_base_url=server_base_url,
+        client_id=client_id,
+        client_display_name=client_display_name,
+        bootstrap_token=bootstrap_token,
+        heartbeat_interval_seconds=heartbeat_interval_seconds,
+    )
+
     state = get_daemon_state(conn)
     if state == ClientState.STAGING_COPY:
         return run_staging_copy_tick(conn, staging_root)
@@ -2389,6 +2730,13 @@ def run_daemon_tick(
         return run_job_complete_remote_tick(conn)
     if state == ClientState.JOB_COMPLETE_LOCAL:
         return run_job_complete_local_tick(conn)
+    if state == ClientState.IDLE:
+        return {
+            "handled": True,
+            "progressed": False,
+            "errored": False,
+            "next_state": ClientState.IDLE.value,
+        }
 
     now = datetime.now(UTC).isoformat()
     append_daemon_event(
@@ -2419,6 +2767,7 @@ def run_recovery_dispatch(
     bootstrap_token: str | None = None,
     retain_staged_files: bool = DEFAULT_RETAIN_STAGED_FILES,
     max_upload_retries: int = DEFAULT_MAX_UPLOAD_RETRIES,
+    heartbeat_interval_seconds: int = DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
     max_steps: int = 1000,
 ) -> dict[str, object]:
     """Drain implemented recovery phase work after bootstrap selection."""
@@ -2459,6 +2808,7 @@ def run_recovery_dispatch(
             bootstrap_token=bootstrap_token,
             retain_staged_files=retain_staged_files,
             max_upload_retries=max_upload_retries,
+            heartbeat_interval_seconds=heartbeat_interval_seconds,
         )
         steps += 1
         if outcome.get("progressed"):
@@ -2513,6 +2863,7 @@ def run_auto_progress_dispatch(
     bootstrap_token: str | None = None,
     retain_staged_files: bool = DEFAULT_RETAIN_STAGED_FILES,
     max_upload_retries: int = DEFAULT_MAX_UPLOAD_RETRIES,
+    heartbeat_interval_seconds: int = DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
     max_steps: int = DEFAULT_AUTO_PROGRESS_MAX_STEPS,
 ) -> dict[str, object]:
     """Bounded auto-drain for deterministic online/upload and completion states."""
@@ -2536,6 +2887,7 @@ def run_auto_progress_dispatch(
             bootstrap_token=bootstrap_token,
             retain_staged_files=retain_staged_files,
             max_upload_retries=max_upload_retries,
+            heartbeat_interval_seconds=heartbeat_interval_seconds,
         )
         steps += 1
         if outcome.get("progressed"):

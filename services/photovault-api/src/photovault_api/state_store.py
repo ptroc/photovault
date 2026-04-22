@@ -123,6 +123,32 @@ class ClientRecord:
     auth_token: str | None
 
 
+@dataclass(frozen=True)
+class ClientHeartbeatRecord:
+    client_id: str
+    last_seen_at_utc: str
+    daemon_state: str
+    workload_status: str
+    active_job_id: int | None
+    active_job_label: str | None
+    active_job_status: str | None
+    active_job_ready_to_upload: int | None
+    active_job_uploaded: int | None
+    active_job_retrying: int | None
+    active_job_total_files: int | None
+    active_job_non_terminal_files: int | None
+    active_job_error_files: int | None
+    active_job_blocking_reason: str | None
+    retry_pending_count: int | None
+    retry_next_at_utc: str | None
+    retry_reason: str | None
+    auth_block_reason: str | None
+    recent_error_category: str | None
+    recent_error_message: str | None
+    recent_error_at_utc: str | None
+    updated_at_utc: str
+
+
 class UploadStateStore(Protocol):
     def initialize(self) -> None: ...
 
@@ -257,6 +283,35 @@ class UploadStateStore(Protocol):
         revoked_at_utc: str,
     ) -> ClientRecord | None: ...
 
+    def upsert_client_heartbeat(
+        self,
+        *,
+        client_id: str,
+        last_seen_at_utc: str,
+        daemon_state: str,
+        workload_status: str,
+        active_job_id: int | None,
+        active_job_label: str | None,
+        active_job_status: str | None,
+        active_job_ready_to_upload: int | None,
+        active_job_uploaded: int | None,
+        active_job_retrying: int | None,
+        active_job_total_files: int | None,
+        active_job_non_terminal_files: int | None,
+        active_job_error_files: int | None,
+        active_job_blocking_reason: str | None,
+        retry_pending_count: int | None,
+        retry_next_at_utc: str | None,
+        retry_reason: str | None,
+        auth_block_reason: str | None,
+        recent_error_category: str | None,
+        recent_error_message: str | None,
+        recent_error_at_utc: str | None,
+        updated_at_utc: str,
+    ) -> ClientHeartbeatRecord: ...
+
+    def get_client_heartbeat(self, client_id: str) -> ClientHeartbeatRecord | None: ...
+
     def remove_temp_upload(self, sha256_hex: str) -> None: ...
 
 
@@ -270,6 +325,7 @@ class InMemoryUploadStateStore:
     media_assets: dict[str, MediaAssetRecord] = field(default_factory=dict)
     media_asset_extractions: dict[str, MediaExtractionRecord] = field(default_factory=dict)
     clients: dict[str, ClientRecord] = field(default_factory=dict)
+    client_heartbeats: dict[str, ClientHeartbeatRecord] = field(default_factory=dict)
     path_conflicts: list[PathConflictRecord] = field(default_factory=list)
     latest_index_run: StorageIndexRunRecord | None = None
     _lock: Lock = field(default_factory=Lock)
@@ -747,6 +803,64 @@ class InMemoryUploadStateStore:
             self.clients[client_id] = updated
             return updated
 
+    def upsert_client_heartbeat(
+        self,
+        *,
+        client_id: str,
+        last_seen_at_utc: str,
+        daemon_state: str,
+        workload_status: str,
+        active_job_id: int | None,
+        active_job_label: str | None,
+        active_job_status: str | None,
+        active_job_ready_to_upload: int | None,
+        active_job_uploaded: int | None,
+        active_job_retrying: int | None,
+        active_job_total_files: int | None,
+        active_job_non_terminal_files: int | None,
+        active_job_error_files: int | None,
+        active_job_blocking_reason: str | None,
+        retry_pending_count: int | None,
+        retry_next_at_utc: str | None,
+        retry_reason: str | None,
+        auth_block_reason: str | None,
+        recent_error_category: str | None,
+        recent_error_message: str | None,
+        recent_error_at_utc: str | None,
+        updated_at_utc: str,
+    ) -> ClientHeartbeatRecord:
+        with self._lock:
+            record = ClientHeartbeatRecord(
+                client_id=client_id,
+                last_seen_at_utc=last_seen_at_utc,
+                daemon_state=daemon_state,
+                workload_status=workload_status,
+                active_job_id=active_job_id,
+                active_job_label=active_job_label,
+                active_job_status=active_job_status,
+                active_job_ready_to_upload=active_job_ready_to_upload,
+                active_job_uploaded=active_job_uploaded,
+                active_job_retrying=active_job_retrying,
+                active_job_total_files=active_job_total_files,
+                active_job_non_terminal_files=active_job_non_terminal_files,
+                active_job_error_files=active_job_error_files,
+                active_job_blocking_reason=active_job_blocking_reason,
+                retry_pending_count=retry_pending_count,
+                retry_next_at_utc=retry_next_at_utc,
+                retry_reason=retry_reason,
+                auth_block_reason=auth_block_reason,
+                recent_error_category=recent_error_category,
+                recent_error_message=recent_error_message,
+                recent_error_at_utc=recent_error_at_utc,
+                updated_at_utc=updated_at_utc,
+            )
+            self.client_heartbeats[client_id] = record
+            return record
+
+    def get_client_heartbeat(self, client_id: str) -> ClientHeartbeatRecord | None:
+        with self._lock:
+            return self.client_heartbeats.get(client_id)
+
 
 @dataclass
 class PostgresUploadStateStore:
@@ -893,6 +1007,54 @@ class PostgresUploadStateStore:
                         revoked_at_utc TEXT,
                         auth_token TEXT
                     );
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS api_client_heartbeats (
+                        client_id TEXT PRIMARY KEY REFERENCES api_clients(client_id) ON DELETE CASCADE,
+                        last_seen_at_utc TEXT NOT NULL,
+                        daemon_state TEXT NOT NULL,
+                        workload_status TEXT NOT NULL,
+                        active_job_id BIGINT,
+                        active_job_label TEXT,
+                        active_job_status TEXT,
+                        active_job_ready_to_upload INTEGER,
+                        active_job_uploaded INTEGER,
+                        active_job_retrying INTEGER,
+                        retry_pending_count INTEGER,
+                        retry_next_at_utc TEXT,
+                        retry_reason TEXT,
+                        auth_block_reason TEXT,
+                        recent_error_category TEXT,
+                        recent_error_message TEXT,
+                        recent_error_at_utc TEXT,
+                        updated_at_utc TEXT NOT NULL
+                    );
+                    """
+                )
+                cur.execute(
+                    """
+                    ALTER TABLE api_client_heartbeats
+                    ADD COLUMN IF NOT EXISTS active_job_total_files INTEGER;
+                    """
+                )
+                cur.execute(
+                    """
+                    ALTER TABLE api_client_heartbeats
+                    ADD COLUMN IF NOT EXISTS active_job_non_terminal_files INTEGER;
+                    """
+                )
+                cur.execute(
+                    """
+                    ALTER TABLE api_client_heartbeats
+                    ADD COLUMN IF NOT EXISTS active_job_error_files INTEGER;
+                    """
+                )
+                cur.execute(
+                    """
+                    ALTER TABLE api_client_heartbeats
+                    ADD COLUMN IF NOT EXISTS active_job_blocking_reason TEXT;
                     """
                 )
             conn.commit()
@@ -1948,6 +2110,227 @@ class PostgresUploadStateStore:
             approved_at_utc=str(row[5]) if row[5] is not None else None,
             revoked_at_utc=str(row[6]) if row[6] is not None else None,
             auth_token=str(row[7]) if row[7] is not None else None,
+        )
+
+    def upsert_client_heartbeat(
+        self,
+        *,
+        client_id: str,
+        last_seen_at_utc: str,
+        daemon_state: str,
+        workload_status: str,
+        active_job_id: int | None,
+        active_job_label: str | None,
+        active_job_status: str | None,
+        active_job_ready_to_upload: int | None,
+        active_job_uploaded: int | None,
+        active_job_retrying: int | None,
+        active_job_total_files: int | None,
+        active_job_non_terminal_files: int | None,
+        active_job_error_files: int | None,
+        active_job_blocking_reason: str | None,
+        retry_pending_count: int | None,
+        retry_next_at_utc: str | None,
+        retry_reason: str | None,
+        auth_block_reason: str | None,
+        recent_error_category: str | None,
+        recent_error_message: str | None,
+        recent_error_at_utc: str | None,
+        updated_at_utc: str,
+    ) -> ClientHeartbeatRecord:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO api_client_heartbeats (
+                        client_id,
+                        last_seen_at_utc,
+                        daemon_state,
+                        workload_status,
+                        active_job_id,
+                        active_job_label,
+                        active_job_status,
+                        active_job_ready_to_upload,
+                        active_job_uploaded,
+                        active_job_retrying,
+                        active_job_total_files,
+                        active_job_non_terminal_files,
+                        active_job_error_files,
+                        active_job_blocking_reason,
+                        retry_pending_count,
+                        retry_next_at_utc,
+                        retry_reason,
+                        auth_block_reason,
+                        recent_error_category,
+                        recent_error_message,
+                        recent_error_at_utc,
+                        updated_at_utc
+                    )
+                    VALUES (
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s
+                    )
+                    ON CONFLICT (client_id) DO UPDATE
+                    SET last_seen_at_utc = EXCLUDED.last_seen_at_utc,
+                        daemon_state = EXCLUDED.daemon_state,
+                        workload_status = EXCLUDED.workload_status,
+                        active_job_id = EXCLUDED.active_job_id,
+                        active_job_label = EXCLUDED.active_job_label,
+                        active_job_status = EXCLUDED.active_job_status,
+                        active_job_ready_to_upload = EXCLUDED.active_job_ready_to_upload,
+                        active_job_uploaded = EXCLUDED.active_job_uploaded,
+                        active_job_retrying = EXCLUDED.active_job_retrying,
+                        active_job_total_files = EXCLUDED.active_job_total_files,
+                        active_job_non_terminal_files = EXCLUDED.active_job_non_terminal_files,
+                        active_job_error_files = EXCLUDED.active_job_error_files,
+                        active_job_blocking_reason = EXCLUDED.active_job_blocking_reason,
+                        retry_pending_count = EXCLUDED.retry_pending_count,
+                        retry_next_at_utc = EXCLUDED.retry_next_at_utc,
+                        retry_reason = EXCLUDED.retry_reason,
+                        auth_block_reason = EXCLUDED.auth_block_reason,
+                        recent_error_category = EXCLUDED.recent_error_category,
+                        recent_error_message = EXCLUDED.recent_error_message,
+                        recent_error_at_utc = EXCLUDED.recent_error_at_utc,
+                        updated_at_utc = EXCLUDED.updated_at_utc
+                    RETURNING
+                        client_id,
+                        last_seen_at_utc,
+                        daemon_state,
+                        workload_status,
+                        active_job_id,
+                        active_job_label,
+                        active_job_status,
+                        active_job_ready_to_upload,
+                        active_job_uploaded,
+                        active_job_retrying,
+                        active_job_total_files,
+                        active_job_non_terminal_files,
+                        active_job_error_files,
+                        active_job_blocking_reason,
+                        retry_pending_count,
+                        retry_next_at_utc,
+                        retry_reason,
+                        auth_block_reason,
+                        recent_error_category,
+                        recent_error_message,
+                        recent_error_at_utc,
+                        updated_at_utc;
+                    """,
+                    (
+                        client_id,
+                        last_seen_at_utc,
+                        daemon_state,
+                        workload_status,
+                        active_job_id,
+                        active_job_label,
+                        active_job_status,
+                        active_job_ready_to_upload,
+                        active_job_uploaded,
+                        active_job_retrying,
+                        active_job_total_files,
+                        active_job_non_terminal_files,
+                        active_job_error_files,
+                        active_job_blocking_reason,
+                        retry_pending_count,
+                        retry_next_at_utc,
+                        retry_reason,
+                        auth_block_reason,
+                        recent_error_category,
+                        recent_error_message,
+                        recent_error_at_utc,
+                        updated_at_utc,
+                    ),
+                )
+                row = cur.fetchone()
+            conn.commit()
+        if row is None:
+            raise RuntimeError("upsert_client_heartbeat must return a row")
+        return ClientHeartbeatRecord(
+            client_id=str(row[0]),
+            last_seen_at_utc=str(row[1]),
+            daemon_state=str(row[2]),
+            workload_status=str(row[3]),
+            active_job_id=int(row[4]) if row[4] is not None else None,
+            active_job_label=str(row[5]) if row[5] is not None else None,
+            active_job_status=str(row[6]) if row[6] is not None else None,
+            active_job_ready_to_upload=int(row[7]) if row[7] is not None else None,
+            active_job_uploaded=int(row[8]) if row[8] is not None else None,
+            active_job_retrying=int(row[9]) if row[9] is not None else None,
+            active_job_total_files=int(row[10]) if row[10] is not None else None,
+            active_job_non_terminal_files=int(row[11]) if row[11] is not None else None,
+            active_job_error_files=int(row[12]) if row[12] is not None else None,
+            active_job_blocking_reason=str(row[13]) if row[13] is not None else None,
+            retry_pending_count=int(row[14]) if row[14] is not None else None,
+            retry_next_at_utc=str(row[15]) if row[15] is not None else None,
+            retry_reason=str(row[16]) if row[16] is not None else None,
+            auth_block_reason=str(row[17]) if row[17] is not None else None,
+            recent_error_category=str(row[18]) if row[18] is not None else None,
+            recent_error_message=str(row[19]) if row[19] is not None else None,
+            recent_error_at_utc=str(row[20]) if row[20] is not None else None,
+            updated_at_utc=str(row[21]),
+        )
+
+    def get_client_heartbeat(self, client_id: str) -> ClientHeartbeatRecord | None:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        client_id,
+                        last_seen_at_utc,
+                        daemon_state,
+                        workload_status,
+                        active_job_id,
+                        active_job_label,
+                        active_job_status,
+                        active_job_ready_to_upload,
+                        active_job_uploaded,
+                        active_job_retrying,
+                        active_job_total_files,
+                        active_job_non_terminal_files,
+                        active_job_error_files,
+                        active_job_blocking_reason,
+                        retry_pending_count,
+                        retry_next_at_utc,
+                        retry_reason,
+                        auth_block_reason,
+                        recent_error_category,
+                        recent_error_message,
+                        recent_error_at_utc,
+                        updated_at_utc
+                    FROM api_client_heartbeats
+                    WHERE client_id = %s
+                    LIMIT 1;
+                    """,
+                    (client_id,),
+                )
+                row = cur.fetchone()
+        if row is None:
+            return None
+        return ClientHeartbeatRecord(
+            client_id=str(row[0]),
+            last_seen_at_utc=str(row[1]),
+            daemon_state=str(row[2]),
+            workload_status=str(row[3]),
+            active_job_id=int(row[4]) if row[4] is not None else None,
+            active_job_label=str(row[5]) if row[5] is not None else None,
+            active_job_status=str(row[6]) if row[6] is not None else None,
+            active_job_ready_to_upload=int(row[7]) if row[7] is not None else None,
+            active_job_uploaded=int(row[8]) if row[8] is not None else None,
+            active_job_retrying=int(row[9]) if row[9] is not None else None,
+            active_job_total_files=int(row[10]) if row[10] is not None else None,
+            active_job_non_terminal_files=int(row[11]) if row[11] is not None else None,
+            active_job_error_files=int(row[12]) if row[12] is not None else None,
+            active_job_blocking_reason=str(row[13]) if row[13] is not None else None,
+            retry_pending_count=int(row[14]) if row[14] is not None else None,
+            retry_next_at_utc=str(row[15]) if row[15] is not None else None,
+            retry_reason=str(row[16]) if row[16] is not None else None,
+            auth_block_reason=str(row[17]) if row[17] is not None else None,
+            recent_error_category=str(row[18]) if row[18] is not None else None,
+            recent_error_message=str(row[19]) if row[19] is not None else None,
+            recent_error_at_utc=str(row[20]) if row[20] is not None else None,
+            updated_at_utc=str(row[21]),
         )
 
     def remove_temp_upload(self, sha256_hex: str) -> None:
