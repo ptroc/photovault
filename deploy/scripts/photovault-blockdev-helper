@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PARTITION_RE='^/dev/sd[a-z]+[0-9]+$'
+MOUNT_RE='^/mnt/sd[a-z]+_[0-9]+$'
+HOST_MOUNT_NS='/proc/1/ns/mnt'
+
+die() {
+  local msg="$1"
+  echo "{\"ok\":false,\"error\":\"${msg}\"}" >&2
+  exit 1
+}
+
+require_partition_path() {
+  local value="$1"
+  if ! [[ "${value}" =~ ${PARTITION_RE} ]]; then
+    die "device path must match /dev/sd[a-z][0-9]+"
+  fi
+}
+
+require_mount_path() {
+  local value="$1"
+  if ! [[ "${value}" =~ ${MOUNT_RE} ]]; then
+    die "mount path must match /mnt/sdX_N"
+  fi
+}
+
+run_host_mount_ns() {
+  nsenter --mount="${HOST_MOUNT_NS}" -- "$@"
+}
+
+if [[ $# -lt 1 ]]; then
+  die "usage: photovault-blockdev-helper <list|mount|unmount> [args]"
+fi
+
+command -v nsenter >/dev/null 2>&1 || die "nsenter is required for mount namespace access"
+
+verb="$1"
+shift
+
+case "${verb}" in
+  list)
+    run_host_mount_ns lsblk -J -b -o NAME,PATH,TYPE,SIZE,RM,TRAN,MODEL,VENDOR,FSTYPE,LABEL,UUID,MOUNTPOINT,MOUNTPOINTS
+    ;;
+  mount)
+    if [[ $# -ne 2 ]]; then
+      die "usage: photovault-blockdev-helper mount <device_path> <mount_path>"
+    fi
+    device_path="$1"
+    mount_path="$2"
+    require_partition_path "${device_path}"
+    require_mount_path "${mount_path}"
+    [[ -b "${device_path}" ]] || die "device path is not a block device"
+
+    run_host_mount_ns mkdir -p "${mount_path}"
+    if run_host_mount_ns findmnt -n --mountpoint "${mount_path}" >/dev/null 2>&1; then
+      source_path="$(run_host_mount_ns findmnt -n -o SOURCE --mountpoint "${mount_path}" || true)"
+      if [[ -n "${source_path}" && "${source_path}" != "${device_path}" ]]; then
+        die "mountpoint is active but source does not match requested partition"
+      fi
+      printf '{"ok":true,"already_mounted":true,"device_path":"%s","mount_path":"%s","source":"%s"}\n' \
+        "${device_path}" "${mount_path}" "${source_path}"
+      exit 0
+    fi
+
+    run_host_mount_ns mount -o ro,nosuid,nodev,noexec "${device_path}" "${mount_path}"
+    run_host_mount_ns findmnt -n --mountpoint "${mount_path}" >/dev/null 2>&1 || die "mount command completed but mountpoint is not active"
+    mounted_source="$(run_host_mount_ns findmnt -n -o SOURCE --mountpoint "${mount_path}" || true)"
+    if [[ -n "${mounted_source}" && "${mounted_source}" != "${device_path}" ]]; then
+      die "mountpoint became active but source does not match requested partition"
+    fi
+    printf '{"ok":true,"already_mounted":false,"device_path":"%s","mount_path":"%s"}\n' \
+      "${device_path}" "${mount_path}"
+    ;;
+  unmount)
+    if [[ $# -ne 2 ]]; then
+      die "usage: photovault-blockdev-helper unmount <device_path> <mount_path>"
+    fi
+    device_path="$1"
+    mount_path="$2"
+    require_partition_path "${device_path}"
+    require_mount_path "${mount_path}"
+
+    if run_host_mount_ns findmnt -n --mountpoint "${mount_path}" >/dev/null 2>&1; then
+      source_path="$(run_host_mount_ns findmnt -n -o SOURCE --mountpoint "${mount_path}" || true)"
+      if [[ -n "${source_path}" && "${source_path}" != "${device_path}" ]]; then
+        die "mountpoint is active but source does not match requested partition"
+      fi
+      run_host_mount_ns umount "${mount_path}"
+      if run_host_mount_ns findmnt -n --mountpoint "${mount_path}" >/dev/null 2>&1; then
+        die "umount command completed but mountpoint is still active"
+      fi
+    fi
+
+    run_host_mount_ns rmdir "${mount_path}" >/dev/null 2>&1 || true
+    printf '{"ok":true,"device_path":"%s","mount_path":"%s"}\n' "${device_path}" "${mount_path}"
+    ;;
+  *)
+    die "unknown verb"
+    ;;
+esac

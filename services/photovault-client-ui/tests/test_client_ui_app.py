@@ -146,6 +146,35 @@ def _overview_payloads(daemon_state: str = "WAIT_NETWORK") -> dict[str, object]:
                 },
             ]
         },
+        "/block-devices": {
+            "count": 1,
+            "devices": [
+                {
+                    "name": "sda",
+                    "path": "/dev/sda",
+                    "size_bytes": 64000000000,
+                    "transport": "usb",
+                    "removable": True,
+                    "vendor": "Generic",
+                    "model": "MassStorageClass",
+                    "partitions": [
+                        {
+                            "name": "sda1",
+                            "path": "/dev/sda1",
+                            "size_bytes": 63847792640,
+                            "filesystem_type": "exfat",
+                            "filesystem_label": "CARD_A",
+                            "filesystem_uuid": "AAAA-BBBB",
+                            "current_mountpoints": ["/mnt/sda_1"],
+                            "target_mount_path": "/mnt/sda_1",
+                            "mount_active": True,
+                            "can_mount": False,
+                            "can_unmount": True,
+                        }
+                    ],
+                }
+            ],
+        },
         "/ingest/jobs/1": {
             "job_id": 1,
             "media_label": "pi-test-sd",
@@ -489,6 +518,83 @@ def test_daemon_tick_returns_partial_notice_for_ajax_requests() -> None:
     assert response.headers["X-Client-Location"].endswith("/")
     assert "Action complete" in body
     assert "Daemon tick completed in state HASHING." in body
+
+
+def test_block_devices_page_renders_inventory() -> None:
+    payloads = _overview_payloads(daemon_state="IDLE")
+
+    def fake_daemon_get(_: str, path: str) -> object:
+        return payloads[path]
+
+    app = create_app(
+        daemon_get=fake_daemon_get,
+        network_snapshot_get=_network_snapshot,
+        dependency_snapshot_get=_dependency_snapshot,
+    )
+    response = app.test_client().get("/block-devices")
+    body = response.get_data(as_text=True)
+
+    assert response.status_code == 200
+    assert "Block Devices" in body
+    assert "/dev/sda1" in body
+    assert "/mnt/sda_1" in body
+    assert "Use as ingest source" in body
+
+
+def test_block_device_mount_action_routes_to_daemon_endpoint() -> None:
+    payloads = _overview_payloads(daemon_state="IDLE")
+    observed: dict[str, object] = {}
+
+    def fake_daemon_get(_: str, path: str) -> object:
+        return payloads[path]
+
+    def fake_daemon_post(_: str, path: str, payload: dict[str, object]) -> object:
+        observed["path"] = path
+        observed["payload"] = payload
+        if path == "/block-devices/mount":
+            return {"device_path": "/dev/sda1", "mount_path": "/mnt/sda_1"}
+        raise AssertionError(f"unexpected daemon_post path: {path}")
+
+    app = create_app(
+        daemon_get=fake_daemon_get,
+        daemon_post=fake_daemon_post,
+        network_snapshot_get=_network_snapshot,
+        dependency_snapshot_get=_dependency_snapshot,
+    )
+    response = app.test_client().post(
+        "/actions/block-devices/mount",
+        data={"device_path": "/dev/sda1"},
+    )
+    body = response.get_data(as_text=True)
+
+    assert response.status_code == 200
+    assert observed["path"] == "/block-devices/mount"
+    assert observed["payload"] == {"device_path": "/dev/sda1"}
+    assert "Mounted /dev/sda1 at /mnt/sda_1." in body
+
+
+def test_use_block_device_as_ingest_source_prefills_overview_form() -> None:
+    payloads = _overview_payloads(daemon_state="IDLE")
+
+    def fake_daemon_get(_: str, path: str) -> object:
+        return payloads[path]
+
+    app = create_app(
+        daemon_get=fake_daemon_get,
+        network_snapshot_get=_network_snapshot,
+        dependency_snapshot_get=_dependency_snapshot,
+    )
+    response = app.test_client().post(
+        "/actions/block-devices/use-as-ingest-source",
+        data={"mount_path": "/mnt/sda_1", "media_label": "CARD_A"},
+        headers={"X-Requested-With": "XMLHttpRequest"},
+    )
+    body = response.get_data(as_text=True)
+
+    assert response.status_code == 200
+    assert "Prepared ingest form for mounted source /mnt/sda_1." in body
+    assert 'value="CARD_A"' in body
+    assert "/mnt/sda_1" in body
 
 
 def test_daemon_tick_busy_response_is_rendered_as_wait_notice() -> None:

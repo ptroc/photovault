@@ -7,6 +7,12 @@ from fastapi.testclient import TestClient
 from photovault_api.app import create_app
 from photovault_api.state_store import InMemoryUploadStateStore
 
+TINY_PNG = (
+    b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
+    b"\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\x0cIDATx\x9cc`\x00\x00"
+    b"\x00\x02\x00\x01\xe5'\xd4\xa2\x00\x00\x00\x00IEND\xaeB`\x82"
+)
+
 
 def _upload_headers(
     *,
@@ -136,7 +142,7 @@ def test_metadata_handshake_classifies_mixed_batch_with_single_lookup(tmp_path: 
 
 def test_upload_content_and_verify_writes_filesystem_and_promotes_sha(tmp_path: Path) -> None:
     store = InMemoryUploadStateStore()
-    content = b"hello-upload"
+    content = TINY_PNG
     sha256_hex = hashlib.sha256(content).hexdigest()
     client = TestClient(create_app(state_store=store, storage_root=tmp_path))
 
@@ -146,7 +152,7 @@ def test_upload_content_and_verify_writes_filesystem_and_promotes_sha(tmp_path: 
         headers=_upload_headers(
             size_bytes=len(content),
             job_name="Wedding Shoot",
-            original_filename="IMG_0001.JPG",
+            original_filename="IMG_0001.PNG",
         ),
     )
     assert upload_response.status_code == 200
@@ -162,10 +168,16 @@ def test_upload_content_and_verify_writes_filesystem_and_promotes_sha(tmp_path: 
     )
     assert verify_response.status_code == 200
     assert verify_response.json()["status"] == "VERIFIED"
+    repeat_verify_response = client.post(
+        "/v1/upload/verify",
+        json={"sha256_hex": sha256_hex, "size_bytes": len(content)},
+    )
+    assert repeat_verify_response.status_code == 200
+    assert repeat_verify_response.json()["status"] == "ALREADY_EXISTS"
 
     received = datetime.fromisoformat(temp_record.received_at_utc)
     final_path = (
-        tmp_path / f"{received.year:04d}" / f"{received.month:02d}" / "Wedding_Shoot" / "IMG_0001.JPG"
+        tmp_path / f"{received.year:04d}" / f"{received.month:02d}" / "Wedding_Shoot" / "IMG_0001.PNG"
     )
     assert final_path.read_bytes() == content
     assert not temp_path.exists()
@@ -176,6 +188,40 @@ def test_upload_content_and_verify_writes_filesystem_and_promotes_sha(tmp_path: 
     )
     assert handshake_response.status_code == 200
     assert handshake_response.json()["results"][0]["decision"] == "ALREADY_EXISTS"
+
+    catalog_response = client.get("/v1/admin/catalog")
+    assert catalog_response.status_code == 200
+    catalog_payload = catalog_response.json()
+    assert catalog_payload["total"] == 1
+    assert catalog_payload["items"] == [
+        {
+            "relative_path": str(final_path.relative_to(tmp_path).as_posix()),
+            "sha256_hex": sha256_hex,
+            "size_bytes": len(content),
+            "origin_kind": "uploaded",
+            "last_observed_origin_kind": "uploaded",
+            "provenance_job_name": "Wedding Shoot",
+            "provenance_original_filename": "IMG_0001.PNG",
+            "first_cataloged_at_utc": catalog_payload["items"][0]["first_cataloged_at_utc"],
+            "last_cataloged_at_utc": catalog_payload["items"][0]["last_cataloged_at_utc"],
+            "extraction_status": "succeeded",
+            "extraction_last_attempted_at_utc": catalog_payload["items"][0][
+                "extraction_last_attempted_at_utc"
+            ],
+            "extraction_last_succeeded_at_utc": catalog_payload["items"][0][
+                "extraction_last_succeeded_at_utc"
+            ],
+            "extraction_last_failed_at_utc": None,
+            "extraction_failure_detail": None,
+            "capture_timestamp_utc": None,
+            "camera_make": None,
+            "camera_model": None,
+            "image_width": 1,
+            "image_height": 1,
+            "orientation": None,
+            "lens_model": None,
+        }
+    ]
 
 
 def test_verify_handles_filename_collision_with_deterministic_sha_suffix(tmp_path: Path) -> None:
@@ -207,10 +253,10 @@ def test_verify_handles_filename_collision_with_deterministic_sha_suffix(tmp_pat
 
 
 def test_storage_index_registers_existing_files_and_reindex_is_idempotent(tmp_path: Path) -> None:
-    content = b"same-content"
+    content = TINY_PNG
     sha256_hex = hashlib.sha256(content).hexdigest()
-    first = tmp_path / "2026" / "04" / "Job_A" / "a.jpg"
-    second = tmp_path / "2026" / "04" / "Job_B" / "b.jpg"
+    first = tmp_path / "2026" / "04" / "Job_A" / "a.png"
+    second = tmp_path / "2026" / "04" / "Job_B" / "b.png"
     first.parent.mkdir(parents=True, exist_ok=True)
     second.parent.mkdir(parents=True, exist_ok=True)
     first.write_bytes(content)
@@ -245,6 +291,42 @@ def test_storage_index_registers_existing_files_and_reindex_is_idempotent(tmp_pa
         "path_conflicts": 0,
         "errors": 0,
     }
+
+    catalog_response = client.get("/v1/admin/catalog")
+    assert catalog_response.status_code == 200
+    catalog_payload = catalog_response.json()
+    assert catalog_payload["total"] == 2
+    assert [item["relative_path"] for item in catalog_payload["items"]] == [
+        "2026/04/Job_A/a.png",
+        "2026/04/Job_B/b.png",
+    ]
+    assert all(item["origin_kind"] == "indexed" for item in catalog_payload["items"])
+    assert all(item["last_observed_origin_kind"] == "indexed" for item in catalog_payload["items"])
+    assert all(item["extraction_status"] == "succeeded" for item in catalog_payload["items"])
+    assert all(item["image_width"] == 1 for item in catalog_payload["items"])
+    assert all(item["image_height"] == 1 for item in catalog_payload["items"])
+
+
+def test_storage_index_records_extraction_failure_without_invalidating_catalog(tmp_path: Path) -> None:
+    bad_path = tmp_path / "2026" / "04" / "Job_A" / "note.txt"
+    bad_path.parent.mkdir(parents=True, exist_ok=True)
+    bad_path.write_text("not-an-image", encoding="utf-8")
+
+    client = TestClient(create_app(storage_root=tmp_path))
+    response = client.post("/v1/storage/index")
+    assert response.status_code == 200
+    assert response.json()["indexed_files"] == 1
+    assert response.json()["errors"] == 0
+
+    catalog_response = client.get("/v1/admin/catalog")
+    assert catalog_response.status_code == 200
+    payload = catalog_response.json()
+    assert payload["total"] == 1
+    item = payload["items"][0]
+    assert item["relative_path"] == "2026/04/Job_A/note.txt"
+    assert item["extraction_status"] == "failed"
+    assert item["extraction_last_failed_at_utc"] is not None
+    assert "unsupported media format for extraction" in str(item["extraction_failure_detail"])
 
 
 def test_storage_index_counts_same_path_conflict_and_updates_metadata(tmp_path: Path) -> None:
@@ -544,6 +626,93 @@ def test_admin_files_returns_paged_results(tmp_path: Path) -> None:
                 "first_seen_at_utc": t1,
                 "last_seen_at_utc": t1,
             },
+        ],
+    }
+
+
+def test_admin_catalog_returns_paged_results(tmp_path: Path) -> None:
+    store = InMemoryUploadStateStore()
+    t1 = "2026-04-20T10:00:00+00:00"
+    t2 = "2026-04-20T11:00:00+00:00"
+    store.upsert_stored_file(
+        relative_path="2026/04/Job_A/a.jpg",
+        sha256_hex="a" * 64,
+        size_bytes=100,
+        source_kind="upload_verify",
+        seen_at_utc=t1,
+    )
+    store.upsert_media_asset(
+        relative_path="2026/04/Job_A/a.jpg",
+        sha256_hex="a" * 64,
+        size_bytes=100,
+        origin_kind="uploaded",
+        observed_at_utc=t1,
+        provenance_job_name="Job_A",
+        provenance_original_filename="a.jpg",
+    )
+    store.upsert_stored_file(
+        relative_path="2026/04/Job_B/b.jpg",
+        sha256_hex="b" * 64,
+        size_bytes=200,
+        source_kind="index_scan",
+        seen_at_utc=t2,
+    )
+    store.upsert_media_asset(
+        relative_path="2026/04/Job_B/b.jpg",
+        sha256_hex="b" * 64,
+        size_bytes=200,
+        origin_kind="indexed",
+        observed_at_utc=t2,
+    )
+    store.upsert_media_asset_extraction(
+        relative_path="2026/04/Job_B/b.jpg",
+        extraction_status="failed",
+        attempted_at_utc=t2,
+        succeeded_at_utc=None,
+        failed_at_utc=t2,
+        failure_detail="unsupported media format for extraction: .jpg",
+        capture_timestamp_utc=None,
+        camera_make=None,
+        camera_model=None,
+        image_width=None,
+        image_height=None,
+        orientation=None,
+        lens_model=None,
+        recorded_at_utc=t2,
+    )
+
+    client = TestClient(create_app(state_store=store, storage_root=tmp_path))
+    response = client.get("/v1/admin/catalog?limit=1&offset=0")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "total": 2,
+        "limit": 1,
+        "offset": 0,
+        "items": [
+            {
+                "relative_path": "2026/04/Job_B/b.jpg",
+                "sha256_hex": "b" * 64,
+                "size_bytes": 200,
+                "origin_kind": "indexed",
+                "last_observed_origin_kind": "indexed",
+                "provenance_job_name": None,
+                "provenance_original_filename": None,
+                "first_cataloged_at_utc": t2,
+                "last_cataloged_at_utc": t2,
+                "extraction_status": "failed",
+                "extraction_last_attempted_at_utc": t2,
+                "extraction_last_succeeded_at_utc": None,
+                "extraction_last_failed_at_utc": t2,
+                "extraction_failure_detail": "unsupported media format for extraction: .jpg",
+                "capture_timestamp_utc": None,
+                "camera_make": None,
+                "camera_model": None,
+                "image_width": None,
+                "image_height": None,
+                "orientation": None,
+                "lens_model": None,
+            }
         ],
     }
 

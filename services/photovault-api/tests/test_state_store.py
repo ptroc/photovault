@@ -29,6 +29,79 @@ def test_in_memory_upsert_stored_file_preserves_first_seen_and_updates_latest_me
     assert record.size_bytes == 24
 
 
+def test_in_memory_upsert_media_asset_preserves_origin_and_first_cataloged_metadata() -> None:
+    from photovault_api.state_store import InMemoryUploadStateStore
+
+    store = InMemoryUploadStateStore()
+    store.upsert_media_asset(
+        relative_path="2026/04/job/photo.jpg",
+        sha256_hex="a" * 64,
+        size_bytes=12,
+        origin_kind="uploaded",
+        observed_at_utc="2026-04-20T12:01:00+00:00",
+        provenance_job_name="Job_A",
+        provenance_original_filename="photo.jpg",
+    )
+    store.upsert_media_asset(
+        relative_path="2026/04/job/photo.jpg",
+        sha256_hex="b" * 64,
+        size_bytes=24,
+        origin_kind="indexed",
+        observed_at_utc="2026-04-20T12:05:00+00:00",
+    )
+
+    total, rows = store.list_media_assets(limit=10, offset=0)
+    assert total == 1
+    row = rows[0]
+    assert row.origin_kind == "uploaded"
+    assert row.last_observed_origin_kind == "indexed"
+    assert row.first_cataloged_at_utc == "2026-04-20T12:01:00+00:00"
+    assert row.last_cataloged_at_utc == "2026-04-20T12:05:00+00:00"
+    assert row.provenance_job_name == "Job_A"
+    assert row.provenance_original_filename == "photo.jpg"
+    assert row.sha256_hex == "b" * 64
+    assert row.size_bytes == 24
+    assert row.extraction_status == "pending"
+    assert row.image_width is None
+
+
+def test_in_memory_media_asset_extraction_updates_status_and_metadata() -> None:
+    from photovault_api.state_store import InMemoryUploadStateStore
+
+    store = InMemoryUploadStateStore()
+    observed_at = "2026-04-20T12:01:00+00:00"
+    store.upsert_media_asset(
+        relative_path="2026/04/job/photo.png",
+        sha256_hex="a" * 64,
+        size_bytes=99,
+        origin_kind="indexed",
+        observed_at_utc=observed_at,
+    )
+    store.upsert_media_asset_extraction(
+        relative_path="2026/04/job/photo.png",
+        extraction_status="succeeded",
+        attempted_at_utc=observed_at,
+        succeeded_at_utc=observed_at,
+        failed_at_utc=None,
+        failure_detail=None,
+        capture_timestamp_utc=None,
+        camera_make=None,
+        camera_model=None,
+        image_width=4000,
+        image_height=3000,
+        orientation=1,
+        lens_model=None,
+        recorded_at_utc=observed_at,
+    )
+
+    total, rows = store.list_media_assets(limit=10, offset=0)
+    assert total == 1
+    assert rows[0].extraction_status == "succeeded"
+    assert rows[0].image_width == 4000
+    assert rows[0].image_height == 3000
+    assert rows[0].orientation == 1
+
+
 def test_postgres_has_shas_uses_single_query_and_returns_known_set() -> None:
     observed: dict[str, object] = {"connect_calls": 0}
 
@@ -242,4 +315,140 @@ def test_postgres_upsert_stored_file_uses_latest_metadata_but_preserves_first_se
     assert "ON CONFLICT (relative_path) DO UPDATE" in query
     assert "last_seen_at_utc = EXCLUDED.last_seen_at_utc" in query
     assert "first_seen_at_utc = EXCLUDED.first_seen_at_utc" not in query
+    assert observed["committed"] is True
+
+
+def test_postgres_upsert_media_asset_uses_conflict_update_and_preserves_origin() -> None:
+    observed: dict[str, object] = {}
+
+    class _FakeCursor:
+        rowcount = 1
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def execute(self, query: str, params: tuple[object, ...]) -> None:
+            observed["query"] = query
+            observed["params"] = params
+
+    class _FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def cursor(self) -> _FakeCursor:
+            return _FakeCursor()
+
+        def commit(self) -> None:
+            observed["committed"] = True
+
+    class _TestStore(PostgresUploadStateStore):
+        def _connect(self):  # type: ignore[override]
+            return _FakeConnection()
+
+    store = _TestStore(database_url="postgresql://unused")
+    store.upsert_media_asset(
+        relative_path="2026/04/job/photo.jpg",
+        sha256_hex="d" * 64,
+        size_bytes=33,
+        origin_kind="uploaded",
+        observed_at_utc="2026-04-20T12:11:00+00:00",
+        provenance_job_name="Job_B",
+        provenance_original_filename="photo.jpg",
+    )
+
+    query = str(observed["query"])
+    assert "ON CONFLICT (relative_path) DO UPDATE" in query
+    assert "last_observed_origin_kind = EXCLUDED.last_observed_origin_kind" in query
+    assert "origin_kind = EXCLUDED.origin_kind" not in query
+    assert "COALESCE(" in query
+    assert observed["params"] == (
+        "2026/04/job/photo.jpg",
+        "d" * 64,
+        33,
+        "uploaded",
+        "uploaded",
+        "Job_B",
+        "photo.jpg",
+        "2026-04-20T12:11:00+00:00",
+        "2026-04-20T12:11:00+00:00",
+    )
+    assert observed["committed"] is True
+
+
+def test_postgres_upsert_media_asset_extraction_uses_conflict_update() -> None:
+    observed: dict[str, object] = {}
+
+    class _FakeCursor:
+        rowcount = 1
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def execute(self, query: str, params: tuple[object, ...]) -> None:
+            observed["query"] = query
+            observed["params"] = params
+
+    class _FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def cursor(self) -> _FakeCursor:
+            return _FakeCursor()
+
+        def commit(self) -> None:
+            observed["committed"] = True
+
+    class _TestStore(PostgresUploadStateStore):
+        def _connect(self):  # type: ignore[override]
+            return _FakeConnection()
+
+    store = _TestStore(database_url="postgresql://unused")
+    store.upsert_media_asset_extraction(
+        relative_path="2026/04/job/photo.png",
+        extraction_status="failed",
+        attempted_at_utc="2026-04-20T12:15:00+00:00",
+        succeeded_at_utc=None,
+        failed_at_utc="2026-04-20T12:15:00+00:00",
+        failure_detail="unsupported media format",
+        capture_timestamp_utc=None,
+        camera_make=None,
+        camera_model=None,
+        image_width=None,
+        image_height=None,
+        orientation=None,
+        lens_model=None,
+        recorded_at_utc="2026-04-20T12:15:00+00:00",
+    )
+
+    query = str(observed["query"])
+    assert "ON CONFLICT (relative_path) DO UPDATE" in query
+    assert "extraction_status = EXCLUDED.extraction_status" in query
+    assert observed["params"] == (
+        "2026/04/job/photo.png",
+        "failed",
+        "2026-04-20T12:15:00+00:00",
+        None,
+        "2026-04-20T12:15:00+00:00",
+        "unsupported media format",
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        "2026-04-20T12:15:00+00:00",
+    )
     assert observed["committed"] is True

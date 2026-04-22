@@ -1,0 +1,2 @@
+Defaults:photovault !requiretty
+photovault ALL=(root) NOPASSWD: /usr/local/sbin/photovault-blockdev-helper *

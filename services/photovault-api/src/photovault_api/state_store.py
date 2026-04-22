@@ -29,6 +29,48 @@ class StoredFileRecord:
 
 
 @dataclass(frozen=True)
+class MediaAssetRecord:
+    relative_path: str
+    sha256_hex: str
+    size_bytes: int
+    origin_kind: str
+    last_observed_origin_kind: str
+    provenance_job_name: str | None
+    provenance_original_filename: str | None
+    first_cataloged_at_utc: str
+    last_cataloged_at_utc: str
+    extraction_status: str
+    extraction_last_attempted_at_utc: str | None
+    extraction_last_succeeded_at_utc: str | None
+    extraction_last_failed_at_utc: str | None
+    extraction_failure_detail: str | None
+    capture_timestamp_utc: str | None
+    camera_make: str | None
+    camera_model: str | None
+    image_width: int | None
+    image_height: int | None
+    orientation: int | None
+    lens_model: str | None
+
+
+@dataclass(frozen=True)
+class MediaExtractionRecord:
+    relative_path: str
+    extraction_status: str
+    extraction_last_attempted_at_utc: str | None
+    extraction_last_succeeded_at_utc: str | None
+    extraction_last_failed_at_utc: str | None
+    extraction_failure_detail: str | None
+    capture_timestamp_utc: str | None
+    camera_make: str | None
+    camera_model: str | None
+    image_width: int | None
+    image_height: int | None
+    orientation: int | None
+    lens_model: str | None
+
+
+@dataclass(frozen=True)
 class DuplicateShaGroup:
     sha256_hex: str
     file_count: int
@@ -105,6 +147,41 @@ class UploadStateStore(Protocol):
 
     def list_stored_files(self, *, limit: int, offset: int) -> tuple[int, list[StoredFileRecord]]: ...
 
+    def upsert_media_asset(
+        self,
+        *,
+        relative_path: str,
+        sha256_hex: str,
+        size_bytes: int,
+        origin_kind: str,
+        observed_at_utc: str,
+        provenance_job_name: str | None = None,
+        provenance_original_filename: str | None = None,
+    ) -> None: ...
+
+    def list_media_assets(self, *, limit: int, offset: int) -> tuple[int, list[MediaAssetRecord]]: ...
+
+    def ensure_media_asset_extraction_row(self, *, relative_path: str, recorded_at_utc: str) -> None: ...
+
+    def upsert_media_asset_extraction(
+        self,
+        *,
+        relative_path: str,
+        extraction_status: str,
+        attempted_at_utc: str | None,
+        succeeded_at_utc: str | None,
+        failed_at_utc: str | None,
+        failure_detail: str | None,
+        capture_timestamp_utc: str | None,
+        camera_make: str | None,
+        camera_model: str | None,
+        image_width: int | None,
+        image_height: int | None,
+        orientation: int | None,
+        lens_model: str | None,
+        recorded_at_utc: str,
+    ) -> None: ...
+
     def list_duplicate_sha_groups(
         self, *, limit: int, offset: int
     ) -> tuple[int, list[DuplicateShaGroup]]: ...
@@ -136,6 +213,8 @@ class InMemoryUploadStateStore:
     known_sha256: set[str] = field(default_factory=set)
     upload_temp: dict[str, TempUploadRecord] = field(default_factory=dict)
     stored_files: dict[str, StoredFileRecord] = field(default_factory=dict)
+    media_assets: dict[str, MediaAssetRecord] = field(default_factory=dict)
+    media_asset_extractions: dict[str, MediaExtractionRecord] = field(default_factory=dict)
     path_conflicts: list[PathConflictRecord] = field(default_factory=list)
     latest_index_run: StorageIndexRunRecord | None = None
     _lock: Lock = field(default_factory=Lock)
@@ -212,6 +291,169 @@ class InMemoryUploadStateStore:
             ordered = sorted(ordered, key=lambda item: item.last_seen_at_utc, reverse=True)
             total = len(ordered)
             return total, ordered[offset : offset + limit]
+
+    def upsert_media_asset(
+        self,
+        *,
+        relative_path: str,
+        sha256_hex: str,
+        size_bytes: int,
+        origin_kind: str,
+        observed_at_utc: str,
+        provenance_job_name: str | None = None,
+        provenance_original_filename: str | None = None,
+    ) -> None:
+        with self._lock:
+            existing = self.media_assets.get(relative_path)
+            first_cataloged = existing.first_cataloged_at_utc if existing is not None else observed_at_utc
+            self.media_assets[relative_path] = MediaAssetRecord(
+                relative_path=relative_path,
+                sha256_hex=sha256_hex,
+                size_bytes=size_bytes,
+                origin_kind=existing.origin_kind if existing is not None else origin_kind,
+                last_observed_origin_kind=origin_kind,
+                provenance_job_name=(
+                    provenance_job_name
+                    if provenance_job_name is not None
+                    else (existing.provenance_job_name if existing is not None else None)
+                ),
+                provenance_original_filename=(
+                    provenance_original_filename
+                    if provenance_original_filename is not None
+                    else (existing.provenance_original_filename if existing is not None else None)
+                ),
+                first_cataloged_at_utc=first_cataloged,
+                last_cataloged_at_utc=observed_at_utc,
+                extraction_status=existing.extraction_status if existing is not None else "pending",
+                extraction_last_attempted_at_utc=(
+                    existing.extraction_last_attempted_at_utc if existing is not None else None
+                ),
+                extraction_last_succeeded_at_utc=(
+                    existing.extraction_last_succeeded_at_utc if existing is not None else None
+                ),
+                extraction_last_failed_at_utc=(
+                    existing.extraction_last_failed_at_utc if existing is not None else None
+                ),
+                extraction_failure_detail=(
+                    existing.extraction_failure_detail if existing is not None else None
+                ),
+                capture_timestamp_utc=existing.capture_timestamp_utc if existing is not None else None,
+                camera_make=existing.camera_make if existing is not None else None,
+                camera_model=existing.camera_model if existing is not None else None,
+                image_width=existing.image_width if existing is not None else None,
+                image_height=existing.image_height if existing is not None else None,
+                orientation=existing.orientation if existing is not None else None,
+                lens_model=existing.lens_model if existing is not None else None,
+            )
+            self.media_asset_extractions.setdefault(
+                relative_path,
+                MediaExtractionRecord(
+                    relative_path=relative_path,
+                    extraction_status="pending",
+                    extraction_last_attempted_at_utc=None,
+                    extraction_last_succeeded_at_utc=None,
+                    extraction_last_failed_at_utc=None,
+                    extraction_failure_detail=None,
+                    capture_timestamp_utc=None,
+                    camera_make=None,
+                    camera_model=None,
+                    image_width=None,
+                    image_height=None,
+                    orientation=None,
+                    lens_model=None,
+                ),
+            )
+
+    def list_media_assets(self, *, limit: int, offset: int) -> tuple[int, list[MediaAssetRecord]]:
+        with self._lock:
+            ordered = sorted(self.media_assets.values(), key=lambda item: item.relative_path)
+            ordered = sorted(ordered, key=lambda item: item.last_cataloged_at_utc, reverse=True)
+            total = len(ordered)
+            return total, ordered[offset : offset + limit]
+
+    def ensure_media_asset_extraction_row(self, *, relative_path: str, recorded_at_utc: str) -> None:
+        del recorded_at_utc
+        with self._lock:
+            self.media_asset_extractions.setdefault(
+                relative_path,
+                MediaExtractionRecord(
+                    relative_path=relative_path,
+                    extraction_status="pending",
+                    extraction_last_attempted_at_utc=None,
+                    extraction_last_succeeded_at_utc=None,
+                    extraction_last_failed_at_utc=None,
+                    extraction_failure_detail=None,
+                    capture_timestamp_utc=None,
+                    camera_make=None,
+                    camera_model=None,
+                    image_width=None,
+                    image_height=None,
+                    orientation=None,
+                    lens_model=None,
+                ),
+            )
+
+    def upsert_media_asset_extraction(
+        self,
+        *,
+        relative_path: str,
+        extraction_status: str,
+        attempted_at_utc: str | None,
+        succeeded_at_utc: str | None,
+        failed_at_utc: str | None,
+        failure_detail: str | None,
+        capture_timestamp_utc: str | None,
+        camera_make: str | None,
+        camera_model: str | None,
+        image_width: int | None,
+        image_height: int | None,
+        orientation: int | None,
+        lens_model: str | None,
+        recorded_at_utc: str,
+    ) -> None:
+        del recorded_at_utc
+        with self._lock:
+            self.media_asset_extractions[relative_path] = MediaExtractionRecord(
+                relative_path=relative_path,
+                extraction_status=extraction_status,
+                extraction_last_attempted_at_utc=attempted_at_utc,
+                extraction_last_succeeded_at_utc=succeeded_at_utc,
+                extraction_last_failed_at_utc=failed_at_utc,
+                extraction_failure_detail=failure_detail,
+                capture_timestamp_utc=capture_timestamp_utc,
+                camera_make=camera_make,
+                camera_model=camera_model,
+                image_width=image_width,
+                image_height=image_height,
+                orientation=orientation,
+                lens_model=lens_model,
+            )
+            existing_asset = self.media_assets.get(relative_path)
+            if existing_asset is None:
+                return
+            self.media_assets[relative_path] = MediaAssetRecord(
+                relative_path=existing_asset.relative_path,
+                sha256_hex=existing_asset.sha256_hex,
+                size_bytes=existing_asset.size_bytes,
+                origin_kind=existing_asset.origin_kind,
+                last_observed_origin_kind=existing_asset.last_observed_origin_kind,
+                provenance_job_name=existing_asset.provenance_job_name,
+                provenance_original_filename=existing_asset.provenance_original_filename,
+                first_cataloged_at_utc=existing_asset.first_cataloged_at_utc,
+                last_cataloged_at_utc=existing_asset.last_cataloged_at_utc,
+                extraction_status=extraction_status,
+                extraction_last_attempted_at_utc=attempted_at_utc,
+                extraction_last_succeeded_at_utc=succeeded_at_utc,
+                extraction_last_failed_at_utc=failed_at_utc,
+                extraction_failure_detail=failure_detail,
+                capture_timestamp_utc=capture_timestamp_utc,
+                camera_make=camera_make,
+                camera_model=camera_model,
+                image_width=image_width,
+                image_height=image_height,
+                orientation=orientation,
+                lens_model=lens_model,
+            )
 
     def list_duplicate_sha_groups(
         self, *, limit: int, offset: int
@@ -393,6 +635,43 @@ class PostgresUploadStateStore:
                         source_kind TEXT NOT NULL,
                         first_seen_at_utc TEXT NOT NULL,
                         last_seen_at_utc TEXT NOT NULL
+                    );
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS api_media_assets (
+                        relative_path TEXT PRIMARY KEY REFERENCES api_stored_files(relative_path)
+                            ON DELETE CASCADE,
+                        sha256_hex TEXT NOT NULL,
+                        size_bytes BIGINT NOT NULL,
+                        origin_kind TEXT NOT NULL,
+                        last_observed_origin_kind TEXT NOT NULL,
+                        provenance_job_name TEXT,
+                        provenance_original_filename TEXT,
+                        first_cataloged_at_utc TEXT NOT NULL,
+                        last_cataloged_at_utc TEXT NOT NULL
+                    );
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS api_media_asset_extractions (
+                        relative_path TEXT PRIMARY KEY REFERENCES api_media_assets(relative_path)
+                            ON DELETE CASCADE,
+                        extraction_status TEXT NOT NULL,
+                        last_attempted_at_utc TEXT,
+                        last_succeeded_at_utc TEXT,
+                        last_failed_at_utc TEXT,
+                        failure_detail TEXT,
+                        capture_timestamp_utc TEXT,
+                        camera_make TEXT,
+                        camera_model TEXT,
+                        image_width INTEGER,
+                        image_height INTEGER,
+                        orientation INTEGER,
+                        lens_model TEXT,
+                        updated_at_utc TEXT NOT NULL
                     );
                     """
                 )
@@ -623,6 +902,219 @@ class PostgresUploadStateStore:
                     for row in rows
                 ]
                 return total, records
+
+    def upsert_media_asset(
+        self,
+        *,
+        relative_path: str,
+        sha256_hex: str,
+        size_bytes: int,
+        origin_kind: str,
+        observed_at_utc: str,
+        provenance_job_name: str | None = None,
+        provenance_original_filename: str | None = None,
+    ) -> None:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO api_media_assets (
+                        relative_path,
+                        sha256_hex,
+                        size_bytes,
+                        origin_kind,
+                        last_observed_origin_kind,
+                        provenance_job_name,
+                        provenance_original_filename,
+                        first_cataloged_at_utc,
+                        last_cataloged_at_utc
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (relative_path) DO UPDATE
+                    SET sha256_hex = EXCLUDED.sha256_hex,
+                        size_bytes = EXCLUDED.size_bytes,
+                        last_observed_origin_kind = EXCLUDED.last_observed_origin_kind,
+                        provenance_job_name = COALESCE(
+                            EXCLUDED.provenance_job_name,
+                            api_media_assets.provenance_job_name
+                        ),
+                        provenance_original_filename = COALESCE(
+                            EXCLUDED.provenance_original_filename,
+                            api_media_assets.provenance_original_filename
+                        ),
+                        last_cataloged_at_utc = EXCLUDED.last_cataloged_at_utc;
+                    """,
+                    (
+                        relative_path,
+                        sha256_hex,
+                        size_bytes,
+                        origin_kind,
+                        origin_kind,
+                        provenance_job_name,
+                        provenance_original_filename,
+                        observed_at_utc,
+                        observed_at_utc,
+                    ),
+                )
+            conn.commit()
+
+    def list_media_assets(self, *, limit: int, offset: int) -> tuple[int, list[MediaAssetRecord]]:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) FROM api_media_assets;")
+                count_row = cur.fetchone()
+                total = int(count_row[0]) if count_row is not None else 0
+                cur.execute(
+                    """
+                    SELECT
+                        ma.relative_path,
+                        ma.sha256_hex,
+                        ma.size_bytes,
+                        ma.origin_kind,
+                        ma.last_observed_origin_kind,
+                        ma.provenance_job_name,
+                        ma.provenance_original_filename,
+                        ma.first_cataloged_at_utc,
+                        ma.last_cataloged_at_utc,
+                        COALESCE(me.extraction_status, 'pending') AS extraction_status,
+                        me.last_attempted_at_utc,
+                        me.last_succeeded_at_utc,
+                        me.last_failed_at_utc,
+                        me.failure_detail,
+                        me.capture_timestamp_utc,
+                        me.camera_make,
+                        me.camera_model,
+                        me.image_width,
+                        me.image_height,
+                        me.orientation,
+                        me.lens_model
+                    FROM api_media_assets ma
+                    LEFT JOIN api_media_asset_extractions me
+                        ON me.relative_path = ma.relative_path
+                    ORDER BY ma.last_cataloged_at_utc DESC, ma.relative_path ASC
+                    LIMIT %s
+                    OFFSET %s;
+                    """,
+                    (limit, offset),
+                )
+                rows = cur.fetchall()
+                records = [
+                    MediaAssetRecord(
+                        relative_path=str(row[0]),
+                        sha256_hex=str(row[1]),
+                        size_bytes=int(row[2]),
+                        origin_kind=str(row[3]),
+                        last_observed_origin_kind=str(row[4]),
+                        provenance_job_name=str(row[5]) if row[5] is not None else None,
+                        provenance_original_filename=str(row[6]) if row[6] is not None else None,
+                        first_cataloged_at_utc=str(row[7]),
+                        last_cataloged_at_utc=str(row[8]),
+                        extraction_status=str(row[9]),
+                        extraction_last_attempted_at_utc=str(row[10]) if row[10] is not None else None,
+                        extraction_last_succeeded_at_utc=str(row[11]) if row[11] is not None else None,
+                        extraction_last_failed_at_utc=str(row[12]) if row[12] is not None else None,
+                        extraction_failure_detail=str(row[13]) if row[13] is not None else None,
+                        capture_timestamp_utc=str(row[14]) if row[14] is not None else None,
+                        camera_make=str(row[15]) if row[15] is not None else None,
+                        camera_model=str(row[16]) if row[16] is not None else None,
+                        image_width=int(row[17]) if row[17] is not None else None,
+                        image_height=int(row[18]) if row[18] is not None else None,
+                        orientation=int(row[19]) if row[19] is not None else None,
+                        lens_model=str(row[20]) if row[20] is not None else None,
+                    )
+                    for row in rows
+                ]
+                return total, records
+
+    def ensure_media_asset_extraction_row(self, *, relative_path: str, recorded_at_utc: str) -> None:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO api_media_asset_extractions (
+                        relative_path,
+                        extraction_status,
+                        updated_at_utc
+                    )
+                    VALUES (%s, 'pending', %s)
+                    ON CONFLICT (relative_path) DO NOTHING;
+                    """,
+                    (relative_path, recorded_at_utc),
+                )
+            conn.commit()
+
+    def upsert_media_asset_extraction(
+        self,
+        *,
+        relative_path: str,
+        extraction_status: str,
+        attempted_at_utc: str | None,
+        succeeded_at_utc: str | None,
+        failed_at_utc: str | None,
+        failure_detail: str | None,
+        capture_timestamp_utc: str | None,
+        camera_make: str | None,
+        camera_model: str | None,
+        image_width: int | None,
+        image_height: int | None,
+        orientation: int | None,
+        lens_model: str | None,
+        recorded_at_utc: str,
+    ) -> None:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO api_media_asset_extractions (
+                        relative_path,
+                        extraction_status,
+                        last_attempted_at_utc,
+                        last_succeeded_at_utc,
+                        last_failed_at_utc,
+                        failure_detail,
+                        capture_timestamp_utc,
+                        camera_make,
+                        camera_model,
+                        image_width,
+                        image_height,
+                        orientation,
+                        lens_model,
+                        updated_at_utc
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (relative_path) DO UPDATE
+                    SET extraction_status = EXCLUDED.extraction_status,
+                        last_attempted_at_utc = EXCLUDED.last_attempted_at_utc,
+                        last_succeeded_at_utc = EXCLUDED.last_succeeded_at_utc,
+                        last_failed_at_utc = EXCLUDED.last_failed_at_utc,
+                        failure_detail = EXCLUDED.failure_detail,
+                        capture_timestamp_utc = EXCLUDED.capture_timestamp_utc,
+                        camera_make = EXCLUDED.camera_make,
+                        camera_model = EXCLUDED.camera_model,
+                        image_width = EXCLUDED.image_width,
+                        image_height = EXCLUDED.image_height,
+                        orientation = EXCLUDED.orientation,
+                        lens_model = EXCLUDED.lens_model,
+                        updated_at_utc = EXCLUDED.updated_at_utc;
+                    """,
+                    (
+                        relative_path,
+                        extraction_status,
+                        attempted_at_utc,
+                        succeeded_at_utc,
+                        failed_at_utc,
+                        failure_detail,
+                        capture_timestamp_utc,
+                        camera_make,
+                        camera_model,
+                        image_width,
+                        image_height,
+                        orientation,
+                        lens_model,
+                        recorded_at_utc,
+                    ),
+                )
+            conn.commit()
 
     def list_duplicate_sha_groups(
         self, *, limit: int, offset: int

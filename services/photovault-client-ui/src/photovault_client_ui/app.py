@@ -255,7 +255,21 @@ def _describe_http_error(exc: httpx.HTTPError) -> str:
         try:
             payload = exc.response.json()
             if isinstance(payload, dict):
-                detail = str(payload.get("detail", "")).strip()
+                detail_obj = payload.get("detail", "")
+                if isinstance(detail_obj, dict):
+                    code = str(detail_obj.get("code", "")).strip()
+                    message = str(detail_obj.get("message", "")).strip()
+                    suggestion = str(detail_obj.get("suggestion", "")).strip()
+                    detail_parts = []
+                    if code:
+                        detail_parts.append(f"[{code}]")
+                    if message:
+                        detail_parts.append(message)
+                    if suggestion:
+                        detail_parts.append(suggestion)
+                    detail = " ".join(detail_parts).strip()
+                else:
+                    detail = str(detail_obj).strip()
         except ValueError:
             detail = exc.response.text.strip()
         summary = f"daemon API returned HTTP {status_code}"
@@ -348,6 +362,30 @@ def _build_ingest_gate(state: dict[str, Any] | None) -> dict[str, Any]:
         "show_tick_action": current_state in _TICK_ACTION_STATES
         and current_state not in _AUTO_PROGRESS_DAEMON_STATES,
     }
+
+
+def _format_size_bytes(size_bytes: object) -> str:
+    try:
+        value = int(size_bytes or 0)
+    except (TypeError, ValueError):
+        return "0 B"
+    if value < 1024:
+        return f"{value} B"
+    units = ["KiB", "MiB", "GiB", "TiB"]
+    scaled = float(value)
+    for unit in units:
+        scaled /= 1024.0
+        if scaled < 1024.0 or unit == units[-1]:
+            return f"{scaled:.1f} {unit}"
+    return f"{value} B"
+
+
+def _block_partition_ingest_prefill(partition: dict[str, Any]) -> dict[str, str]:
+    mount_path = str(partition.get("target_mount_path", "")).strip()
+    filesystem_label = str(partition.get("filesystem_label", "")).strip()
+    device_path = str(partition.get("path", "")).strip()
+    media_label = filesystem_label or device_path or "mounted-media"
+    return {"media_label": media_label, "source_paths": mount_path}
 
 
 def _derive_daemon_progress_view(state: dict[str, Any] | None) -> dict[str, Any]:
@@ -1187,6 +1225,56 @@ def create_app(
         )
         return render_template("network.html", **context)
 
+    def _render_block_devices(
+        *,
+        block_device_error: str | None = None,
+        block_device_error_detail: str | None = None,
+        block_device_notice: str | None = None,
+    ) -> str:
+        context = _load_daemon_context()
+        devices: list[dict[str, Any]] = []
+        try:
+            payload = daemon_get(daemon_base_url, "/block-devices")
+            raw_devices = payload.get("devices", [])
+            if isinstance(raw_devices, list):
+                for disk in raw_devices:
+                    if not isinstance(disk, dict):
+                        continue
+                    disk_copy = dict(disk)
+                    disk_copy["size_label"] = _format_size_bytes(disk_copy.get("size_bytes"))
+                    partitions: list[dict[str, Any]] = []
+                    raw_partitions = disk_copy.get("partitions")
+                    if isinstance(raw_partitions, list):
+                        for partition in raw_partitions:
+                            if not isinstance(partition, dict):
+                                continue
+                            partition_copy = dict(partition)
+                            partition_copy["size_label"] = _format_size_bytes(
+                                partition_copy.get("size_bytes")
+                            )
+                            partition_copy["ingest_prefill"] = _block_partition_ingest_prefill(
+                                partition_copy
+                            )
+                            partitions.append(partition_copy)
+                    disk_copy["partitions"] = partitions
+                    devices.append(disk_copy)
+        except httpx.HTTPError as exc:
+            if block_device_error is None:
+                block_device_error = "Failed to load block-device inventory."
+                block_device_error_detail = _describe_http_error(exc)
+
+        context.update(
+            {
+                "daemon_base_url": daemon_base_url,
+                "devices": devices,
+                "block_device_error": block_device_error,
+                "block_device_error_detail": block_device_error_detail,
+                "block_device_notice": block_device_notice,
+                "active_page": "block_devices",
+            }
+        )
+        return render_template("block_devices.html", **context)
+
     @app.get("/")
     def index() -> Response:
         return _render_overview()
@@ -1202,6 +1290,10 @@ def create_app(
     @app.get("/network")
     def network_page() -> str:
         return _render_network()
+
+    @app.get("/block-devices")
+    def block_devices_page() -> str:
+        return _render_block_devices()
 
     @app.post("/ingest/jobs")
     def create_ingest_job() -> Any:
@@ -1302,6 +1394,54 @@ def create_app(
         if _is_ajax_request():
             return _render_overview(ingest_notice=notice, ingest_notice_detail=notice_detail)
         return redirect(url_for("job_detail", job_id=created["job_id"]))
+
+    @app.post("/actions/block-devices/mount")
+    def mount_block_device() -> str:
+        device_path = request.form.get("device_path", "").strip()
+        if not device_path:
+            return _render_block_devices(block_device_error="Missing device_path for mount action.")
+        try:
+            outcome = daemon_post(daemon_base_url, "/block-devices/mount", {"device_path": device_path})
+        except httpx.HTTPError as exc:
+            return _render_block_devices(
+                block_device_error=f"Failed to mount {device_path}.",
+                block_device_error_detail=_describe_http_error(exc),
+            )
+        mounted_device = outcome.get("device_path", device_path)
+        mounted_path = outcome.get("mount_path", "")
+        return _render_block_devices(
+            block_device_notice=f"Mounted {mounted_device} at {mounted_path}."
+        )
+
+    @app.post("/actions/block-devices/unmount")
+    def unmount_block_device() -> str:
+        device_path = request.form.get("device_path", "").strip()
+        if not device_path:
+            return _render_block_devices(block_device_error="Missing device_path for unmount action.")
+        try:
+            outcome = daemon_post(daemon_base_url, "/block-devices/unmount", {"device_path": device_path})
+        except httpx.HTTPError as exc:
+            return _render_block_devices(
+                block_device_error=f"Failed to unmount {device_path}.",
+                block_device_error_detail=_describe_http_error(exc),
+            )
+        unmounted_device = outcome.get("device_path", device_path)
+        unmounted_path = outcome.get("mount_path", "")
+        return _render_block_devices(
+            block_device_notice=f"Unmounted {unmounted_device} from {unmounted_path}."
+        )
+
+    @app.post("/actions/block-devices/use-as-ingest-source")
+    def use_block_device_as_ingest_source() -> Response:
+        mount_path = request.form.get("mount_path", "").strip()
+        media_label = request.form.get("media_label", "").strip()
+        if not mount_path:
+            return make_response(
+                _render_block_devices(block_device_error="Missing mount_path for ingest prefill action.")
+            )
+        form_data = {"media_label": media_label or "mounted-media", "source_paths": mount_path}
+        notice = f"Prepared ingest form for mounted source {mount_path}. Review and submit to start ingest."
+        return _render_overview(operator_notice=notice, form_data=form_data)
 
     @app.post("/actions/daemon/tick")
     def tick_daemon() -> Response:

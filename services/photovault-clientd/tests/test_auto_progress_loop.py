@@ -257,6 +257,49 @@ def test_auto_progress_does_not_busy_loop_when_idle(tmp_path: Path) -> None:
     assert auto_events[0] == 0
 
 
+def test_auto_progress_advances_offline_ingest_pipeline_without_manual_ticks(
+    tmp_path: Path, monkeypatch
+) -> None:
+    db_path = tmp_path / "state.sqlite3"
+    staging_root = tmp_path / "staging"
+    source = tmp_path / "media" / "sd" / "auto-offline.jpg"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_bytes(b"auto-offline-pipeline")
+
+    monkeypatch.setattr(engine, "_network_is_online", lambda: False)
+
+    app = create_app(
+        db_path=db_path,
+        staging_root=staging_root,
+        auto_progress_interval_seconds=0.1,
+    )
+    with TestClient(app) as client:
+        create_response = client.post(
+            "/ingest/jobs",
+            json={"media_label": "sd-auto", "source_paths": [str(source)]},
+        )
+        assert create_response.status_code == 200
+        _wait_for_state(client, "WAIT_NETWORK", timeout_seconds=4.0)
+
+    conn = open_db(db_path)
+    job_status = conn.execute("SELECT status FROM ingest_jobs WHERE id = 1;").fetchone()
+    file_row = conn.execute(
+        "SELECT status, sha256_hex FROM ingest_files WHERE id = 1;"
+    ).fetchone()
+    auto_events = conn.execute(
+        "SELECT COUNT(1) FROM daemon_events WHERE category = 'AUTO_PROGRESS_APPLIED';"
+    ).fetchone()
+    conn.close()
+
+    assert job_status is not None
+    assert job_status[0] == "WAIT_NETWORK"
+    assert file_row is not None
+    assert file_row[0] == "READY_TO_UPLOAD"
+    assert file_row[1]
+    assert auto_events is not None
+    assert auto_events[0] >= 1
+
+
 def test_auto_progress_drains_online_pipeline_to_idle_without_manual_ticks(
     tmp_path: Path, monkeypatch
 ) -> None:

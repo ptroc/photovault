@@ -10,6 +10,14 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel, Field
 
+from photovault_clientd.block_devices import (
+    BlockDeviceAdapter,
+    BlockDeviceError,
+    is_mountpoint_blocked_by_sources,
+)
+from photovault_clientd.block_devices import (
+    derive_mount_path as derive_block_device_mount_path,
+)
 from photovault_clientd.db import (
     LATEST_SCHEMA_VERSION,
     append_daemon_event,
@@ -29,13 +37,14 @@ from photovault_clientd.db import (
     ingest_job_exists,
     insert_discovered_files,
     list_ingest_job_summaries,
+    list_non_terminal_source_paths,
     mark_file_copy_retry,
     mark_file_staged,
     open_db,
     run_state_invariant_checks,
-    set_network_ap_apply_result,
     set_daemon_state,
     set_job_status,
+    set_network_ap_apply_result,
     transition_daemon_state,
     upsert_network_ap_config,
 )
@@ -83,6 +92,10 @@ class IngestStageNextRequest(BaseModel):
 class APConfigUpdateRequest(BaseModel):
     ssid: str
     password: str
+
+
+class BlockDeviceActionRequest(BaseModel):
+    device_path: str = Field(min_length=1, max_length=512)
 
 
 def _validate_ap_config_payload(*, ssid: str, password: str) -> None:
@@ -191,6 +204,58 @@ def _next_state_for_stage_phase(pending_copy: int, hash_pending: int) -> ClientS
     return ClientState.IDLE
 
 
+def _http_status_for_block_device_error(exc: BlockDeviceError) -> int:
+    code = exc.operator_error.code
+    if code == "BLOCK_DEVICE_INVALID_INPUT":
+        return 422
+    return 503
+
+
+def _create_ingest_job_from_sources(
+    conn,
+    *,
+    media_label: str,
+    source_paths: list[str],
+    now_utc: str,
+) -> dict[str, object]:
+    current_state = get_daemon_state(conn)
+    if current_state != ClientState.IDLE:
+        raise HTTPException(status_code=409, detail=f"daemon must be IDLE, got {current_state}")
+
+    discovered_source_paths, invalid_sources, filtered_sources, filtered_count = _discover_source_files(
+        source_paths
+    )
+    if invalid_sources:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "INGEST_SOURCE_PATH_INVALID",
+                "message": "One or more source paths could not be used for ingest discovery.",
+                "invalid_sources": invalid_sources,
+                "suggestion": "Fix the listed paths, then retry ingest creation.",
+            },
+        )
+
+    transition_daemon_state(conn, ClientState.DISCOVERING, now_utc, reason="ingest job created", commit=False)
+    job_id = create_ingest_job(conn, media_label, now_utc)
+    discovered_count = insert_discovered_files(conn, job_id, discovered_source_paths, now_utc)
+    set_job_status(conn, job_id, ClientState.STAGING_COPY.value, now_utc)
+    transition_daemon_state(
+        conn,
+        ClientState.STAGING_COPY,
+        now_utc,
+        reason="discovery completed; entering staging copy",
+        commit=False,
+    )
+    return {
+        "job_id": job_id,
+        "discovered_count": discovered_count,
+        "filtered_count": filtered_count,
+        "filtered_sources": filtered_sources,
+        "state": ClientState.STAGING_COPY.value,
+    }
+
+
 def create_app(
     db_path: Path = DEFAULT_DB_PATH,
     staging_root: Path = DEFAULT_STAGING_ROOT,
@@ -199,8 +264,10 @@ def create_app(
     auto_progress_interval_seconds: float = DEFAULT_AUTO_PROGRESS_INTERVAL_SECONDS,
     auto_progress_max_steps: int = DEFAULT_AUTO_PROGRESS_MAX_STEPS,
     network_manager: NetworkManagerAdapter | None = None,
+    block_device_adapter: BlockDeviceAdapter | None = None,
 ) -> FastAPI:
     resolved_network_manager = network_manager or NetworkManagerAdapter()
+    resolved_block_device_adapter = block_device_adapter or BlockDeviceAdapter()
     progression_lock = threading.Lock()
 
     def _load_or_init_ap_config(conn, now_utc: str) -> dict[str, object]:
@@ -573,6 +640,105 @@ def create_app(
         conn.close()
         return {"count": len(events), "events": events}
 
+    @app.get("/block-devices")
+    def block_devices() -> dict[str, object]:
+        try:
+            devices = resolved_block_device_adapter.list_external_devices()
+        except BlockDeviceError as exc:
+            raise HTTPException(
+                status_code=_http_status_for_block_device_error(exc),
+                detail=exc.to_payload(),
+            ) from exc
+        return {"count": len(devices), "devices": devices}
+
+    @app.post("/block-devices/mount")
+    def block_devices_mount(request: BlockDeviceActionRequest) -> dict[str, object]:
+        now = datetime.now(UTC).isoformat()
+        conn = open_db(db_path)
+        try:
+            try:
+                outcome = resolved_block_device_adapter.mount_partition(request.device_path)
+            except BlockDeviceError as exc:
+                raise HTTPException(
+                    status_code=_http_status_for_block_device_error(exc),
+                    detail=exc.to_payload(),
+                ) from exc
+
+            append_daemon_event(
+                conn,
+                level=EventLevel.INFO,
+                category="BLOCK_DEVICE_MOUNTED",
+                message=(
+                    f"operator mounted block device {outcome['device_path']} "
+                    f"at {outcome['mount_path']} (read-only)"
+                ),
+                created_at_utc=now,
+                from_state=get_daemon_state_safe(conn),
+                to_state=get_daemon_state_safe(conn),
+            )
+            conn.commit()
+            return outcome
+        finally:
+            conn.close()
+
+    @app.post("/block-devices/unmount")
+    def block_devices_unmount(request: BlockDeviceActionRequest) -> dict[str, object]:
+        now = datetime.now(UTC).isoformat()
+        conn = open_db(db_path)
+        try:
+            try:
+                mount_path = derive_block_device_mount_path(request.device_path)
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=422,
+                    detail={
+                        "code": "BLOCK_DEVICE_INVALID_INPUT",
+                        "message": f"Invalid partition device path: {request.device_path}",
+                        "suggestion": "Use a partition path such as /dev/sda1.",
+                        "detail": str(exc),
+                    },
+                ) from exc
+
+            active_sources = list_non_terminal_source_paths(conn)
+            if is_mountpoint_blocked_by_sources(mount_path, active_sources):
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "BLOCK_DEVICE_BUSY",
+                        "message": (
+                            f"Cannot unmount {mount_path}: ingest work still references this source path."
+                        ),
+                        "suggestion": (
+                            "Wait for active ingest work to finish before unmounting this partition."
+                        ),
+                    },
+                )
+
+            try:
+                outcome = resolved_block_device_adapter.unmount_partition(request.device_path)
+            except BlockDeviceError as exc:
+                raise HTTPException(
+                    status_code=_http_status_for_block_device_error(exc),
+                    detail=exc.to_payload(),
+                ) from exc
+
+            append_daemon_event(
+                conn,
+                level=EventLevel.INFO,
+                category="BLOCK_DEVICE_UNMOUNTED",
+                message=(
+                    "operator unmounted block device "
+                    f"{outcome['device_path']} from {outcome['mount_path']}"
+                ),
+                created_at_utc=now,
+                from_state=get_daemon_state_safe(conn),
+                to_state=get_daemon_state_safe(conn),
+            )
+            conn.commit()
+            return outcome
+        finally:
+            conn.close()
+
     @app.get("/ingest/jobs")
     def ingest_jobs() -> dict[str, object]:
         conn = open_db(db_path)
@@ -611,46 +777,17 @@ def create_app(
     def create_ingest(request: IngestJobCreateRequest) -> dict[str, object]:
         conn = open_db(db_path)
         now = datetime.now(UTC).isoformat()
-        current_state = get_daemon_state(conn)
-        if current_state != ClientState.IDLE:
-            conn.close()
-            raise HTTPException(status_code=409, detail=f"daemon must be IDLE, got {current_state}")
-
-        discovered_source_paths, invalid_sources, filtered_sources, filtered_count = _discover_source_files(
-            request.source_paths
-        )
-        if invalid_sources:
-            conn.close()
-            raise HTTPException(
-                status_code=422,
-                detail={
-                    "code": "INGEST_SOURCE_PATH_INVALID",
-                    "message": "One or more source paths could not be used for ingest discovery.",
-                    "invalid_sources": invalid_sources,
-                    "suggestion": "Fix the listed paths, then retry ingest creation.",
-                },
+        try:
+            outcome = _create_ingest_job_from_sources(
+                conn,
+                media_label=request.media_label,
+                source_paths=request.source_paths,
+                now_utc=now,
             )
-
-        transition_daemon_state(conn, ClientState.DISCOVERING, now, reason="ingest job created", commit=False)
-        job_id = create_ingest_job(conn, request.media_label, now)
-        discovered_count = insert_discovered_files(conn, job_id, discovered_source_paths, now)
-        set_job_status(conn, job_id, ClientState.STAGING_COPY.value, now)
-        transition_daemon_state(
-            conn,
-            ClientState.STAGING_COPY,
-            now,
-            reason="discovery completed; entering staging copy",
-            commit=False,
-        )
-        conn.commit()
-        conn.close()
-        return {
-            "job_id": job_id,
-            "discovered_count": discovered_count,
-            "filtered_count": filtered_count,
-            "filtered_sources": filtered_sources,
-            "state": ClientState.STAGING_COPY.value,
-        }
+            conn.commit()
+            return outcome
+        finally:
+            conn.close()
 
     @app.post("/ingest/staging/next")
     def stage_next(request: IngestStageNextRequest) -> dict[str, object]:

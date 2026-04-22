@@ -1,0 +1,128 @@
+{% extends "_base.html" %}
+
+{% block content %}
+  <section class="section card stack">
+    <h2>Block Devices</h2>
+    <p class="muted">
+      Operator-controlled removable media workflow. Mount partitions manually under deterministic
+      <code>/mnt/sdX_N</code> paths, then prefill ingest from the mounted source.
+    </p>
+
+    {% if block_device_notice %}
+      <div class="banner banner-success">
+        <strong>Block-device action succeeded</strong>
+        <span>{{ block_device_notice }}</span>
+      </div>
+    {% endif %}
+
+    {% if block_device_error %}
+      <div class="banner banner-critical">
+        <strong>Block-device action failed</strong>
+        <span>{{ block_device_error }}</span>
+        {% if block_device_error_detail %}
+          <details class="meta-details">
+            <summary>Debug detail</summary>
+            <code>{{ block_device_error_detail }}</code>
+          </details>
+        {% endif %}
+      </div>
+    {% endif %}
+
+    {% if devices %}
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Device</th>
+              <th>Size</th>
+              <th>Filesystem</th>
+              <th>Mount target</th>
+              <th>Current mount</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for disk in devices %}
+              <tr>
+                <td colspan="6">
+                  <strong>{{ disk.path }}</strong>
+                  <span class="muted">
+                    (disk{% if disk.model %}, model={{ disk.model }}{% endif %}{% if disk.vendor %}, vendor={{ disk.vendor }}{% endif %}{% if disk.transport %}, transport={{ disk.transport }}{% endif %})
+                  </span>
+                </td>
+              </tr>
+              {% if disk.partitions %}
+                {% for partition in disk.partitions %}
+                  <tr>
+                    <td>
+                      <strong>{{ partition.path }}</strong><br>
+                      <span class="muted">
+                        {{ partition.filesystem_label or "no label" }}
+                        {% if partition.filesystem_uuid %} · uuid={{ partition.filesystem_uuid }}{% endif %}
+                      </span>
+                    </td>
+                    <td>{{ partition.size_label }}</td>
+                    <td>{{ partition.filesystem_type or "unknown" }}</td>
+                    <td><code>{{ partition.target_mount_path }}</code></td>
+                    <td>
+                      {% if partition.current_mountpoints %}
+                        {% for mountpoint in partition.current_mountpoints %}
+                          <code>{{ mountpoint }}</code>{% if not loop.last %}<br>{% endif %}
+                        {% endfor %}
+                      {% else %}
+                        <span class="muted">not mounted</span>
+                      {% endif %}
+                    </td>
+                    <td>
+                      <div class="action-row">
+                        {% if partition.can_mount %}
+                          <form method="post" action="/actions/block-devices/mount">
+                            <input type="hidden" name="device_path" value="{{ partition.path }}">
+                            <button type="submit">Mount</button>
+                          </form>
+                        {% endif %}
+                        {% if partition.can_unmount %}
+                          <form
+                            method="post"
+                            action="/actions/block-devices/unmount"
+                            onsubmit="return confirm('Unmounting this partition during active ingest is blocked. Continue unmount attempt?');"
+                          >
+                            <input type="hidden" name="device_path" value="{{ partition.path }}">
+                            <button type="submit" class="secondary">Unmount</button>
+                          </form>
+                        {% endif %}
+                        {% if partition.mount_active %}
+                          <form method="post" action="/actions/block-devices/use-as-ingest-source">
+                            <input
+                              type="hidden"
+                              name="mount_path"
+                              value="{{ partition.ingest_prefill.source_paths }}"
+                            >
+                            <input
+                              type="hidden"
+                              name="media_label"
+                              value="{{ partition.ingest_prefill.media_label }}"
+                            >
+                            <button type="submit">Use as ingest source</button>
+                          </form>
+                        {% endif %}
+                      </div>
+                    </td>
+                  </tr>
+                {% endfor %}
+              {% else %}
+                <tr>
+                  <td colspan="6">
+                    <span class="muted">No partitions detected for this removable disk.</span>
+                  </td>
+                </tr>
+              {% endif %}
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% else %}
+      <p class="muted">No external removable <code>/dev/sdX</code> devices detected.</p>
+    {% endif %}
+  </section>
+{% endblock %}
