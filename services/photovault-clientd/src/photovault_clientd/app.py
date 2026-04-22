@@ -101,6 +101,11 @@ class APConfigUpdateRequest(BaseModel):
     password: str
 
 
+class STAConnectRequest(BaseModel):
+    ssid: str
+    password: str | None = None
+
+
 class BlockDeviceActionRequest(BaseModel):
     device_path: str = Field(min_length=1, max_length=512)
 
@@ -123,6 +128,33 @@ def _validate_ap_config_payload(*, ssid: str, password: str) -> None:
                 "code": "AP_CONFIG_INVALID",
                 "message": "AP password must be between 8 and 63 characters.",
                 "suggestion": "Use a WPA-PSK password in the valid range and retry.",
+            },
+        )
+
+
+def _validate_sta_connect_payload(*, ssid: str, password: str | None) -> None:
+    normalized_ssid = ssid.strip()
+    if not normalized_ssid:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "STA_CONNECT_INVALID",
+                "message": "Upstream Wi-Fi SSID is required.",
+                "suggestion": "Provide a non-empty SSID and retry connecting upstream Wi-Fi.",
+            },
+        )
+    if password is None:
+        return
+    normalized_password = password.strip()
+    if normalized_password and (len(normalized_password) < 8 or len(normalized_password) > 63):
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "STA_CONNECT_INVALID",
+                "message": "Wi-Fi password must be between 8 and 63 characters when provided.",
+                "suggestion": (
+                    "Use a valid WPA-PSK password, or leave password empty for open/known networks."
+                ),
             },
         )
 
@@ -650,6 +682,24 @@ def create_app(
             _load_or_init_ap_config(conn, datetime.now(UTC).isoformat())
             resolved_network_manager.trigger_wifi_scan()
             return {"triggered": True}
+        except NetworkManagerError as exc:
+            raise HTTPException(status_code=503, detail=exc.to_payload()) from exc
+        finally:
+            conn.close()
+
+    @app.post("/network/sta-connect")
+    def network_sta_connect(request: STAConnectRequest) -> dict[str, object]:
+        now = datetime.now(UTC).isoformat()
+        _validate_sta_connect_payload(ssid=request.ssid, password=request.password)
+        conn = open_db(db_path)
+        try:
+            ap_config = _load_or_init_ap_config(conn, now)
+            result = resolved_network_manager.connect_sta_network(
+                ssid=request.ssid.strip(),
+                password=request.password,
+                ap_profile_name=str(ap_config["profile_name"]),
+            )
+            return result
         except NetworkManagerError as exc:
             raise HTTPException(status_code=503, detail=exc.to_payload()) from exc
         finally:

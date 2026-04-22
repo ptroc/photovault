@@ -18,6 +18,7 @@ from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel, Field
 
 from photovault_api.state_store import (
+    CatalogBackfillRunRecord,
     ClientHeartbeatRecord,
     ClientRecord,
     InMemoryUploadStateStore,
@@ -171,18 +172,42 @@ class AdminCatalogOrganizationResponse(BaseModel):
     item: AdminCatalogItem
 
 
-class AdminBackfillExtractionRequest(BaseModel):
+class AdminBackfillCatalogRequest(BaseModel):
     target_statuses: list[str] = Field(default_factory=lambda: ["pending", "failed"], min_length=1)
     limit: int = Field(default=100, ge=1, le=500)
+    origin_kind: str | None = None
+    media_type: str | None = None
+    preview_capability: str | None = None
+    cataloged_since_utc: str | None = None
+    cataloged_before_utc: str | None = None
 
 
-class AdminBackfillExtractionResponse(BaseModel):
+class AdminCatalogBackfillRunSummary(BaseModel):
+    backfill_kind: str
     requested_statuses: list[str]
+    limit: int
+    origin_kind: str | None
+    media_type: str | None
+    preview_capability: str | None
+    cataloged_since_utc: str | None
+    cataloged_before_utc: str | None
     selected_count: int
     processed_count: int
     succeeded_count: int
     failed_count: int
+    remaining_pending_count: int
+    remaining_failed_count: int
+    completed_at_utc: str
+
+
+class AdminBackfillCatalogResponse(BaseModel):
+    run: AdminCatalogBackfillRunSummary
     items: list[AdminCatalogItem]
+
+
+class AdminLatestCatalogBackfillRunsResponse(BaseModel):
+    extraction_run: AdminCatalogBackfillRunSummary | None
+    preview_run: AdminCatalogBackfillRunSummary | None
 
 
 class LatestIndexRunResponse(BaseModel):
@@ -364,6 +389,11 @@ _PREVIEWABLE_SUFFIXES = frozenset(
     for suffix in _MEDIA_TYPE_SUFFIXES[media_type]
 )
 _RAW_EMBEDDED_PREVIEW_TAGS = ("PreviewImage", "JpgFromRaw", "OtherImage", "ThumbnailImage")
+_ALLOWED_EXTRACTION_STATUS = {"pending", "succeeded", "failed"}
+_ALLOWED_PREVIEW_STATUS = {"pending", "succeeded", "failed"}
+_ALLOWED_ORIGIN_KIND = {"uploaded", "indexed"}
+_ALLOWED_MEDIA_TYPE = {"jpeg", "png", "heic", "raw", "video", "other"}
+_ALLOWED_PREVIEW_CAPABILITY = {"previewable", "not_previewable"}
 
 
 def _sanitize_component(raw_value: str, *, default_value: str) -> str:
@@ -820,6 +850,61 @@ def _parse_boolean_filter(raw_value: str | None, *, field_name: str) -> bool | N
     if lowered == "false":
         return False
     raise HTTPException(status_code=400, detail=f"invalid {field_name} filter")
+
+
+def _validate_catalog_filter_selection(
+    *,
+    extraction_status: str | None = None,
+    preview_status: str | None = None,
+    origin_kind: str | None = None,
+    media_type: str | None = None,
+    preview_capability: str | None = None,
+) -> None:
+    if extraction_status is not None and extraction_status not in _ALLOWED_EXTRACTION_STATUS:
+        raise HTTPException(status_code=400, detail="invalid extraction_status filter")
+    if preview_status is not None and preview_status not in _ALLOWED_PREVIEW_STATUS:
+        raise HTTPException(status_code=400, detail="invalid preview_status filter")
+    if origin_kind is not None and origin_kind not in _ALLOWED_ORIGIN_KIND:
+        raise HTTPException(status_code=400, detail="invalid origin_kind filter")
+    if media_type is not None and media_type not in _ALLOWED_MEDIA_TYPE:
+        raise HTTPException(status_code=400, detail="invalid media_type filter")
+    if preview_capability is not None and preview_capability not in _ALLOWED_PREVIEW_CAPABILITY:
+        raise HTTPException(status_code=400, detail="invalid preview_capability filter")
+
+
+def _validate_backfill_target_statuses(
+    *,
+    target_statuses: list[str],
+    allowed_statuses: set[str],
+) -> list[str]:
+    requested_statuses = list(dict.fromkeys(target_statuses))
+    invalid_statuses = [status for status in requested_statuses if status not in allowed_statuses]
+    if invalid_statuses:
+        raise HTTPException(
+            status_code=400,
+            detail=f"invalid target_statuses: {','.join(invalid_statuses)}",
+        )
+    return requested_statuses
+
+
+def _to_backfill_run_summary(record: CatalogBackfillRunRecord) -> AdminCatalogBackfillRunSummary:
+    return AdminCatalogBackfillRunSummary(
+        backfill_kind=record.backfill_kind,
+        requested_statuses=list(record.requested_statuses),
+        limit=record.limit_count,
+        origin_kind=record.filter_origin_kind,
+        media_type=record.filter_media_type,
+        preview_capability=record.filter_preview_capability,
+        cataloged_since_utc=record.filter_cataloged_since_utc,
+        cataloged_before_utc=record.filter_cataloged_before_utc,
+        selected_count=record.selected_count,
+        processed_count=record.processed_count,
+        succeeded_count=record.succeeded_count,
+        failed_count=record.failed_count,
+        remaining_pending_count=record.remaining_pending_count,
+        remaining_failed_count=record.remaining_failed_count,
+        completed_at_utc=record.completed_at_utc,
+    )
 
 
 def _heartbeat_presence_status(record: ClientHeartbeatRecord | None, *, now_utc: datetime) -> str:
@@ -1473,21 +1558,13 @@ def create_app(
         cataloged_since_utc: str | None = Query(default=None),
         cataloged_before_utc: str | None = Query(default=None),
     ) -> AdminCatalogListResponse:
-        allowed_extraction_status = {"pending", "succeeded", "failed"}
-        if extraction_status is not None and extraction_status not in allowed_extraction_status:
-            raise HTTPException(status_code=400, detail="invalid extraction_status filter")
-        allowed_preview_status = {"pending", "succeeded", "failed"}
-        if preview_status is not None and preview_status not in allowed_preview_status:
-            raise HTTPException(status_code=400, detail="invalid preview_status filter")
-        allowed_origin_kind = {"uploaded", "indexed"}
-        if origin_kind is not None and origin_kind not in allowed_origin_kind:
-            raise HTTPException(status_code=400, detail="invalid origin_kind filter")
-        allowed_media_type = {"jpeg", "png", "heic", "raw", "video", "other"}
-        if media_type is not None and media_type not in allowed_media_type:
-            raise HTTPException(status_code=400, detail="invalid media_type filter")
-        allowed_preview_capability = {"previewable", "not_previewable"}
-        if preview_capability is not None and preview_capability not in allowed_preview_capability:
-            raise HTTPException(status_code=400, detail="invalid preview_capability filter")
+        _validate_catalog_filter_selection(
+            extraction_status=extraction_status,
+            preview_status=preview_status,
+            origin_kind=origin_kind,
+            media_type=media_type,
+            preview_capability=preview_capability,
+        )
         is_favorite_filter = _parse_boolean_filter(is_favorite, field_name="is_favorite")
         is_archived_filter = _parse_boolean_filter(is_archived, field_name="is_archived")
 
@@ -1643,23 +1720,29 @@ def create_app(
             raise HTTPException(status_code=404, detail="catalog asset not found after retry")
         return AdminRetryExtractionResponse(item=_to_admin_catalog_item(updated))
 
-    @app.post("/v1/admin/catalog/extraction/backfill", response_model=AdminBackfillExtractionResponse)
+    @app.post("/v1/admin/catalog/extraction/backfill", response_model=AdminBackfillCatalogResponse)
     def admin_backfill_catalog_extraction(
-        payload: AdminBackfillExtractionRequest,
-    ) -> AdminBackfillExtractionResponse:
-        allowed_statuses = {"pending", "failed"}
-        requested_statuses = list(dict.fromkeys(payload.target_statuses))
-        invalid_statuses = [status for status in requested_statuses if status not in allowed_statuses]
-        if invalid_statuses:
-            raise HTTPException(
-                status_code=400,
-                detail=f"invalid target_statuses: {','.join(invalid_statuses)}",
-            )
+        payload: AdminBackfillCatalogRequest,
+    ) -> AdminBackfillCatalogResponse:
+        _validate_catalog_filter_selection(
+            origin_kind=payload.origin_kind,
+            media_type=payload.media_type,
+            preview_capability=payload.preview_capability,
+        )
+        requested_statuses = _validate_backfill_target_statuses(
+            target_statuses=payload.target_statuses,
+            allowed_statuses={"pending", "failed"},
+        )
 
         store: UploadStateStore = app.state.upload_state_store
         candidates = store.list_media_assets_for_extraction(
             extraction_statuses=requested_statuses,
             limit=payload.limit,
+            origin_kind=payload.origin_kind,
+            media_type=payload.media_type,
+            preview_capability=payload.preview_capability,
+            cataloged_since_utc=payload.cataloged_since_utc,
+            cataloged_before_utc=payload.cataloged_before_utc,
         )
         updated_items: list[AdminCatalogItem] = []
         for candidate in candidates:
@@ -1674,13 +1757,141 @@ def create_app(
 
         succeeded_count = sum(1 for item in updated_items if item.extraction_status == "succeeded")
         failed_count = sum(1 for item in updated_items if item.extraction_status == "failed")
-        return AdminBackfillExtractionResponse(
-            requested_statuses=requested_statuses,
+        remaining_pending_count, _ = store.list_media_assets(
+            limit=1,
+            offset=0,
+            extraction_status="pending",
+            origin_kind=payload.origin_kind,
+            media_type=payload.media_type,
+            preview_capability=payload.preview_capability,
+            cataloged_since_utc=payload.cataloged_since_utc,
+            cataloged_before_utc=payload.cataloged_before_utc,
+        )
+        remaining_failed_count, _ = store.list_media_assets(
+            limit=1,
+            offset=0,
+            extraction_status="failed",
+            origin_kind=payload.origin_kind,
+            media_type=payload.media_type,
+            preview_capability=payload.preview_capability,
+            cataloged_since_utc=payload.cataloged_since_utc,
+            cataloged_before_utc=payload.cataloged_before_utc,
+        )
+        run_record = CatalogBackfillRunRecord(
+            backfill_kind="extraction",
+            requested_statuses=tuple(requested_statuses),
+            limit_count=payload.limit,
+            filter_origin_kind=payload.origin_kind,
+            filter_media_type=payload.media_type,
+            filter_preview_capability=payload.preview_capability,
+            filter_cataloged_since_utc=payload.cataloged_since_utc,
+            filter_cataloged_before_utc=payload.cataloged_before_utc,
             selected_count=len(candidates),
             processed_count=len(updated_items),
             succeeded_count=succeeded_count,
             failed_count=failed_count,
+            remaining_pending_count=remaining_pending_count,
+            remaining_failed_count=remaining_failed_count,
+            completed_at_utc=datetime.now(UTC).isoformat(),
+        )
+        store.record_catalog_backfill_run(run_record)
+        return AdminBackfillCatalogResponse(
+            run=_to_backfill_run_summary(run_record),
             items=updated_items,
+        )
+
+    @app.post("/v1/admin/catalog/preview/backfill", response_model=AdminBackfillCatalogResponse)
+    def admin_backfill_catalog_preview(
+        payload: AdminBackfillCatalogRequest,
+    ) -> AdminBackfillCatalogResponse:
+        effective_preview_capability = payload.preview_capability or "previewable"
+        _validate_catalog_filter_selection(
+            origin_kind=payload.origin_kind,
+            media_type=payload.media_type,
+            preview_capability=effective_preview_capability,
+        )
+        requested_statuses = _validate_backfill_target_statuses(
+            target_statuses=payload.target_statuses,
+            allowed_statuses={"pending", "failed"},
+        )
+
+        store: UploadStateStore = app.state.upload_state_store
+        candidates = store.list_media_assets_for_preview(
+            preview_statuses=requested_statuses,
+            limit=payload.limit,
+            origin_kind=payload.origin_kind,
+            media_type=payload.media_type,
+            preview_capability=effective_preview_capability,
+            cataloged_since_utc=payload.cataloged_since_utc,
+            cataloged_before_utc=payload.cataloged_before_utc,
+        )
+        updated_items: list[AdminCatalogItem] = []
+        for candidate in candidates:
+            _attempt_preview_generation(
+                store=store,
+                storage_root_path=storage_root_path,
+                preview_cache_root_path=preview_cache_root_path,
+                relative_path=candidate.relative_path,
+            )
+            updated = store.get_media_asset_by_path(candidate.relative_path)
+            if updated is not None:
+                updated_items.append(_to_admin_catalog_item(updated))
+
+        succeeded_count = sum(1 for item in updated_items if item.preview_status == "succeeded")
+        failed_count = sum(1 for item in updated_items if item.preview_status == "failed")
+        remaining_pending_count, _ = store.list_media_assets(
+            limit=1,
+            offset=0,
+            preview_status="pending",
+            origin_kind=payload.origin_kind,
+            media_type=payload.media_type,
+            preview_capability=effective_preview_capability,
+            cataloged_since_utc=payload.cataloged_since_utc,
+            cataloged_before_utc=payload.cataloged_before_utc,
+        )
+        remaining_failed_count, _ = store.list_media_assets(
+            limit=1,
+            offset=0,
+            preview_status="failed",
+            origin_kind=payload.origin_kind,
+            media_type=payload.media_type,
+            preview_capability=effective_preview_capability,
+            cataloged_since_utc=payload.cataloged_since_utc,
+            cataloged_before_utc=payload.cataloged_before_utc,
+        )
+        run_record = CatalogBackfillRunRecord(
+            backfill_kind="preview",
+            requested_statuses=tuple(requested_statuses),
+            limit_count=payload.limit,
+            filter_origin_kind=payload.origin_kind,
+            filter_media_type=payload.media_type,
+            filter_preview_capability=effective_preview_capability,
+            filter_cataloged_since_utc=payload.cataloged_since_utc,
+            filter_cataloged_before_utc=payload.cataloged_before_utc,
+            selected_count=len(candidates),
+            processed_count=len(updated_items),
+            succeeded_count=succeeded_count,
+            failed_count=failed_count,
+            remaining_pending_count=remaining_pending_count,
+            remaining_failed_count=remaining_failed_count,
+            completed_at_utc=datetime.now(UTC).isoformat(),
+        )
+        store.record_catalog_backfill_run(run_record)
+        return AdminBackfillCatalogResponse(
+            run=_to_backfill_run_summary(run_record),
+            items=updated_items,
+        )
+
+    @app.get("/v1/admin/catalog/backfill/latest", response_model=AdminLatestCatalogBackfillRunsResponse)
+    def admin_latest_catalog_backfill_runs() -> AdminLatestCatalogBackfillRunsResponse:
+        store: UploadStateStore = app.state.upload_state_store
+        extraction_run = store.get_latest_catalog_backfill_run("extraction")
+        preview_run = store.get_latest_catalog_backfill_run("preview")
+        return AdminLatestCatalogBackfillRunsResponse(
+            extraction_run=(
+                _to_backfill_run_summary(extraction_run) if extraction_run is not None else None
+            ),
+            preview_run=_to_backfill_run_summary(preview_run) if preview_run is not None else None,
         )
 
     @app.get("/v1/admin/duplicates", response_model=DuplicateShaGroupListResponse)

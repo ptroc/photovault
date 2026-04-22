@@ -18,13 +18,21 @@
       {% endif %}
 
       {% if network_snapshot %}
-        <div class="kpi {% if network_snapshot.general.connectivity == 'full' %}status-ok{% else %}status-warn{% endif %}">
+        <div class="kpi {% if network_snapshot.local_ap_ready and network_snapshot.upstream_internet_reachable %}status-ok{% elif network_snapshot.local_ap_ready %}status-warn{% else %}status-error{% endif %}">
           {{ network_snapshot.general.connectivity }}
         </div>
         <p class="muted">
           State: {{ network_snapshot.general.state }}<br>
           Wi-Fi: {{ network_snapshot.general.wifi }}<br>
-          STA connected: {{ "yes" if network_snapshot.sta_connected else "no" }}
+          Local AP ready: {{ "yes" if network_snapshot.local_ap_ready else "no" }}<br>
+          Upstream STA connected: {{ "yes" if network_snapshot.sta_connected else "no" }}<br>
+          Upstream Internet reachable: {{ "yes" if network_snapshot.upstream_internet_reachable else "no" }}<br>
+          Captive portal suspected: {{ "yes" if network_snapshot.captive_portal_detected else "no" }}
+        </p>
+        <p class="muted">
+          AP device(s): {{ network_snapshot.ap_device_names | join(", ") if network_snapshot.ap_device_names else "none" }}<br>
+          STA device(s): {{ network_snapshot.sta_device_names | join(", ") if network_snapshot.sta_device_names else "none" }}<br>
+          STA connection(s): {{ network_snapshot.sta_connection_names | join(", ") if network_snapshot.sta_connection_names else "none" }}
         </p>
         <p><strong>Next action:</strong> {{ network_snapshot.next_operator_action }}</p>
       {% else %}
@@ -40,14 +48,31 @@
       <form class="form-grid section" method="post" action="/network/ap-config">
         <div>
           <label for="ssid">AP SSID</label>
-          <input id="ssid" name="ssid" value="{{ network_form.ssid }}" required>
+          <input id="ssid" name="ssid" value="{{ ap_form.ssid }}" required>
         </div>
         <div>
           <label for="password">AP Password</label>
-          <input id="password" name="password" type="password" value="{{ network_form.password }}">
+          <input id="password" name="password" type="password" value="{{ ap_form.password }}">
         </div>
         <div class="button-row">
           <button type="submit">Update AP config</button>
+        </div>
+      </form>
+
+      <form class="form-grid section" method="post" action="/network/sta-connect">
+        <div>
+          <label for="sta_ssid">Upstream Wi-Fi SSID</label>
+          <input id="sta_ssid" name="sta_ssid" value="{{ sta_form.ssid }}" required>
+        </div>
+        <div>
+          <label for="sta_password">Upstream Wi-Fi Password</label>
+          <input id="sta_password" name="sta_password" type="password" value="{{ sta_form.password }}">
+        </div>
+        <p class="muted">
+          Leave password empty for open networks or previously saved profiles.
+        </p>
+        <div class="button-row">
+          <button type="submit">Join upstream Wi-Fi</button>
         </div>
       </form>
       {% if network_ap_config %}

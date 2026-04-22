@@ -17,7 +17,10 @@ from photovault_clientd.networking import (
 def _snapshot(profile_name: str = "photovault-ap") -> NetworkStatusSnapshot:
     return NetworkStatusSnapshot(
         general=NetworkGeneral(state="connected", connectivity="full", wifi="enabled"),
-        devices=[NetworkDevice(device="wlan0", type="wifi", state="connected", connection="studio-wifi")],
+        devices=[
+            NetworkDevice(device="wlan1", type="wifi", state="connected", connection=profile_name),
+            NetworkDevice(device="wlan0", type="wifi", state="connected", connection="studio-wifi"),
+        ],
         wifi_networks=[
             WifiNetwork(
                 in_use="*",
@@ -38,6 +41,12 @@ def _snapshot(profile_name: str = "photovault-ap") -> NetworkStatusSnapshot:
             key_mgmt="wpa-psk",
         ),
         sta_connected=True,
+        ap_device_names=["wlan1"],
+        sta_device_names=["wlan0"],
+        sta_connection_names=["studio-wifi"],
+        local_ap_ready=True,
+        upstream_internet_reachable=True,
+        captive_portal_detected=False,
         next_operator_action="Upstream network is connected. Verify AP settings and continue operations.",
     )
 
@@ -47,6 +56,8 @@ class _FakeNetworkManager:
         self.ensure_calls: list[dict[str, str]] = []
         self.scan_called = False
         self.fail_scan = False
+        self.connect_calls: list[dict[str, str | None]] = []
+        self.fail_connect = False
 
     def ensure_ap_profile(self, *, profile_name: str, ssid: str, password: str) -> dict[str, object]:
         self.ensure_calls.append(
@@ -77,6 +88,31 @@ class _FakeNetworkManager:
             )
         self.scan_called = True
 
+    def connect_sta_network(
+        self,
+        *,
+        ssid: str,
+        password: str | None,
+        ap_profile_name: str,
+    ) -> dict[str, object]:
+        self.connect_calls.append(
+            {"ssid": ssid, "password": password, "ap_profile_name": ap_profile_name}
+        )
+        if self.fail_connect:
+            raise NetworkManagerError(
+                OperatorError(
+                    code="NM_WIFI_AUTH_FAILED",
+                    message="Failed to connect upstream Wi-Fi SSID studio-wifi: Wi-Fi authentication failed.",
+                    detail="forced auth failure",
+                    suggestion="Retry with correct password.",
+                )
+            )
+        return {
+            "ssid": ssid,
+            "target_device": "wlan0",
+            "snapshot": _snapshot(ap_profile_name).to_dict(),
+        }
+
 
 def test_startup_ensures_ap_profile_idempotently(tmp_path: Path) -> None:
     db_path = tmp_path / "state.sqlite3"
@@ -106,6 +142,8 @@ def test_network_status_and_ap_config_endpoints_return_normalized_payload(tmp_pa
         assert status_payload["snapshot"]["general"]["connectivity"] == "full"
         assert status_payload["snapshot"]["ap_profile"]["profile_name"] == "photovault-ap"
         assert "next_operator_action" in status_payload["snapshot"]
+        assert status_payload["snapshot"]["local_ap_ready"] is True
+        assert status_payload["snapshot"]["upstream_internet_reachable"] is True
 
         config_response = client.get("/network/ap-config")
         assert config_response.status_code == 200
@@ -154,3 +192,38 @@ def test_network_wifi_scan_failure_surfaces_operator_error(tmp_path: Path) -> No
         assert response.status_code == 503
         payload = response.json()
         assert payload["detail"]["code"] == "NM_COMMAND_FAILED"
+
+
+def test_network_sta_connect_updates_upstream_via_network_manager(tmp_path: Path) -> None:
+    manager = _FakeNetworkManager()
+    app = create_app(db_path=tmp_path / "state.sqlite3", network_manager=manager)
+    with TestClient(app) as client:
+        response = client.post(
+            "/network/sta-connect",
+            json={"ssid": "studio-wifi", "password": "validpass11"},
+        )
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["ssid"] == "studio-wifi"
+        assert payload["target_device"] == "wlan0"
+        assert payload["snapshot"]["sta_connected"] is True
+
+    assert manager.connect_calls[-1] == {
+        "ssid": "studio-wifi",
+        "password": "validpass11",
+        "ap_profile_name": "photovault-ap",
+    }
+
+
+def test_network_sta_connect_validation_and_failure_handling(tmp_path: Path) -> None:
+    manager = _FakeNetworkManager()
+    manager.fail_connect = True
+    app = create_app(db_path=tmp_path / "state.sqlite3", network_manager=manager)
+    with TestClient(app) as client:
+        invalid = client.post("/network/sta-connect", json={"ssid": "  ", "password": "short"})
+        assert invalid.status_code == 422
+        assert invalid.json()["detail"]["code"] == "STA_CONNECT_INVALID"
+
+        failure = client.post("/network/sta-connect", json={"ssid": "studio-wifi", "password": "validpass11"})
+        assert failure.status_code == 503
+        assert failure.json()["detail"]["code"] == "NM_WIFI_AUTH_FAILED"

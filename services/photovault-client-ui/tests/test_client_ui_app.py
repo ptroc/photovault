@@ -11,6 +11,12 @@ def _network_snapshot() -> dict[str, object]:
         },
         "devices": [
             {
+                "device": "wlan1",
+                "type": "wifi",
+                "state": "connected",
+                "connection": "photovault-ap",
+            },
+            {
                 "device": "wlan0",
                 "type": "wifi",
                 "state": "connected",
@@ -27,6 +33,14 @@ def _network_snapshot() -> dict[str, object]:
                 "rate": "540 Mbit/s",
             }
         ],
+        "sta_connected": True,
+        "ap_device_names": ["wlan1"],
+        "sta_device_names": ["wlan0"],
+        "sta_connection_names": ["studio-wifi"],
+        "local_ap_ready": True,
+        "upstream_internet_reachable": True,
+        "captive_portal_detected": False,
+        "next_operator_action": "Local AP is available and upstream Internet is reachable.",
     }
 
 
@@ -292,6 +306,12 @@ def _overview_payloads(
                     "key_mgmt": "wpa-psk",
                 },
                 "sta_connected": True,
+                "ap_device_names": ["wlan1"],
+                "sta_device_names": ["wlan0"],
+                "sta_connection_names": ["studio-wifi"],
+                "local_ap_ready": True,
+                "upstream_internet_reachable": True,
+                "captive_portal_detected": False,
                 "next_operator_action": (
                     "Upstream network is connected. Verify AP settings and continue operations."
                 ),
@@ -883,7 +903,10 @@ def test_network_page_and_errors_render() -> None:
     page = client.get("/network").get_data(as_text=True)
     assert 'class="active">Network<' in page
     assert "Update AP config" in page
+    assert "Join upstream Wi-Fi" in page
     assert "Visible Wi-Fi Networks" in page
+    assert "Local AP ready: yes" in page
+    assert "Upstream Internet reachable: yes" in page
     assert "Next action:" in page
 
     def failing_daemon_post(_: str, path: str, payload: dict[str, object]) -> object:
@@ -970,3 +993,54 @@ def test_network_ap_update_success_and_error_render() -> None:
         data={"ssid": "field-ap", "password": "short"},
     ).get_data(as_text=True)
     assert "Failed to update AP config: daemon API returned HTTP 422" in error_body
+
+
+def test_network_sta_connect_success_and_error_render() -> None:
+    payloads = _overview_payloads()
+
+    def fake_daemon_get(_: str, path: str) -> object:
+        return payloads[path]
+
+    def success_daemon_post(_: str, path: str, payload: dict[str, object]) -> object:
+        assert path == "/network/sta-connect"
+        assert payload["ssid"] == "studio-wifi"
+        assert payload["password"] == "validpass11"
+        return {"ssid": "studio-wifi", "target_device": "wlan0"}
+
+    app = create_app(
+        daemon_get=fake_daemon_get,
+        daemon_post=success_daemon_post,
+        dependency_snapshot_get=_dependency_snapshot,
+    )
+    success_body = app.test_client().post(
+        "/network/sta-connect",
+        data={"sta_ssid": "studio-wifi", "sta_password": "validpass11"},
+    ).get_data(as_text=True)
+    assert "Upstream Wi-Fi connect requested for SSID" in success_body
+    assert "studio-wifi" in success_body
+
+    def failing_daemon_post(_: str, path: str, payload: dict[str, object]) -> object:
+        assert path == "/network/sta-connect"
+        request = httpx.Request("POST", "http://127.0.0.1:9101/network/sta-connect")
+        response = httpx.Response(
+            status_code=503,
+            json={
+                "detail": {
+                    "code": "NM_WIFI_AUTH_FAILED",
+                    "message": "Wi-Fi authentication failed.",
+                }
+            },
+            request=request,
+        )
+        raise httpx.HTTPStatusError("bad gateway", request=request, response=response)
+
+    app_with_error = create_app(
+        daemon_get=fake_daemon_get,
+        daemon_post=failing_daemon_post,
+        dependency_snapshot_get=_dependency_snapshot,
+    )
+    error_body = app_with_error.test_client().post(
+        "/network/sta-connect",
+        data={"sta_ssid": "studio-wifi", "sta_password": "badpass"},
+    ).get_data(as_text=True)
+    assert "Failed to connect upstream Wi-Fi: daemon API returned HTTP 503" in error_body

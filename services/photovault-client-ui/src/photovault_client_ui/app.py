@@ -1105,17 +1105,21 @@ def create_app(
     def _load_network_context(
         network_error: str | None = None,
         network_notice: str | None = None,
-        network_form_data: dict[str, str] | None = None,
+        ap_form_data: dict[str, str] | None = None,
+        sta_form_data: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         context: dict[str, Any] = {
             "network_snapshot": None,
             "network_ap_config": None,
             "network_error": network_error,
             "network_notice": network_notice,
-            "network_form": {"ssid": "", "password": ""},
+            "ap_form": {"ssid": "", "password": ""},
+            "sta_form": {"ssid": "", "password": ""},
         }
-        if network_form_data:
-            context["network_form"].update(network_form_data)
+        if ap_form_data:
+            context["ap_form"].update(ap_form_data)
+        if sta_form_data:
+            context["sta_form"].update(sta_form_data)
         try:
             status_payload = daemon_get(daemon_base_url, "/network/status")
             context["network_snapshot"] = status_payload.get("snapshot")
@@ -1123,7 +1127,7 @@ def create_app(
             ap_config_payload = daemon_get(daemon_base_url, "/network/ap-config")
             if context["network_ap_config"] is None:
                 context["network_ap_config"] = ap_config_payload
-            context["network_form"]["ssid"] = str(ap_config_payload.get("ssid", "")).strip()
+            context["ap_form"]["ssid"] = str(ap_config_payload.get("ssid", "")).strip()
         except httpx.HTTPError as exc:
             if context["network_error"] is None:
                 context["network_error"] = f"Failed to load network status: {_describe_http_error(exc)}"
@@ -1260,14 +1264,16 @@ def create_app(
         *,
         network_error: str | None = None,
         network_notice: str | None = None,
-        network_form_data: dict[str, str] | None = None,
+        ap_form_data: dict[str, str] | None = None,
+        sta_form_data: dict[str, str] | None = None,
     ) -> str:
         context = _load_daemon_context()
         context.update(
             _load_network_context(
                 network_error=network_error,
                 network_notice=network_notice,
-                network_form_data=network_form_data,
+                ap_form_data=ap_form_data,
+                sta_form_data=sta_form_data,
             )
         )
         context.update(
@@ -1611,12 +1617,12 @@ def create_app(
     def update_ap_config() -> str:
         ssid = request.form.get("ssid", "")
         password = request.form.get("password", "")
-        network_form = {"ssid": ssid, "password": password}
+        ap_form = {"ssid": ssid, "password": password}
 
         if not ssid.strip():
             return _render_network(
                 network_error="AP SSID is required.",
-                network_form_data=network_form,
+                ap_form_data=ap_form,
             )
 
         try:
@@ -1628,12 +1634,40 @@ def create_app(
         except httpx.HTTPError as exc:
             return _render_network(
                 network_error=f"Failed to update AP config: {_describe_http_error(exc)}",
-                network_form_data=network_form,
+                ap_form_data=ap_form,
             )
 
         return _render_network(
             network_notice="AP configuration updated and applied via NetworkManager.",
-            network_form_data={"ssid": ssid.strip(), "password": ""},
+            ap_form_data={"ssid": ssid.strip(), "password": ""},
+        )
+
+    @app.post("/network/sta-connect")
+    def connect_sta() -> str:
+        ssid = request.form.get("sta_ssid", "")
+        password = request.form.get("sta_password", "")
+        sta_form = {"ssid": ssid, "password": password}
+
+        if not ssid.strip():
+            return _render_network(
+                network_error="Upstream Wi-Fi SSID is required.",
+                sta_form_data=sta_form,
+            )
+
+        payload: dict[str, Any] = {"ssid": ssid}
+        if password.strip():
+            payload["password"] = password
+        try:
+            daemon_post(daemon_base_url, "/network/sta-connect", payload)
+        except httpx.HTTPError as exc:
+            return _render_network(
+                network_error=f"Failed to connect upstream Wi-Fi: {_describe_http_error(exc)}",
+                sta_form_data=sta_form,
+            )
+
+        return _render_network(
+            network_notice=f"Upstream Wi-Fi connect requested for SSID '{ssid.strip()}'.",
+            sta_form_data={"ssid": ssid.strip(), "password": ""},
         )
 
     @app.get("/jobs/<int:job_id>")

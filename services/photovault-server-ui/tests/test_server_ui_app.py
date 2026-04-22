@@ -365,6 +365,9 @@ def test_conflicts_page_renders_conflict_history_and_latest_run() -> None:
 
 def test_catalog_page_renders_rows_extraction_states_and_metadata_summary() -> None:
     def _fetcher(path: str, query: dict[str, str]) -> dict:
+        if path == "/v1/admin/catalog/backfill/latest":
+            assert query == {}
+            return {"extraction_run": None, "preview_run": None}
         assert path == "/v1/admin/catalog"
         assert query == {"limit": "50", "offset": "0"}
         return {
@@ -462,6 +465,9 @@ def test_catalog_page_renders_rows_extraction_states_and_metadata_summary() -> N
 
 def test_catalog_page_empty_state_is_clear() -> None:
     def _fetcher(path: str, query: dict[str, str]) -> dict:
+        if path == "/v1/admin/catalog/backfill/latest":
+            assert query == {}
+            return {"extraction_run": None, "preview_run": None}
         assert path == "/v1/admin/catalog"
         return {"total": 0, "limit": 50, "offset": 0, "items": []}
 
@@ -473,6 +479,9 @@ def test_catalog_page_empty_state_is_clear() -> None:
 
 def test_catalog_page_pagination_is_sane() -> None:
     def _fetcher(path: str, query: dict[str, str]) -> dict:
+        if path == "/v1/admin/catalog/backfill/latest":
+            assert query == {}
+            return {"extraction_run": None, "preview_run": None}
         assert path == "/v1/admin/catalog"
         assert query == {"limit": "50", "offset": "50"}
         return {
@@ -521,6 +530,9 @@ def test_catalog_page_pagination_is_sane() -> None:
 
 def test_catalog_page_filters_pending_assets() -> None:
     def _fetcher(path: str, query: dict[str, str]) -> dict:
+        if path == "/v1/admin/catalog/backfill/latest":
+            assert query == {}
+            return {"extraction_run": None, "preview_run": None}
         assert path == "/v1/admin/catalog"
         assert query == {"limit": "50", "offset": "0", "extraction_status": "pending"}
         return {
@@ -568,6 +580,9 @@ def test_catalog_page_filters_pending_assets() -> None:
 
 def test_catalog_page_filters_failed_assets_and_shows_failure_detail() -> None:
     def _fetcher(path: str, query: dict[str, str]) -> dict:
+        if path == "/v1/admin/catalog/backfill/latest":
+            assert query == {}
+            return {"extraction_run": None, "preview_run": None}
         assert path == "/v1/admin/catalog"
         assert query == {"limit": "50", "offset": "0", "extraction_status": "failed"}
         return {
@@ -616,6 +631,9 @@ def test_catalog_page_filters_failed_assets_and_shows_failure_detail() -> None:
 
 def test_catalog_page_origin_filter_and_filtered_pagination_links() -> None:
     def _fetcher(path: str, query: dict[str, str]) -> dict:
+        if path == "/v1/admin/catalog/backfill/latest":
+            assert query == {}
+            return {"extraction_run": None, "preview_run": None}
         assert path == "/v1/admin/catalog"
         assert query == {
             "limit": "50",
@@ -666,6 +684,9 @@ def test_catalog_page_origin_filter_and_filtered_pagination_links() -> None:
 
 def test_catalog_page_forwards_media_type_preview_filters() -> None:
     def _fetcher(path: str, query: dict[str, str]) -> dict:
+        if path == "/v1/admin/catalog/backfill/latest":
+            assert query == {}
+            return {"extraction_run": None, "preview_run": None}
         assert path == "/v1/admin/catalog"
         assert query == {
             "limit": "50",
@@ -687,6 +708,9 @@ def test_catalog_page_forwards_media_type_preview_filters() -> None:
 
 def test_catalog_page_forwards_favorite_and_archived_filters() -> None:
     def _fetcher(path: str, query: dict[str, str]) -> dict:
+        if path == "/v1/admin/catalog/backfill/latest":
+            assert query == {}
+            return {"extraction_run": None, "preview_run": None}
         assert path == "/v1/admin/catalog"
         assert query == {
             "limit": "50",
@@ -699,6 +723,128 @@ def test_catalog_page_forwards_favorite_and_archived_filters() -> None:
     app = create_app(api_fetcher=_fetcher)
     response = app.test_client().get("/catalog?is_favorite=true&is_archived=false")
     assert response.status_code == 200
+
+
+def test_catalog_page_renders_backfill_controls_and_latest_run_summary() -> None:
+    def _fetcher(path: str, query: dict[str, str]) -> dict:
+        if path == "/v1/admin/catalog":
+            assert query == {"limit": "50", "offset": "0"}
+            return {"total": 0, "limit": 50, "offset": 0, "items": []}
+        assert path == "/v1/admin/catalog/backfill/latest"
+        assert query == {}
+        return {
+            "extraction_run": {
+                "backfill_kind": "extraction",
+                "requested_statuses": ["pending", "failed"],
+                "limit": 50,
+                "origin_kind": "indexed",
+                "media_type": "jpeg",
+                "preview_capability": "previewable",
+                "cataloged_since_utc": None,
+                "cataloged_before_utc": None,
+                "selected_count": 8,
+                "processed_count": 8,
+                "succeeded_count": 7,
+                "failed_count": 1,
+                "remaining_pending_count": 3,
+                "remaining_failed_count": 2,
+                "completed_at_utc": "2026-04-22T11:00:00+00:00",
+            },
+            "preview_run": {
+                "backfill_kind": "preview",
+                "requested_statuses": ["pending", "failed"],
+                "limit": 25,
+                "origin_kind": "uploaded",
+                "media_type": "raw",
+                "preview_capability": "previewable",
+                "cataloged_since_utc": None,
+                "cataloged_before_utc": None,
+                "selected_count": 5,
+                "processed_count": 5,
+                "succeeded_count": 4,
+                "failed_count": 1,
+                "remaining_pending_count": 2,
+                "remaining_failed_count": 1,
+                "completed_at_utc": "2026-04-22T11:05:00+00:00",
+            },
+        }
+
+    app = create_app(api_fetcher=_fetcher)
+    response = app.test_client().get("/catalog")
+    assert response.status_code == 200
+    html = response.get_data(as_text=True)
+    assert "Backfill Operations" in html
+    assert "Run Extraction Backfill" in html
+    assert "Run Preview Backfill" in html
+    assert "remaining pending 3, failed 2" in html
+    assert "remaining pending 2, failed 1" in html
+    assert "2026-04-22T11:05:00+00:00" in html
+
+
+def test_catalog_backfill_action_posts_filters_and_shows_outcome_message() -> None:
+    observed: dict[str, object] = {}
+
+    def _fetcher(path: str, query: dict[str, str]) -> dict:
+        if path == "/v1/admin/catalog":
+            observed["query"] = query
+            return {"total": 0, "limit": 50, "offset": 50, "items": []}
+        assert path == "/v1/admin/catalog/backfill/latest"
+        return {"extraction_run": None, "preview_run": None}
+
+    def _poster(path: str, payload: dict) -> dict:
+        observed["path"] = path
+        observed["payload"] = payload
+        return {
+            "run": {
+                "selected_count": 4,
+                "succeeded_count": 3,
+                "failed_count": 1,
+                "remaining_pending_count": 2,
+                "remaining_failed_count": 1,
+            },
+            "items": [],
+        }
+
+    app = create_app(api_fetcher=_fetcher, api_poster=_poster)
+    response = app.test_client().post(
+        "/catalog/actions/backfill",
+        data={
+            "page": "2",
+            "backfill_kind": "preview",
+            "target_statuses": ["pending", "failed"],
+            "limit": "40",
+            "extraction_status": "failed",
+            "preview_status": "pending",
+            "origin_kind": "indexed",
+            "media_type": "raw",
+            "preview_capability": "previewable",
+            "cataloged_since_utc": "2026-04-22T00:00:00+00:00",
+        },
+        follow_redirects=True,
+    )
+    assert response.status_code == 200
+    assert observed["path"] == "/v1/admin/catalog/preview/backfill"
+    assert observed["payload"] == {
+        "target_statuses": ["pending", "failed"],
+        "limit": 40,
+        "origin_kind": "indexed",
+        "media_type": "raw",
+        "preview_capability": "previewable",
+        "cataloged_since_utc": "2026-04-22T00:00:00+00:00",
+    }
+    assert observed["query"] == {
+        "limit": "50",
+        "offset": "50",
+        "extraction_status": "failed",
+        "preview_status": "pending",
+        "origin_kind": "indexed",
+        "media_type": "raw",
+        "preview_capability": "previewable",
+        "cataloged_since_utc": "2026-04-22T00:00:00+00:00",
+    }
+    assert "Preview backfill completed: selected=4, succeeded=3, failed=1" in response.get_data(
+        as_text=True
+    )
 
 
 def test_catalog_asset_detail_renders_preview_status_and_operator_metadata() -> None:
@@ -812,6 +958,9 @@ def test_catalog_favorite_action_posts_to_api_and_preserves_filters() -> None:
     observed: dict[str, object] = {}
 
     def _fetcher(path: str, query: dict[str, str]) -> dict:
+        if path == "/v1/admin/catalog/backfill/latest":
+            assert query == {}
+            return {"extraction_run": None, "preview_run": None}
         observed["query"] = query
         assert path == "/v1/admin/catalog"
         return {"total": 0, "limit": 50, "offset": 0, "items": []}

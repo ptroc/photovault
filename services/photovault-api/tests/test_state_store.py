@@ -148,6 +148,106 @@ def test_in_memory_media_asset_preview_updates_status_path_and_failure_detail() 
     assert updated.preview_failure_detail is None
 
 
+def test_in_memory_preview_backfill_selection_honors_status_origin_and_capability_filters() -> None:
+    from photovault_api.state_store import InMemoryUploadStateStore
+
+    store = InMemoryUploadStateStore()
+    observed_at = "2026-04-20T12:01:00+00:00"
+    store.upsert_media_asset(
+        relative_path="2026/04/job/a.jpg",
+        sha256_hex="a" * 64,
+        size_bytes=10,
+        origin_kind="indexed",
+        observed_at_utc=observed_at,
+    )
+    store.upsert_media_asset(
+        relative_path="2026/04/job/b.txt",
+        sha256_hex="b" * 64,
+        size_bytes=10,
+        origin_kind="indexed",
+        observed_at_utc=observed_at,
+    )
+    store.upsert_media_asset(
+        relative_path="2026/04/job/c.jpg",
+        sha256_hex="c" * 64,
+        size_bytes=10,
+        origin_kind="uploaded",
+        observed_at_utc=observed_at,
+    )
+    store.upsert_media_asset_preview(
+        relative_path="2026/04/job/c.jpg",
+        preview_status="failed",
+        preview_relative_path=None,
+        attempted_at_utc=observed_at,
+        succeeded_at_utc=None,
+        failed_at_utc=observed_at,
+        failure_detail="preview failed",
+        recorded_at_utc=observed_at,
+    )
+
+    indexed_previewable_pending = store.list_media_assets_for_preview(
+        preview_statuses=["pending", "failed"],
+        limit=10,
+        origin_kind="indexed",
+        preview_capability="previewable",
+    )
+    assert [item.relative_path for item in indexed_previewable_pending] == ["2026/04/job/a.jpg"]
+
+    uploaded_failed = store.list_media_assets_for_preview(
+        preview_statuses=["failed"],
+        limit=10,
+        origin_kind="uploaded",
+        preview_capability="previewable",
+    )
+    assert [item.relative_path for item in uploaded_failed] == ["2026/04/job/c.jpg"]
+
+
+def test_in_memory_catalog_backfill_run_tracks_latest_per_kind() -> None:
+    from photovault_api.state_store import CatalogBackfillRunRecord, InMemoryUploadStateStore
+
+    store = InMemoryUploadStateStore()
+    first = CatalogBackfillRunRecord(
+        backfill_kind="extraction",
+        requested_statuses=("pending", "failed"),
+        selected_count=4,
+        processed_count=4,
+        succeeded_count=3,
+        failed_count=1,
+        remaining_pending_count=2,
+        remaining_failed_count=1,
+        filter_origin_kind="indexed",
+        filter_media_type="jpeg",
+        filter_preview_capability=None,
+        filter_cataloged_since_utc=None,
+        filter_cataloged_before_utc=None,
+        limit_count=50,
+        completed_at_utc="2026-04-22T11:00:00+00:00",
+    )
+    second = CatalogBackfillRunRecord(
+        backfill_kind="preview",
+        requested_statuses=("pending",),
+        selected_count=3,
+        processed_count=3,
+        succeeded_count=2,
+        failed_count=1,
+        remaining_pending_count=1,
+        remaining_failed_count=1,
+        filter_origin_kind="uploaded",
+        filter_media_type="raw",
+        filter_preview_capability="previewable",
+        filter_cataloged_since_utc=None,
+        filter_cataloged_before_utc=None,
+        limit_count=20,
+        completed_at_utc="2026-04-22T11:05:00+00:00",
+    )
+    store.record_catalog_backfill_run(first)
+    store.record_catalog_backfill_run(second)
+
+    assert store.get_latest_catalog_backfill_run("extraction") == first
+    assert store.get_latest_catalog_backfill_run("preview") == second
+    assert store.get_latest_catalog_backfill_run("unknown") is None
+
+
 def test_in_memory_media_asset_organization_flags_toggle_persistently() -> None:
     from photovault_api.state_store import InMemoryUploadStateStore
 

@@ -1185,11 +1185,16 @@ def test_admin_backfill_processes_pending_and_failed_assets_via_shared_extractio
     )
     assert response.status_code == 200
     payload = response.json()
-    assert payload["requested_statuses"] == ["pending", "failed"]
-    assert payload["selected_count"] == 2
-    assert payload["processed_count"] == 2
-    assert payload["succeeded_count"] == 2
-    assert payload["failed_count"] == 0
+    run = payload["run"]
+    assert run["backfill_kind"] == "extraction"
+    assert run["requested_statuses"] == ["pending", "failed"]
+    assert run["selected_count"] == 2
+    assert run["processed_count"] == 2
+    assert run["succeeded_count"] == 2
+    assert run["failed_count"] == 0
+    assert run["remaining_pending_count"] == 0
+    assert run["remaining_failed_count"] == 0
+    assert run["completed_at_utc"] is not None
     assert all(item["extraction_status"] == "succeeded" for item in payload["items"])
 
     catalog_response = client.get("/v1/admin/catalog")
@@ -1199,6 +1204,13 @@ def test_admin_backfill_processes_pending_and_failed_assets_via_shared_extractio
     assert catalog_by_path[failed_path]["extraction_status"] == "succeeded"
     assert catalog_by_path[pending_path]["camera_make"] == "FUJIFILM"
     assert catalog_by_path[failed_path]["camera_model"] == "Z 6II"
+
+    latest_runs = client.get("/v1/admin/catalog/backfill/latest")
+    assert latest_runs.status_code == 200
+    latest_payload = latest_runs.json()
+    assert latest_payload["extraction_run"] is not None
+    assert latest_payload["extraction_run"]["selected_count"] == 2
+    assert latest_payload["preview_run"] is None
 
 
 def test_admin_backfill_is_sane_for_repeated_runs(tmp_path: Path) -> None:
@@ -1212,8 +1224,8 @@ def test_admin_backfill_is_sane_for_repeated_runs(tmp_path: Path) -> None:
     assert first_index.status_code == 200
     first_backfill = client.post("/v1/admin/catalog/extraction/backfill", json={})
     assert first_backfill.status_code == 200
-    assert first_backfill.json()["selected_count"] == 0
-    assert first_backfill.json()["processed_count"] == 0
+    assert first_backfill.json()["run"]["selected_count"] == 0
+    assert first_backfill.json()["run"]["processed_count"] == 0
 
     retry_response = client.post(
         "/v1/admin/catalog/extraction/retry",
@@ -1224,8 +1236,188 @@ def test_admin_backfill_is_sane_for_repeated_runs(tmp_path: Path) -> None:
 
     second_backfill = client.post("/v1/admin/catalog/extraction/backfill", json={})
     assert second_backfill.status_code == 200
-    assert second_backfill.json()["selected_count"] == 0
-    assert second_backfill.json()["processed_count"] == 0
+    assert second_backfill.json()["run"]["selected_count"] == 0
+    assert second_backfill.json()["run"]["processed_count"] == 0
+
+
+def test_admin_preview_backfill_processes_pending_and_failed_assets_with_filters(tmp_path: Path) -> None:
+    pending_path = "2026/04/Job_A/pending.jpg"
+    failed_path = "2026/04/Job_A/failed.jpg"
+    skipped_path = "2026/04/Job_A/skipped.jpg"
+    now = "2026-04-22T08:00:00+00:00"
+
+    pending_bytes = _jpeg_with_exif_bytes(width=11, height=7)
+    failed_bytes = _jpeg_with_exif_bytes(width=13, height=9)
+    skipped_bytes = _jpeg_with_exif_bytes(width=15, height=10)
+    for relative_path, payload in (
+        (pending_path, pending_bytes),
+        (failed_path, failed_bytes),
+        (skipped_path, skipped_bytes),
+    ):
+        target = tmp_path / relative_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(payload)
+
+    store = InMemoryUploadStateStore()
+    for relative_path, payload, origin_kind in (
+        (pending_path, pending_bytes, "indexed"),
+        (failed_path, failed_bytes, "indexed"),
+        (skipped_path, skipped_bytes, "uploaded"),
+    ):
+        sha256_hex = hashlib.sha256(payload).hexdigest()
+        store.mark_sha_verified(sha256_hex)
+        store.upsert_stored_file(
+            relative_path=relative_path,
+            sha256_hex=sha256_hex,
+            size_bytes=len(payload),
+            source_kind="index_scan",
+            seen_at_utc=now,
+        )
+        store.upsert_media_asset(
+            relative_path=relative_path,
+            sha256_hex=sha256_hex,
+            size_bytes=len(payload),
+            origin_kind=origin_kind,
+            observed_at_utc=now,
+        )
+    store.upsert_media_asset_preview(
+        relative_path=failed_path,
+        preview_status="failed",
+        preview_relative_path=None,
+        attempted_at_utc=now,
+        succeeded_at_utc=None,
+        failed_at_utc=now,
+        failure_detail="old preview failure",
+        recorded_at_utc=now,
+    )
+
+    client = TestClient(create_app(state_store=store, storage_root=tmp_path))
+    response = client.post(
+        "/v1/admin/catalog/preview/backfill",
+        json={"target_statuses": ["pending", "failed"], "limit": 10, "origin_kind": "indexed"},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    run = payload["run"]
+    assert run["backfill_kind"] == "preview"
+    assert run["selected_count"] == 2
+    assert run["processed_count"] == 2
+    assert run["succeeded_count"] == 2
+    assert run["failed_count"] == 0
+    assert run["remaining_pending_count"] == 0
+    assert run["remaining_failed_count"] == 0
+    assert all(item["preview_status"] == "succeeded" for item in payload["items"])
+
+    catalog = client.get("/v1/admin/catalog").json()["items"]
+    by_path = {item["relative_path"]: item for item in catalog}
+    assert by_path[pending_path]["preview_status"] == "succeeded"
+    assert by_path[failed_path]["preview_status"] == "succeeded"
+    assert by_path[skipped_path]["preview_status"] == "pending"
+
+    latest_runs = client.get("/v1/admin/catalog/backfill/latest")
+    assert latest_runs.status_code == 200
+    latest_payload = latest_runs.json()
+    assert latest_payload["preview_run"] is not None
+    assert latest_payload["preview_run"]["selected_count"] == 2
+    assert latest_payload["extraction_run"] is None
+
+
+def test_mixed_uploaded_and_indexed_assets_converge_after_preview_backfill(tmp_path: Path) -> None:
+    upload_bytes = _jpeg_with_exif_bytes(width=10, height=6, camera_make="Canon")
+    upload_sha = hashlib.sha256(upload_bytes).hexdigest()
+    indexed_path = tmp_path / "2026" / "04" / "Job_B" / "indexed.jpg"
+    indexed_path.parent.mkdir(parents=True, exist_ok=True)
+    indexed_path.write_bytes(_jpeg_with_exif_bytes(width=8, height=5, camera_make="Nikon"))
+
+    client = TestClient(create_app(storage_root=tmp_path, bootstrap_token="bootstrap-123"))
+    auth_headers = _approve_upload_client(client)
+
+    upload_response = client.put(
+        f"/v1/upload/content/{upload_sha}",
+        content=upload_bytes,
+        headers=_with_auth_headers(
+            _upload_headers(
+                size_bytes=len(upload_bytes),
+                job_name="Mixed Upload",
+                original_filename="upload.jpg",
+            ),
+            auth_headers,
+        ),
+    )
+    assert upload_response.status_code == 200
+    verify_response = client.post(
+        "/v1/upload/verify",
+        headers=auth_headers,
+        json={"sha256_hex": upload_sha, "size_bytes": len(upload_bytes)},
+    )
+    assert verify_response.status_code == 200
+    assert verify_response.json()["status"] == "VERIFIED"
+
+    index_response = client.post("/v1/storage/index")
+    assert index_response.status_code == 200
+
+    pending_before = client.get("/v1/admin/catalog?preview_status=pending")
+    assert pending_before.status_code == 200
+    assert pending_before.json()["total"] >= 2
+
+    backfill_response = client.post(
+        "/v1/admin/catalog/preview/backfill",
+        json={"target_statuses": ["pending"], "limit": 10, "preview_capability": "previewable"},
+    )
+    assert backfill_response.status_code == 200
+    backfill_run = backfill_response.json()["run"]
+    assert backfill_run["succeeded_count"] >= 2
+    assert backfill_run["remaining_pending_count"] == 0
+
+    catalog_response = client.get("/v1/admin/catalog")
+    assert catalog_response.status_code == 200
+    items = catalog_response.json()["items"]
+    uploaded_items = [item for item in items if item["origin_kind"] == "uploaded"]
+    indexed_items = [item for item in items if item["origin_kind"] == "indexed"]
+    assert uploaded_items
+    assert indexed_items
+    for item in uploaded_items + indexed_items:
+        assert item["extraction_status"] == "succeeded"
+        assert item["preview_status"] == "succeeded"
+        assert item["preview_relative_path"] is not None
+
+
+def test_preview_backfill_failed_rows_stay_visible_and_retryable(tmp_path: Path) -> None:
+    unsupported_path = tmp_path / "2026" / "04" / "Job_A" / "notes.txt"
+    unsupported_path.parent.mkdir(parents=True, exist_ok=True)
+    unsupported_path.write_text("not previewable", encoding="utf-8")
+    client = TestClient(create_app(storage_root=tmp_path))
+
+    index_response = client.post("/v1/storage/index")
+    assert index_response.status_code == 200
+
+    backfill = client.post(
+        "/v1/admin/catalog/preview/backfill",
+        json={
+            "target_statuses": ["pending"],
+            "limit": 10,
+            "preview_capability": "not_previewable",
+        },
+    )
+    assert backfill.status_code == 200
+    run = backfill.json()["run"]
+    assert run["selected_count"] == 1
+    assert run["succeeded_count"] == 0
+    assert run["failed_count"] == 1
+    assert run["remaining_failed_count"] == 1
+
+    failed_listing = client.get("/v1/admin/catalog?preview_status=failed&preview_capability=not_previewable")
+    assert failed_listing.status_code == 200
+    assert failed_listing.json()["total"] == 1
+    assert failed_listing.json()["items"][0]["relative_path"] == "2026/04/Job_A/notes.txt"
+
+    retry_response = client.post(
+        "/v1/admin/catalog/preview/retry",
+        json={"relative_path": "2026/04/Job_A/notes.txt"},
+    )
+    assert retry_response.status_code == 200
+    assert retry_response.json()["item"]["preview_status"] == "failed"
+    assert retry_response.json()["item"]["preview_last_attempted_at_utc"] is not None
 
 
 def test_admin_retry_preview_generates_cache_and_detail_visibility_for_still_image(tmp_path: Path) -> None:

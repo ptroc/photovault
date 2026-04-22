@@ -146,6 +146,25 @@ class StorageIndexRunRecord:
 
 
 @dataclass(frozen=True)
+class CatalogBackfillRunRecord:
+    backfill_kind: str
+    requested_statuses: tuple[str, ...]
+    selected_count: int
+    processed_count: int
+    succeeded_count: int
+    failed_count: int
+    remaining_pending_count: int
+    remaining_failed_count: int
+    filter_origin_kind: str | None
+    filter_media_type: str | None
+    filter_preview_capability: str | None
+    filter_cataloged_since_utc: str | None
+    filter_cataloged_before_utc: str | None
+    limit_count: int
+    completed_at_utc: str
+
+
+@dataclass(frozen=True)
 class StorageSummary:
     total_known_sha256: int
     total_stored_files: int
@@ -271,7 +290,27 @@ class UploadStateStore(Protocol):
     ) -> MediaAssetRecord | None: ...
 
     def list_media_assets_for_extraction(
-        self, *, extraction_statuses: list[str], limit: int
+        self,
+        *,
+        extraction_statuses: list[str],
+        limit: int,
+        origin_kind: str | None = None,
+        media_type: str | None = None,
+        preview_capability: str | None = None,
+        cataloged_since_utc: str | None = None,
+        cataloged_before_utc: str | None = None,
+    ) -> list[MediaAssetRecord]: ...
+
+    def list_media_assets_for_preview(
+        self,
+        *,
+        preview_statuses: list[str],
+        limit: int,
+        origin_kind: str | None = None,
+        media_type: str | None = None,
+        preview_capability: str | None = None,
+        cataloged_since_utc: str | None = None,
+        cataloged_before_utc: str | None = None,
     ) -> list[MediaAssetRecord]: ...
 
     def ensure_media_asset_extraction_row(self, *, relative_path: str, recorded_at_utc: str) -> None: ...
@@ -328,6 +367,10 @@ class UploadStateStore(Protocol):
     def record_storage_index_run(self, record: StorageIndexRunRecord) -> None: ...
 
     def get_latest_storage_index_run(self) -> StorageIndexRunRecord | None: ...
+
+    def record_catalog_backfill_run(self, record: CatalogBackfillRunRecord) -> None: ...
+
+    def get_latest_catalog_backfill_run(self, backfill_kind: str) -> CatalogBackfillRunRecord | None: ...
 
     def summarize_storage(self) -> StorageSummary: ...
 
@@ -404,6 +447,7 @@ class InMemoryUploadStateStore:
     client_heartbeats: dict[str, ClientHeartbeatRecord] = field(default_factory=dict)
     path_conflicts: list[PathConflictRecord] = field(default_factory=list)
     latest_index_run: StorageIndexRunRecord | None = None
+    latest_catalog_backfill_runs: dict[str, CatalogBackfillRunRecord] = field(default_factory=dict)
     _lock: Lock = field(default_factory=Lock)
 
     def initialize(self) -> None:
@@ -710,8 +754,45 @@ class InMemoryUploadStateStore:
             self.media_assets[relative_path] = updated
             return updated
 
+    def _filter_assets_for_backfill(
+        self,
+        *,
+        assets: list[MediaAssetRecord],
+        statuses: set[str],
+        status_field: str,
+        origin_kind: str | None,
+        media_type: str | None,
+        preview_capability: str | None,
+        cataloged_since_utc: str | None,
+        cataloged_before_utc: str | None,
+    ) -> list[MediaAssetRecord]:
+        filtered = [item for item in assets if str(getattr(item, status_field)) in statuses]
+        if origin_kind is not None:
+            filtered = [item for item in filtered if item.origin_kind == origin_kind]
+        if media_type is not None:
+            filtered = [item for item in filtered if _media_type_for_path(item.relative_path) == media_type]
+        if preview_capability is not None:
+            filtered = [
+                item
+                for item in filtered
+                if _preview_capability_for_path(item.relative_path) == preview_capability
+            ]
+        if cataloged_since_utc is not None:
+            filtered = [item for item in filtered if item.last_cataloged_at_utc >= cataloged_since_utc]
+        if cataloged_before_utc is not None:
+            filtered = [item for item in filtered if item.last_cataloged_at_utc <= cataloged_before_utc]
+        return filtered
+
     def list_media_assets_for_extraction(
-        self, *, extraction_statuses: list[str], limit: int
+        self,
+        *,
+        extraction_statuses: list[str],
+        limit: int,
+        origin_kind: str | None = None,
+        media_type: str | None = None,
+        preview_capability: str | None = None,
+        cataloged_since_utc: str | None = None,
+        cataloged_before_utc: str | None = None,
     ) -> list[MediaAssetRecord]:
         if limit <= 0 or not extraction_statuses:
             return []
@@ -719,7 +800,45 @@ class InMemoryUploadStateStore:
         with self._lock:
             ordered = sorted(self.media_assets.values(), key=lambda item: item.relative_path)
             ordered = sorted(ordered, key=lambda item: item.last_cataloged_at_utc, reverse=True)
-            filtered = [item for item in ordered if item.extraction_status in status_filter]
+            filtered = self._filter_assets_for_backfill(
+                assets=ordered,
+                statuses=status_filter,
+                status_field="extraction_status",
+                origin_kind=origin_kind,
+                media_type=media_type,
+                preview_capability=preview_capability,
+                cataloged_since_utc=cataloged_since_utc,
+                cataloged_before_utc=cataloged_before_utc,
+            )
+            return filtered[:limit]
+
+    def list_media_assets_for_preview(
+        self,
+        *,
+        preview_statuses: list[str],
+        limit: int,
+        origin_kind: str | None = None,
+        media_type: str | None = None,
+        preview_capability: str | None = None,
+        cataloged_since_utc: str | None = None,
+        cataloged_before_utc: str | None = None,
+    ) -> list[MediaAssetRecord]:
+        if limit <= 0 or not preview_statuses:
+            return []
+        status_filter = set(preview_statuses)
+        with self._lock:
+            ordered = sorted(self.media_assets.values(), key=lambda item: item.relative_path)
+            ordered = sorted(ordered, key=lambda item: item.last_cataloged_at_utc, reverse=True)
+            filtered = self._filter_assets_for_backfill(
+                assets=ordered,
+                statuses=status_filter,
+                status_field="preview_status",
+                origin_kind=origin_kind,
+                media_type=media_type,
+                preview_capability=preview_capability,
+                cataloged_since_utc=cataloged_since_utc,
+                cataloged_before_utc=cataloged_before_utc,
+            )
             return filtered[:limit]
 
     def ensure_media_asset_extraction_row(self, *, relative_path: str, recorded_at_utc: str) -> None:
@@ -947,6 +1066,14 @@ class InMemoryUploadStateStore:
     def get_latest_storage_index_run(self) -> StorageIndexRunRecord | None:
         with self._lock:
             return self.latest_index_run
+
+    def record_catalog_backfill_run(self, record: CatalogBackfillRunRecord) -> None:
+        with self._lock:
+            self.latest_catalog_backfill_runs[record.backfill_kind] = record
+
+    def get_latest_catalog_backfill_run(self, backfill_kind: str) -> CatalogBackfillRunRecord | None:
+        with self._lock:
+            return self.latest_catalog_backfill_runs.get(backfill_kind)
 
     def summarize_storage(self) -> StorageSummary:
         now = datetime.now(UTC)
@@ -1307,6 +1434,27 @@ class PostgresUploadStateStore:
                         existing_sha_matches INTEGER NOT NULL,
                         path_conflicts INTEGER NOT NULL,
                         errors INTEGER NOT NULL,
+                        completed_at_utc TEXT NOT NULL
+                    );
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS api_catalog_backfill_runs (
+                        backfill_kind TEXT PRIMARY KEY,
+                        requested_statuses TEXT[] NOT NULL,
+                        selected_count INTEGER NOT NULL,
+                        processed_count INTEGER NOT NULL,
+                        succeeded_count INTEGER NOT NULL,
+                        failed_count INTEGER NOT NULL,
+                        remaining_pending_count INTEGER NOT NULL,
+                        remaining_failed_count INTEGER NOT NULL,
+                        filter_origin_kind TEXT,
+                        filter_media_type TEXT,
+                        filter_preview_capability TEXT,
+                        filter_cataloged_since_utc TEXT,
+                        filter_cataloged_before_utc TEXT,
+                        limit_count INTEGER NOT NULL,
                         completed_at_utc TEXT NOT NULL
                     );
                     """
@@ -1915,15 +2063,92 @@ class PostgresUploadStateStore:
             conn.commit()
         return self.get_media_asset_by_path(relative_path)
 
-    def list_media_assets_for_extraction(
-        self, *, extraction_statuses: list[str], limit: int
+    def _row_to_media_asset_record(self, row: tuple[object, ...]) -> MediaAssetRecord:
+        return MediaAssetRecord(
+            relative_path=str(row[0]),
+            sha256_hex=str(row[1]),
+            size_bytes=int(row[2]),
+            origin_kind=str(row[3]),
+            last_observed_origin_kind=str(row[4]),
+            provenance_job_name=str(row[5]) if row[5] is not None else None,
+            provenance_original_filename=str(row[6]) if row[6] is not None else None,
+            first_cataloged_at_utc=str(row[7]),
+            last_cataloged_at_utc=str(row[8]),
+            is_favorite=bool(row[9]),
+            is_archived=bool(row[10]),
+            extraction_status=str(row[11]),
+            extraction_last_attempted_at_utc=str(row[12]) if row[12] is not None else None,
+            extraction_last_succeeded_at_utc=str(row[13]) if row[13] is not None else None,
+            extraction_last_failed_at_utc=str(row[14]) if row[14] is not None else None,
+            extraction_failure_detail=str(row[15]) if row[15] is not None else None,
+            preview_status=str(row[16]),
+            preview_relative_path=str(row[17]) if row[17] is not None else None,
+            preview_last_attempted_at_utc=str(row[18]) if row[18] is not None else None,
+            preview_last_succeeded_at_utc=str(row[19]) if row[19] is not None else None,
+            preview_last_failed_at_utc=str(row[20]) if row[20] is not None else None,
+            preview_failure_detail=str(row[21]) if row[21] is not None else None,
+            capture_timestamp_utc=str(row[22]) if row[22] is not None else None,
+            camera_make=str(row[23]) if row[23] is not None else None,
+            camera_model=str(row[24]) if row[24] is not None else None,
+            image_width=int(row[25]) if row[25] is not None else None,
+            image_height=int(row[26]) if row[26] is not None else None,
+            orientation=int(row[27]) if row[27] is not None else None,
+            lens_model=str(row[28]) if row[28] is not None else None,
+        )
+
+    def _list_media_assets_for_backfill(
+        self,
+        *,
+        status_column_sql: str,
+        statuses: list[str],
+        limit: int,
+        origin_kind: str | None,
+        media_type: str | None,
+        preview_capability: str | None,
+        cataloged_since_utc: str | None,
+        cataloged_before_utc: str | None,
     ) -> list[MediaAssetRecord]:
-        if limit <= 0 or not extraction_statuses:
+        if limit <= 0 or not statuses:
             return []
+
+        where_clauses = [f"{status_column_sql} = ANY(%s)"]
+        params: list[object] = [statuses]
+        if origin_kind is not None:
+            where_clauses.append("ma.origin_kind = %s")
+            params.append(origin_kind)
+        if media_type is not None:
+            media_type_suffixes = _MEDIA_TYPE_SUFFIXES.get(media_type)
+            if media_type_suffixes is not None:
+                like_clauses = ["LOWER(ma.relative_path) LIKE %s" for _ in media_type_suffixes]
+                where_clauses.append("(" + " OR ".join(like_clauses) + ")")
+                params.extend([f"%{suffix}" for suffix in media_type_suffixes])
+            else:
+                all_suffixes = [suffix for values in _MEDIA_TYPE_SUFFIXES.values() for suffix in values]
+                not_like_clauses = ["LOWER(ma.relative_path) NOT LIKE %s" for _ in all_suffixes]
+                where_clauses.append("(" + " AND ".join(not_like_clauses) + ")")
+                params.extend([f"%{suffix}" for suffix in all_suffixes])
+        if preview_capability is not None:
+            previewable_suffixes = tuple(sorted(_PREVIEWABLE_SUFFIXES))
+            if preview_capability == "previewable":
+                like_clauses = ["LOWER(ma.relative_path) LIKE %s" for _ in previewable_suffixes]
+                where_clauses.append("(" + " OR ".join(like_clauses) + ")")
+                params.extend([f"%{suffix}" for suffix in previewable_suffixes])
+            else:
+                not_like_clauses = ["LOWER(ma.relative_path) NOT LIKE %s" for _ in previewable_suffixes]
+                where_clauses.append("(" + " AND ".join(not_like_clauses) + ")")
+                params.extend([f"%{suffix}" for suffix in previewable_suffixes])
+        if cataloged_since_utc is not None:
+            where_clauses.append("ma.last_cataloged_at_utc >= %s")
+            params.append(cataloged_since_utc)
+        if cataloged_before_utc is not None:
+            where_clauses.append("ma.last_cataloged_at_utc <= %s")
+            params.append(cataloged_before_utc)
+        where_sql = "WHERE " + " AND ".join(where_clauses)
+
         with self._connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    """
+                    f"""
                     SELECT
                         ma.relative_path,
                         ma.sha256_hex,
@@ -1959,47 +2184,58 @@ class PostgresUploadStateStore:
                         ON me.relative_path = ma.relative_path
                     LEFT JOIN api_media_asset_previews mp
                         ON mp.relative_path = ma.relative_path
-                    WHERE COALESCE(me.extraction_status, 'pending') = ANY(%s)
+                    {where_sql}
                     ORDER BY ma.last_cataloged_at_utc DESC, ma.relative_path ASC
                     LIMIT %s;
                     """,
-                    (extraction_statuses, limit),
+                    tuple([*params, limit]),
                 )
                 rows = cur.fetchall()
-                return [
-                    MediaAssetRecord(
-                        relative_path=str(row[0]),
-                        sha256_hex=str(row[1]),
-                        size_bytes=int(row[2]),
-                        origin_kind=str(row[3]),
-                        last_observed_origin_kind=str(row[4]),
-                        provenance_job_name=str(row[5]) if row[5] is not None else None,
-                        provenance_original_filename=str(row[6]) if row[6] is not None else None,
-                        first_cataloged_at_utc=str(row[7]),
-                        last_cataloged_at_utc=str(row[8]),
-                        is_favorite=bool(row[9]),
-                        is_archived=bool(row[10]),
-                        extraction_status=str(row[11]),
-                        extraction_last_attempted_at_utc=str(row[12]) if row[12] is not None else None,
-                        extraction_last_succeeded_at_utc=str(row[13]) if row[13] is not None else None,
-                        extraction_last_failed_at_utc=str(row[14]) if row[14] is not None else None,
-                        extraction_failure_detail=str(row[15]) if row[15] is not None else None,
-                        preview_status=str(row[16]),
-                        preview_relative_path=str(row[17]) if row[17] is not None else None,
-                        preview_last_attempted_at_utc=str(row[18]) if row[18] is not None else None,
-                        preview_last_succeeded_at_utc=str(row[19]) if row[19] is not None else None,
-                        preview_last_failed_at_utc=str(row[20]) if row[20] is not None else None,
-                        preview_failure_detail=str(row[21]) if row[21] is not None else None,
-                        capture_timestamp_utc=str(row[22]) if row[22] is not None else None,
-                        camera_make=str(row[23]) if row[23] is not None else None,
-                        camera_model=str(row[24]) if row[24] is not None else None,
-                        image_width=int(row[25]) if row[25] is not None else None,
-                        image_height=int(row[26]) if row[26] is not None else None,
-                        orientation=int(row[27]) if row[27] is not None else None,
-                        lens_model=str(row[28]) if row[28] is not None else None,
-                    )
-                    for row in rows
-                ]
+                return [self._row_to_media_asset_record(tuple(row)) for row in rows]
+
+    def list_media_assets_for_extraction(
+        self,
+        *,
+        extraction_statuses: list[str],
+        limit: int,
+        origin_kind: str | None = None,
+        media_type: str | None = None,
+        preview_capability: str | None = None,
+        cataloged_since_utc: str | None = None,
+        cataloged_before_utc: str | None = None,
+    ) -> list[MediaAssetRecord]:
+        return self._list_media_assets_for_backfill(
+            status_column_sql="COALESCE(me.extraction_status, 'pending')",
+            statuses=extraction_statuses,
+            limit=limit,
+            origin_kind=origin_kind,
+            media_type=media_type,
+            preview_capability=preview_capability,
+            cataloged_since_utc=cataloged_since_utc,
+            cataloged_before_utc=cataloged_before_utc,
+        )
+
+    def list_media_assets_for_preview(
+        self,
+        *,
+        preview_statuses: list[str],
+        limit: int,
+        origin_kind: str | None = None,
+        media_type: str | None = None,
+        preview_capability: str | None = None,
+        cataloged_since_utc: str | None = None,
+        cataloged_before_utc: str | None = None,
+    ) -> list[MediaAssetRecord]:
+        return self._list_media_assets_for_backfill(
+            status_column_sql="COALESCE(mp.preview_status, 'pending')",
+            statuses=preview_statuses,
+            limit=limit,
+            origin_kind=origin_kind,
+            media_type=media_type,
+            preview_capability=preview_capability,
+            cataloged_since_utc=cataloged_since_utc,
+            cataloged_before_utc=cataloged_before_utc,
+        )
 
     def ensure_media_asset_extraction_row(self, *, relative_path: str, recorded_at_utc: str) -> None:
         with self._connect() as conn:
@@ -2327,6 +2563,119 @@ class PostgresUploadStateStore:
                     path_conflicts=int(row[4]),
                     errors=int(row[5]),
                     completed_at_utc=str(row[6]),
+                )
+
+    def record_catalog_backfill_run(self, record: CatalogBackfillRunRecord) -> None:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO api_catalog_backfill_runs (
+                        backfill_kind,
+                        requested_statuses,
+                        selected_count,
+                        processed_count,
+                        succeeded_count,
+                        failed_count,
+                        remaining_pending_count,
+                        remaining_failed_count,
+                        filter_origin_kind,
+                        filter_media_type,
+                        filter_preview_capability,
+                        filter_cataloged_since_utc,
+                        filter_cataloged_before_utc,
+                        limit_count,
+                        completed_at_utc
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (backfill_kind) DO UPDATE
+                    SET requested_statuses = EXCLUDED.requested_statuses,
+                        selected_count = EXCLUDED.selected_count,
+                        processed_count = EXCLUDED.processed_count,
+                        succeeded_count = EXCLUDED.succeeded_count,
+                        failed_count = EXCLUDED.failed_count,
+                        remaining_pending_count = EXCLUDED.remaining_pending_count,
+                        remaining_failed_count = EXCLUDED.remaining_failed_count,
+                        filter_origin_kind = EXCLUDED.filter_origin_kind,
+                        filter_media_type = EXCLUDED.filter_media_type,
+                        filter_preview_capability = EXCLUDED.filter_preview_capability,
+                        filter_cataloged_since_utc = EXCLUDED.filter_cataloged_since_utc,
+                        filter_cataloged_before_utc = EXCLUDED.filter_cataloged_before_utc,
+                        limit_count = EXCLUDED.limit_count,
+                        completed_at_utc = EXCLUDED.completed_at_utc;
+                    """,
+                    (
+                        record.backfill_kind,
+                        list(record.requested_statuses),
+                        record.selected_count,
+                        record.processed_count,
+                        record.succeeded_count,
+                        record.failed_count,
+                        record.remaining_pending_count,
+                        record.remaining_failed_count,
+                        record.filter_origin_kind,
+                        record.filter_media_type,
+                        record.filter_preview_capability,
+                        record.filter_cataloged_since_utc,
+                        record.filter_cataloged_before_utc,
+                        record.limit_count,
+                        record.completed_at_utc,
+                    ),
+                )
+            conn.commit()
+
+    def get_latest_catalog_backfill_run(self, backfill_kind: str) -> CatalogBackfillRunRecord | None:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        backfill_kind,
+                        requested_statuses,
+                        selected_count,
+                        processed_count,
+                        succeeded_count,
+                        failed_count,
+                        remaining_pending_count,
+                        remaining_failed_count,
+                        filter_origin_kind,
+                        filter_media_type,
+                        filter_preview_capability,
+                        filter_cataloged_since_utc,
+                        filter_cataloged_before_utc,
+                        limit_count,
+                        completed_at_utc
+                    FROM api_catalog_backfill_runs
+                    WHERE backfill_kind = %s
+                    LIMIT 1;
+                    """,
+                    (backfill_kind,),
+                )
+                row = cur.fetchone()
+                if row is None:
+                    return None
+                raw_statuses = row[1]
+                statuses: tuple[str, ...]
+                if isinstance(raw_statuses, (list, tuple)):
+                    statuses = tuple(str(status) for status in raw_statuses)
+                else:
+                    statuses = tuple()
+                return CatalogBackfillRunRecord(
+                    backfill_kind=str(row[0]),
+                    requested_statuses=statuses,
+                    selected_count=int(row[2]),
+                    processed_count=int(row[3]),
+                    succeeded_count=int(row[4]),
+                    failed_count=int(row[5]),
+                    remaining_pending_count=int(row[6]),
+                    remaining_failed_count=int(row[7]),
+                    filter_origin_kind=str(row[8]) if row[8] is not None else None,
+                    filter_media_type=str(row[9]) if row[9] is not None else None,
+                    filter_preview_capability=str(row[10]) if row[10] is not None else None,
+                    filter_cataloged_since_utc=str(row[11]) if row[11] is not None else None,
+                    filter_cataloged_before_utc=str(row[12]) if row[12] is not None else None,
+                    limit_count=int(row[13]),
+                    completed_at_utc=str(row[14]),
                 )
 
     def summarize_storage(self) -> StorageSummary:

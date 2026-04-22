@@ -453,6 +453,7 @@ def create_app(*, api_fetcher: ApiFetcher | None = None, api_poster: ApiPoster |
         action_message = request.args.get("action_message")
         action_error = request.args.get("action_error")
         error_message: str | None = None
+        latest_backfill_runs: dict[str, Any] = {"extraction_run": None, "preview_run": None}
         query: dict[str, str] = {"limit": str(page_size), "offset": str(offset)}
         if extraction_status_filter:
             query["extraction_status"] = extraction_status_filter
@@ -477,6 +478,11 @@ def create_app(*, api_fetcher: ApiFetcher | None = None, api_poster: ApiPoster |
         except (URLError, TimeoutError, ValueError):
             payload = {"total": 0, "limit": page_size, "offset": offset, "items": []}
             error_message = "Unable to reach photovault-api catalog endpoint."
+        try:
+            latest_backfill_runs = fetcher("/v1/admin/catalog/backfill/latest", {})
+        except (URLError, TimeoutError, ValueError):
+            if error_message is None:
+                error_message = "Unable to reach photovault-api catalog backfill endpoint."
 
         total = int(payload.get("total", 0))
         items = list(payload.get("items", []))
@@ -526,6 +532,7 @@ def create_app(*, api_fetcher: ApiFetcher | None = None, api_poster: ApiPoster |
             cataloged_since_filter=cataloged_since_filter,
             cataloged_before_filter=cataloged_before_filter,
             catalog_query_state=filter_query,
+            latest_backfill_runs=latest_backfill_runs,
             previous_url=previous_url,
             next_url=next_url,
             active_page="catalog",
@@ -712,6 +719,86 @@ def create_app(*, api_fetcher: ApiFetcher | None = None, api_poster: ApiPoster |
             query_state=query_state,
             return_to=return_to,
             action_message=f"Unarchived asset: {relative_path}.",
+        )
+
+    @app.post("/catalog/actions/backfill")
+    def catalog_backfill_action():
+        page = request.form.get("page", "1").strip() or "1"
+        query_state = _catalog_query_state_from_form()
+        backfill_kind = request.form.get("backfill_kind", "").strip().lower()
+        if backfill_kind not in {"extraction", "preview"}:
+            return _catalog_action_redirect(
+                relative_path="",
+                page=page,
+                query_state=query_state,
+                return_to="catalog",
+                action_error="Unknown backfill kind.",
+            )
+
+        raw_limit = request.form.get("limit", "50").strip()
+        try:
+            limit = int(raw_limit)
+        except ValueError:
+            return _catalog_action_redirect(
+                relative_path="",
+                page=page,
+                query_state=query_state,
+                return_to="catalog",
+                action_error="Backfill limit must be a number.",
+            )
+        limit = min(500, max(1, limit))
+
+        requested_statuses: list[str] = []
+        for status in request.form.getlist("target_statuses"):
+            normalized = status.strip().lower()
+            if normalized in {"pending", "failed"} and normalized not in requested_statuses:
+                requested_statuses.append(normalized)
+        if not requested_statuses:
+            requested_statuses = ["pending", "failed"]
+
+        payload: dict[str, Any] = {
+            "target_statuses": requested_statuses,
+            "limit": limit,
+        }
+        for key in (
+            "origin_kind",
+            "media_type",
+            "preview_capability",
+            "cataloged_since_utc",
+            "cataloged_before_utc",
+        ):
+            value = query_state.get(key, "").strip()
+            if value:
+                payload[key] = value
+
+        endpoint = (
+            "/v1/admin/catalog/extraction/backfill"
+            if backfill_kind == "extraction"
+            else "/v1/admin/catalog/preview/backfill"
+        )
+        try:
+            response = poster(endpoint, payload)
+            run = response.get("run", {})
+        except (URLError, TimeoutError, ValueError):
+            return _catalog_action_redirect(
+                relative_path="",
+                page=page,
+                query_state=query_state,
+                return_to="catalog",
+                action_error=f"{backfill_kind.title()} backfill request failed.",
+            )
+
+        return _catalog_action_redirect(
+            relative_path="",
+            page=page,
+            query_state=query_state,
+            return_to="catalog",
+            action_message=(
+                f"{backfill_kind.title()} backfill completed: selected={run.get('selected_count', 0)}, "
+                f"succeeded={run.get('succeeded_count', 0)}, failed={run.get('failed_count', 0)}, "
+                f"remaining pending={run.get('remaining_pending_count', 0)}, "
+                f"remaining failed={run.get('remaining_failed_count', 0)}."
+            ),
         )
 
     @app.get("/catalog/preview")
