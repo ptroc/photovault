@@ -1,0 +1,80 @@
+{% extends "base.html" %}
+{% set title = "Catalog Asset" %}
+{% block content %}
+<section>
+  <h1>Catalog Asset Detail</h1>
+  <p class="muted">Operator view for a single cataloged asset, including preview status and image.</p>
+  <p>
+    <a href="/catalog?page={{ page }}&extraction_status={{ extraction_status_filter | urlencode }}&origin_kind={{ origin_kind_filter | urlencode }}&cataloged_since_utc={{ cataloged_since_filter | urlencode }}&cataloged_before_utc={{ cataloged_before_filter | urlencode }}">Back to Catalog</a>
+  </p>
+</section>
+
+{% if asset %}
+<section class="panel" style="margin-bottom: 0.9rem;">
+  <h2 style="margin-top: 0;">Asset</h2>
+  <div class="stack mono">
+    <span>relative_path: {{ asset.relative_path }}</span>
+    <span>sha256: {{ asset.sha256_hex }}</span>
+    <span>size: {{ asset.size_human }}</span>
+    <span>origin: {{ asset.origin_kind }} (last: {{ asset.last_observed_origin_kind }})</span>
+    <span>first_cataloged_at_utc: {{ asset.first_cataloged_at_utc }}</span>
+    <span>last_cataloged_at_utc: {{ asset.last_cataloged_at_utc }}</span>
+  </div>
+</section>
+
+<section class="panel" style="margin-bottom: 0.9rem;">
+  <h2 style="margin-top: 0;">Extraction</h2>
+  <span class="badge {{ asset.extraction_status }}">{{ asset.extraction_status }}</span>
+  <div class="stack mono">
+    <span>attempted: {{ asset.extraction_last_attempted_at_utc or "n/a" }}</span>
+    <span>succeeded: {{ asset.extraction_last_succeeded_at_utc or "n/a" }}</span>
+    <span>failed: {{ asset.extraction_last_failed_at_utc or "n/a" }}</span>
+  </div>
+  {% if asset.extraction_failure_detail %}
+  <details>
+    <summary>Failure detail</summary>
+    <div class="mono">{{ asset.extraction_failure_detail }}</div>
+  </details>
+  {% endif %}
+  {% if asset.metadata_summary %}
+  <p class="mono">{{ asset.metadata_summary }}</p>
+  {% endif %}
+</section>
+
+<section class="panel" style="margin-bottom: 0.9rem;">
+  <h2 style="margin-top: 0;">Preview</h2>
+  <span class="badge {{ asset.preview_status }}">{{ asset.preview_status }}</span>
+  <div class="stack mono">
+    <span>attempted: {{ asset.preview_last_attempted_at_utc or "n/a" }}</span>
+    <span>succeeded: {{ asset.preview_last_succeeded_at_utc or "n/a" }}</span>
+    <span>failed: {{ asset.preview_last_failed_at_utc or "n/a" }}</span>
+  </div>
+  {% if asset.preview_failure_detail %}
+  <details>
+    <summary>Failure detail</summary>
+    <div class="mono">{{ asset.preview_failure_detail }}</div>
+  </details>
+  {% endif %}
+  <form method="post" action="/catalog/actions/preview" class="actions-inline">
+    <input type="hidden" name="relative_path" value="{{ asset.relative_path }}">
+    <input type="hidden" name="page" value="{{ page }}">
+    <input type="hidden" name="extraction_status" value="{{ extraction_status_filter }}">
+    <input type="hidden" name="origin_kind" value="{{ origin_kind_filter }}">
+    <input type="hidden" name="cataloged_since_utc" value="{{ cataloged_since_filter }}">
+    <input type="hidden" name="cataloged_before_utc" value="{{ cataloged_before_filter }}">
+    <button type="submit">Generate Preview</button>
+  </form>
+</section>
+
+{% if asset.preview_status == "succeeded" %}
+<section class="panel">
+  <h2 style="margin-top: 0;">Preview Image</h2>
+  <img src="/catalog/preview?relative_path={{ asset.relative_path | urlencode }}" alt="Preview for {{ asset.relative_path }}" style="max-width: 100%; height: auto;">
+</section>
+{% endif %}
+{% else %}
+<section class="panel">
+  <p class="muted">Catalog asset not found.</p>
+</section>
+{% endif %}
+{% endblock %}
