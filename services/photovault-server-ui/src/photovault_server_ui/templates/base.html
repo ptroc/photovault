@@ -4,192 +4,67 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{{ title }} · photovault server UI</title>
-    <style>
-      :root {
-        --bg: #f4f6f8;
-        --panel: #ffffff;
-        --text: #1f2933;
-        --muted: #66788a;
-        --border: #d7dee5;
-        --accent: #0f5ea8;
-      }
-      body {
-        margin: 0;
-        background: var(--bg);
-        color: var(--text);
-        font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
-      }
-      header {
-        background: var(--panel);
-        border-bottom: 1px solid var(--border);
-        padding: 0.75rem 1rem;
-      }
-      nav {
-        display: flex;
-        gap: 1rem;
-        align-items: center;
-      }
-      nav a {
-        color: var(--muted);
-        text-decoration: none;
-        font-weight: 600;
-      }
-      nav a.active {
-        color: var(--accent);
-      }
-      main {
-        max-width: 1100px;
-        margin: 1rem auto;
-        padding: 0 1rem 2rem;
-      }
-      .panel {
-        background: var(--panel);
-        border: 1px solid var(--border);
-        border-radius: 8px;
-        padding: 0.9rem;
-      }
-      .error {
-        color: #8f1f1f;
-        background: #fceaea;
-        border: 1px solid #f0c3c3;
-        border-radius: 6px;
-        padding: 0.5rem 0.7rem;
-        margin-bottom: 0.8rem;
-      }
-      .success {
-        color: #1f5d2c;
-        background: #e7f7eb;
-        border: 1px solid #bde7c8;
-        border-radius: 6px;
-        padding: 0.5rem 0.7rem;
-        margin-bottom: 0.8rem;
-      }
-      .badge {
-        display: inline-block;
-        padding: 0.15rem 0.45rem;
-        border-radius: 999px;
-        font-size: 0.77rem;
-        font-weight: 700;
-        text-transform: uppercase;
-        letter-spacing: 0.02em;
-      }
-      .badge.pending { background: #f5efe1; color: #7a5600; }
-      .badge.approved { background: #e3f7ea; color: #1f6a35; }
-      .badge.revoked { background: #fce8e8; color: #8f1f1f; }
-      .badge.succeeded { background: #e3f7ea; color: #1f6a35; }
-      .badge.failed { background: #fce8e8; color: #8f1f1f; }
-      .badge.online { background: #e3f7ea; color: #1f6a35; }
-      .badge.stale { background: #f5efe1; color: #7a5600; }
-      .badge.unknown { background: #eef1f5; color: #465566; }
-      .stack {
-        display: flex;
-        flex-direction: column;
-        gap: 0.35rem;
-      }
-      .actions-inline {
-        display: flex;
-        gap: 0.45rem;
-        align-items: center;
-        flex-wrap: wrap;
-      }
-      button {
-        border: 1px solid var(--border);
-        border-radius: 6px;
-        background: var(--panel);
-        color: var(--text);
-        padding: 0.3rem 0.55rem;
-        font-size: 0.82rem;
-        cursor: pointer;
-      }
-      button.primary {
-        border-color: #145ea8;
-        background: #145ea8;
-        color: #ffffff;
-      }
-      details {
-        margin-top: 0.25rem;
-      }
-      details summary {
-        cursor: pointer;
-        color: var(--accent);
-      }
-      table {
-        width: 100%;
-        border-collapse: collapse;
-      }
-      th, td {
-        text-align: left;
-        border-bottom: 1px solid var(--border);
-        padding: 0.5rem;
-        vertical-align: top;
-      }
-      th {
-        font-size: 0.9rem;
-        color: var(--muted);
-        font-weight: 600;
-      }
-      .muted {
-        color: var(--muted);
-      }
-      .mono {
-        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-        font-size: 0.86rem;
-      }
-      .pager {
-        display: flex;
-        gap: 0.8rem;
-        align-items: center;
-        margin-top: 0.8rem;
-      }
-      .pager a {
-        color: var(--accent);
-        text-decoration: none;
-      }
-      .grid {
-        display: grid;
-        grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-        gap: 0.7rem;
-      }
-      .metric {
-        background: var(--panel);
-        border: 1px solid var(--border);
-        border-radius: 8px;
-        padding: 0.7rem;
-      }
-      .metric .label {
-        color: var(--muted);
-        font-size: 0.84rem;
-      }
-      .metric .value {
-        font-size: 1.2rem;
-        font-weight: 700;
-        margin-top: 0.15rem;
-      }
-    </style>
+    <link rel="stylesheet" href="{{ url_for('static', filename='vendor/bootstrap/css/bootstrap.min.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
   </head>
-  <body>
-    <header>
-      <nav>
-        <strong>photovault server</strong>
-        <a href="/" class="{{ 'active' if active_page == 'home' else '' }}">Overview</a>
-        <a href="/clients" class="{{ 'active' if active_page == 'clients' else '' }}">Clients</a>
-        <a href="/files" class="{{ 'active' if active_page == 'files' else '' }}">Files</a>
-        <a href="/catalog" class="{{ 'active' if active_page == 'catalog' else '' }}">Catalog</a>
-        <a href="/duplicates" class="{{ 'active' if active_page == 'duplicates' else '' }}">Duplicates</a>
-        <a href="/conflicts" class="{{ 'active' if active_page == 'conflicts' else '' }}">Conflicts</a>
-      </nav>
-    </header>
-    <main>
+  <body class="server-shell">
+    <nav class="navbar navbar-expand-lg bg-white border-bottom shadow-sm sticky-top">
+      <div class="container-xxl">
+        <a class="navbar-brand fw-semibold" href="/">photovault server</a>
+        <button
+          class="navbar-toggler"
+          type="button"
+          data-bs-toggle="collapse"
+          data-bs-target="#serverNav"
+          aria-controls="serverNav"
+          aria-expanded="false"
+          aria-label="Toggle navigation"
+        >
+          <span class="navbar-toggler-icon"></span>
+        </button>
+        <div class="collapse navbar-collapse" id="serverNav">
+          <ul class="navbar-nav me-auto mb-2 mb-lg-0">
+            <li class="nav-item">
+              <a class="nav-link {{ 'active' if active_page == 'home' else '' }}" href="/">Overview</a>
+            </li>
+            <li class="nav-item">
+              <a class="nav-link {{ 'active' if active_page == 'clients' else '' }}" href="/clients">Clients</a>
+            </li>
+            <li class="nav-item">
+              <a class="nav-link {{ 'active' if active_page == 'catalog' else '' }}" href="/catalog">Catalog</a>
+            </li>
+          </ul>
+          <div class="navbar-text small text-uppercase fw-semibold text-secondary border-top border-lg-0 pt-3 pt-lg-0 ps-lg-3">
+            Diagnostics
+          </div>
+          <ul class="navbar-nav ms-lg-2">
+            <li class="nav-item">
+              <a class="nav-link diagnostic-link {{ 'active' if active_page == 'files' else '' }}" href="/files">Files</a>
+            </li>
+            <li class="nav-item">
+              <a class="nav-link diagnostic-link {{ 'active' if active_page == 'duplicates' else '' }}" href="/duplicates">Duplicates</a>
+            </li>
+            <li class="nav-item">
+              <a class="nav-link diagnostic-link {{ 'active' if active_page == 'conflicts' else '' }}" href="/conflicts">Conflicts</a>
+            </li>
+          </ul>
+        </div>
+      </div>
+    </nav>
+
+    <main class="container-xxl py-4 py-lg-5">
       {% if error_message %}
-      <div class="error">{{ error_message }}</div>
+      <div class="alert alert-danger shadow-sm" role="alert">{{ error_message }}</div>
       {% endif %}
       {% if action_error %}
-      <div class="error">{{ action_error }}</div>
+      <div class="alert alert-danger shadow-sm" role="alert">{{ action_error }}</div>
       {% endif %}
       {% if action_message %}
-      <div class="success">{{ action_message }}</div>
+      <div class="alert alert-success shadow-sm" role="alert">{{ action_message }}</div>
       {% endif %}
       {% block content %}{% endblock %}
     </main>
+
+    <script src="{{ url_for('static', filename='vendor/bootstrap/js/bootstrap.bundle.min.js') }}"></script>
   </body>
 </html>

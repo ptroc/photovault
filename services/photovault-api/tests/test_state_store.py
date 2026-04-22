@@ -148,6 +148,44 @@ def test_in_memory_media_asset_preview_updates_status_path_and_failure_detail() 
     assert updated.preview_failure_detail is None
 
 
+def test_in_memory_media_asset_organization_flags_toggle_persistently() -> None:
+    from photovault_api.state_store import InMemoryUploadStateStore
+
+    store = InMemoryUploadStateStore()
+    observed_at = "2026-04-20T12:01:00+00:00"
+    relative_path = "2026/04/job/photo.png"
+    store.upsert_media_asset(
+        relative_path=relative_path,
+        sha256_hex="a" * 64,
+        size_bytes=99,
+        origin_kind="indexed",
+        observed_at_utc=observed_at,
+    )
+
+    favorite = store.set_media_asset_favorite(
+        relative_path=relative_path,
+        is_favorite=True,
+        updated_at_utc="2026-04-20T12:02:00+00:00",
+    )
+    assert favorite is not None
+    assert favorite.is_favorite is True
+    assert favorite.is_archived is False
+
+    archived = store.set_media_asset_archived(
+        relative_path=relative_path,
+        is_archived=True,
+        updated_at_utc="2026-04-20T12:03:00+00:00",
+    )
+    assert archived is not None
+    assert archived.is_favorite is True
+    assert archived.is_archived is True
+
+    retrieved = store.get_media_asset_by_path(relative_path)
+    assert retrieved is not None
+    assert retrieved.is_favorite is True
+    assert retrieved.is_archived is True
+
+
 def test_in_memory_client_lifecycle_pending_approve_revoke() -> None:
     from photovault_api.state_store import InMemoryUploadStateStore
 
@@ -965,6 +1003,8 @@ def test_postgres_get_media_asset_by_path_uses_joined_extraction_row() -> None:
                 None,
                 "2026-04-20T12:00:00+00:00",
                 "2026-04-20T12:00:00+00:00",
+                False,
+                False,
                 "failed",
                 "2026-04-20T12:01:00+00:00",
                 None,
@@ -1039,6 +1079,8 @@ def test_postgres_list_media_assets_for_extraction_filters_by_status_and_limit()
                     None,
                     "2026-04-20T12:00:00+00:00",
                     "2026-04-20T12:00:00+00:00",
+                    False,
+                    False,
                     "pending",
                     None,
                     None,
@@ -1068,6 +1110,8 @@ def test_postgres_list_media_assets_for_extraction_filters_by_status_and_limit()
                     None,
                     "2026-04-20T12:05:00+00:00",
                     "2026-04-20T12:05:00+00:00",
+                    False,
+                    False,
                     "failed",
                     "2026-04-20T12:06:00+00:00",
                     None,
@@ -1196,6 +1240,25 @@ def test_in_memory_list_media_assets_supports_status_origin_and_catalog_date_fil
     assert total_since == 1
     assert [row.relative_path for row in since_rows] == ["2026/04/job/succeeded.jpg"]
 
+    store.set_media_asset_favorite(
+        relative_path="2026/04/job/succeeded.jpg",
+        is_favorite=True,
+        updated_at_utc="2026-04-22T11:01:00+00:00",
+    )
+    store.set_media_asset_archived(
+        relative_path="2026/04/job/failed.jpg",
+        is_archived=True,
+        updated_at_utc="2026-04-22T11:02:00+00:00",
+    )
+
+    total_favorite, favorite_rows = store.list_media_assets(limit=10, offset=0, is_favorite=True)
+    assert total_favorite == 1
+    assert [row.relative_path for row in favorite_rows] == ["2026/04/job/succeeded.jpg"]
+
+    total_archived, archived_rows = store.list_media_assets(limit=10, offset=0, is_archived=True)
+    assert total_archived == 1
+    assert [row.relative_path for row in archived_rows] == ["2026/04/job/failed.jpg"]
+
 
 def test_postgres_list_media_assets_uses_bounded_filter_where_clause() -> None:
     observed: dict[str, object] = {}
@@ -1230,6 +1293,8 @@ def test_postgres_list_media_assets_uses_bounded_filter_where_clause() -> None:
                     None,
                     "2026-04-22T10:00:00+00:00",
                     "2026-04-22T10:00:00+00:00",
+                    True,
+                    False,
                     "failed",
                     "2026-04-22T10:01:00+00:00",
                     None,
@@ -1271,6 +1336,8 @@ def test_postgres_list_media_assets_uses_bounded_filter_where_clause() -> None:
         offset=40,
         extraction_status="failed",
         origin_kind="uploaded",
+        is_favorite=True,
+        is_archived=False,
         cataloged_since_utc="2026-04-01T00:00:00+00:00",
         cataloged_before_utc="2026-04-30T23:59:59+00:00",
     )
@@ -1279,19 +1346,79 @@ def test_postgres_list_media_assets_uses_bounded_filter_where_clause() -> None:
     assert len(rows) == 1
     assert "COALESCE(me.extraction_status, 'pending') = %s" in str(observed["count_query"])
     assert "ma.origin_kind = %s" in str(observed["count_query"])
+    assert "ma.is_favorite = %s" in str(observed["count_query"])
+    assert "ma.is_archived = %s" in str(observed["count_query"])
     assert "ma.last_cataloged_at_utc >= %s" in str(observed["count_query"])
     assert "ma.last_cataloged_at_utc <= %s" in str(observed["count_query"])
     assert observed["count_params"] == (
         "failed",
         "uploaded",
+        True,
+        False,
         "2026-04-01T00:00:00+00:00",
         "2026-04-30T23:59:59+00:00",
     )
     assert observed["select_params"] == (
         "failed",
         "uploaded",
+        True,
+        False,
         "2026-04-01T00:00:00+00:00",
         "2026-04-30T23:59:59+00:00",
         20,
         40,
     )
+
+
+def test_postgres_set_media_asset_favorite_updates_single_field() -> None:
+    observed: dict[str, object] = {}
+
+    class _FakeCursor:
+        rowcount = 1
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def execute(self, query: str, params: tuple[object, ...]) -> None:
+            if "UPDATE api_media_assets" in query:
+                observed["query"] = query
+                observed["params"] = params
+
+        def fetchone(self):
+            return None
+
+    class _FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def cursor(self) -> _FakeCursor:
+            return _FakeCursor()
+
+        def commit(self) -> None:
+            observed["committed"] = True
+
+    class _TestStore(PostgresUploadStateStore):
+        def _connect(self):  # type: ignore[override]
+            return _FakeConnection()
+
+        def get_media_asset_by_path(self, relative_path: str):  # type: ignore[override]
+            observed["lookup_path"] = relative_path
+            return "updated"
+
+    store = _TestStore(database_url="postgresql://unused")
+    updated = store.set_media_asset_favorite(
+        relative_path="2026/04/job/a.jpg",
+        is_favorite=True,
+        updated_at_utc="2026-04-22T12:00:00+00:00",
+    )
+    assert updated == "updated"
+    assert "SET is_favorite = %s" in str(observed["query"])
+    assert observed["params"] == (True, "2026/04/job/a.jpg")
+    assert observed["lookup_path"] == "2026/04/job/a.jpg"
+    assert observed["committed"] is True

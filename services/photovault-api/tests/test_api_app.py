@@ -751,6 +751,8 @@ def test_upload_content_and_verify_writes_filesystem_and_promotes_sha(tmp_path: 
             "relative_path": str(final_path.relative_to(tmp_path).as_posix()),
             "sha256_hex": sha256_hex,
             "size_bytes": len(content),
+            "media_type": "png",
+            "preview_capability": "previewable",
             "origin_kind": "uploaded",
             "last_observed_origin_kind": "uploaded",
             "provenance_job_name": "Wedding Shoot",
@@ -772,6 +774,8 @@ def test_upload_content_and_verify_writes_filesystem_and_promotes_sha(tmp_path: 
             "preview_last_succeeded_at_utc": None,
             "preview_last_failed_at_utc": None,
             "preview_failure_detail": None,
+            "is_favorite": False,
+            "is_archived": False,
             "capture_timestamp_utc": None,
             "camera_make": None,
             "camera_model": None,
@@ -1861,6 +1865,8 @@ def test_admin_catalog_returns_paged_results(tmp_path: Path) -> None:
                 "relative_path": "2026/04/Job_B/b.jpg",
                 "sha256_hex": "b" * 64,
                 "size_bytes": 200,
+                "media_type": "jpeg",
+                "preview_capability": "previewable",
                 "origin_kind": "indexed",
                 "last_observed_origin_kind": "indexed",
                 "provenance_job_name": None,
@@ -1878,6 +1884,8 @@ def test_admin_catalog_returns_paged_results(tmp_path: Path) -> None:
                 "preview_last_succeeded_at_utc": None,
                 "preview_last_failed_at_utc": None,
                 "preview_failure_detail": None,
+                "is_favorite": False,
+                "is_archived": False,
                 "capture_timestamp_utc": None,
                 "camera_make": None,
                 "camera_model": None,
@@ -1989,6 +1997,44 @@ def test_admin_catalog_filters_by_extraction_status_and_origin(tmp_path: Path) -
         "2026/04/Job_A/pending.jpg"
     ]
 
+    media_type_response = client.get("/v1/admin/catalog?media_type=jpeg")
+    assert media_type_response.status_code == 200
+    assert media_type_response.json()["total"] == 3
+
+    preview_capability_response = client.get("/v1/admin/catalog?preview_capability=previewable")
+    assert preview_capability_response.status_code == 200
+    assert preview_capability_response.json()["total"] == 3
+
+    preview_failed_response = client.get("/v1/admin/catalog?preview_status=failed")
+    assert preview_failed_response.status_code == 200
+    assert preview_failed_response.json()["total"] == 0
+
+    mark_favorite = client.post(
+        "/v1/admin/catalog/favorite/mark",
+        json={"relative_path": "2026/04/Job_A/succeeded.jpg"},
+    )
+    assert mark_favorite.status_code == 200
+    assert mark_favorite.json()["item"]["is_favorite"] is True
+
+    mark_archived = client.post(
+        "/v1/admin/catalog/archive/mark",
+        json={"relative_path": "2026/04/Job_A/failed.jpg"},
+    )
+    assert mark_archived.status_code == 200
+    assert mark_archived.json()["item"]["is_archived"] is True
+
+    favorite_response = client.get("/v1/admin/catalog?is_favorite=true")
+    assert favorite_response.status_code == 200
+    assert [item["relative_path"] for item in favorite_response.json()["items"]] == [
+        "2026/04/Job_A/succeeded.jpg"
+    ]
+
+    archived_response = client.get("/v1/admin/catalog?is_archived=true")
+    assert archived_response.status_code == 200
+    assert [item["relative_path"] for item in archived_response.json()["items"]] == [
+        "2026/04/Job_A/failed.jpg"
+    ]
+
 
 def test_admin_catalog_filters_by_catalog_date_and_pagination(tmp_path: Path) -> None:
     store = InMemoryUploadStateStore()
@@ -2036,9 +2082,77 @@ def test_admin_catalog_rejects_invalid_filter_values(tmp_path: Path) -> None:
     assert bad_status.status_code == 400
     assert "invalid extraction_status filter" in str(bad_status.json().get("detail"))
 
+    bad_preview_status = client.get("/v1/admin/catalog?preview_status=unknown")
+    assert bad_preview_status.status_code == 400
+    assert "invalid preview_status filter" in str(bad_preview_status.json().get("detail"))
+
     bad_origin = client.get("/v1/admin/catalog?origin_kind=other")
     assert bad_origin.status_code == 400
     assert "invalid origin_kind filter" in str(bad_origin.json().get("detail"))
+
+    bad_media_type = client.get("/v1/admin/catalog?media_type=gif")
+    assert bad_media_type.status_code == 400
+    assert "invalid media_type filter" in str(bad_media_type.json().get("detail"))
+
+    bad_preview_capability = client.get("/v1/admin/catalog?preview_capability=maybe")
+    assert bad_preview_capability.status_code == 400
+    assert "invalid preview_capability filter" in str(bad_preview_capability.json().get("detail"))
+
+    bad_favorite = client.get("/v1/admin/catalog?is_favorite=maybe")
+    assert bad_favorite.status_code == 400
+    assert "invalid is_favorite filter" in str(bad_favorite.json().get("detail"))
+
+    bad_archived = client.get("/v1/admin/catalog?is_archived=maybe")
+    assert bad_archived.status_code == 400
+    assert "invalid is_archived filter" in str(bad_archived.json().get("detail"))
+
+
+def test_admin_catalog_organization_mark_unmark_endpoints(tmp_path: Path) -> None:
+    store = InMemoryUploadStateStore()
+    seen_at = "2026-04-22T11:00:00+00:00"
+    store.upsert_stored_file(
+        relative_path="2026/04/Job_A/a.jpg",
+        sha256_hex="a" * 64,
+        size_bytes=100,
+        source_kind="upload_verify",
+        seen_at_utc=seen_at,
+    )
+    store.upsert_media_asset(
+        relative_path="2026/04/Job_A/a.jpg",
+        sha256_hex="a" * 64,
+        size_bytes=100,
+        origin_kind="uploaded",
+        observed_at_utc=seen_at,
+    )
+
+    client = TestClient(create_app(state_store=store, storage_root=tmp_path))
+    mark_favorite = client.post(
+        "/v1/admin/catalog/favorite/mark",
+        json={"relative_path": "2026/04/Job_A/a.jpg"},
+    )
+    assert mark_favorite.status_code == 200
+    assert mark_favorite.json()["item"]["is_favorite"] is True
+
+    unmark_favorite = client.post(
+        "/v1/admin/catalog/favorite/unmark",
+        json={"relative_path": "2026/04/Job_A/a.jpg"},
+    )
+    assert unmark_favorite.status_code == 200
+    assert unmark_favorite.json()["item"]["is_favorite"] is False
+
+    mark_archived = client.post(
+        "/v1/admin/catalog/archive/mark",
+        json={"relative_path": "2026/04/Job_A/a.jpg"},
+    )
+    assert mark_archived.status_code == 200
+    assert mark_archived.json()["item"]["is_archived"] is True
+
+    unmark_archived = client.post(
+        "/v1/admin/catalog/archive/unmark",
+        json={"relative_path": "2026/04/Job_A/a.jpg"},
+    )
+    assert unmark_archived.status_code == 200
+    assert unmark_archived.json()["item"]["is_archived"] is False
 
 
 def test_admin_files_empty_state(tmp_path: Path) -> None:

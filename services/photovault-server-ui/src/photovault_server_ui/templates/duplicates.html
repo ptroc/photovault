@@ -1,39 +1,54 @@
 {% extends "base.html" %}
 {% set title = "Duplicates" %}
 {% block content %}
-<section>
-  <h1>Duplicate SHA Groups</h1>
-  <p class="muted">Stored paths that currently reconcile to the same SHA256.</p>
+<section class="page-hero">
+  <div class="eyebrow text-uppercase text-secondary fw-semibold small mb-2">Diagnostics</div>
+  <h1 class="display-5 fw-semibold mb-2">Duplicate SHA Groups</h1>
+  <p class="lead text-secondary mb-0">Duplicate paths surfaced for operator review without leading with hash-heavy raw data.</p>
 </section>
 
-<section class="panel">
-  {% if groups %}
-  <p class="muted">Showing {{ groups|length }} duplicate groups out of {{ total }}.</p>
-  <table>
-    <thead>
-      <tr>
-        <th>SHA256</th>
-        <th>Paths</th>
-        <th>Last Seen (UTC)</th>
-      </tr>
-    </thead>
-    <tbody>
+<section class="card surface-card">
+  <div class="card-body border-bottom">
+    <h2 class="h4 mb-1">Duplicate groups</h2>
+    <p class="text-secondary mb-0">
+      {% if groups %}
+      Showing {{ groups|length }} duplicate groups out of {{ total }}.
+      {% else %}
+      Stored paths that currently reconcile to the same SHA256.
+      {% endif %}
+    </p>
+  </div>
+  <div class="card-body">
+    {% if groups %}
+    <div class="asset-list">
       {% for group in groups %}
-      <tr>
-        <td class="mono">{{ group.sha256_hex }}</td>
-        <td>
-          <div>{{ group.file_count }} path(s)</div>
-          {% for relative_path in group.relative_paths %}
-          <div class="mono">{{ relative_path }}</div>
-          {% endfor %}
-        </td>
-        <td class="mono">{{ group.last_seen_at_utc }}</td>
-      </tr>
+      <article class="card asset-card">
+        <div class="card-body">
+          <div class="d-flex flex-column flex-lg-row justify-content-between gap-3 mb-3">
+            <div>
+              <h2 class="h4 mb-1">{{ group.file_count }} path(s)</h2>
+              <div class="text-secondary">Last seen <span class="mono">{{ group.last_seen_at_utc }}</span></div>
+            </div>
+            <details>
+              <summary class="small fw-semibold text-primary">Technical detail</summary>
+              <div class="small pt-2 text-secondary">
+                <div><strong>SHA256:</strong> <span class="mono">{{ group.sha256_display }}</span></div>
+                <div><strong>First seen:</strong> <span class="mono">{{ group.first_seen_at_utc or "n/a" }}</span></div>
+              </div>
+            </details>
+          </div>
+          <div class="d-grid gap-2">
+            {% for relative_path in group.relative_paths %}
+            <div class="summary-chip rounded-3 p-2 mono">{{ relative_path }}</div>
+            {% endfor %}
+          </div>
+        </div>
+      </article>
       {% endfor %}
-    </tbody>
-  </table>
-  {% else %}
-  <p class="muted">No duplicate SHA groups are currently recorded.</p>
-  {% endif %}
+    </div>
+    {% else %}
+    <p class="text-secondary mb-0">No duplicate SHA groups are currently recorded.</p>
+    {% endif %}
+  </div>
 </section>
 {% endblock %}

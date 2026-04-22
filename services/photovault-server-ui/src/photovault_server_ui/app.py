@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import PurePosixPath
 from typing import Any, Callable
 from urllib.error import URLError
 from urllib.parse import urlencode
@@ -48,12 +49,111 @@ def _format_size_bytes(value: int) -> str:
     return f"{value / (1024 * 1024 * 1024):.1f} GiB"
 
 
+def _catalog_metadata_summary(item: dict[str, Any]) -> str:
+    metadata_bits: list[str] = []
+    capture = item.get("capture_timestamp_utc")
+    if capture:
+        metadata_bits.append(f"captured {capture}")
+    make = (item.get("camera_make") or "").strip()
+    model = (item.get("camera_model") or "").strip()
+    if make or model:
+        metadata_bits.append("camera " + " ".join([part for part in [make, model] if part]))
+    lens_model = (item.get("lens_model") or "").strip()
+    if lens_model:
+        metadata_bits.append(f"lens {lens_model}")
+    width = item.get("image_width")
+    height = item.get("image_height")
+    if width is not None and height is not None:
+        metadata_bits.append(f"{width}x{height}")
+    orientation = item.get("orientation")
+    if orientation is not None:
+        metadata_bits.append(f"orientation {orientation}")
+    return " | ".join(metadata_bits)
+
+
+def _format_sha_for_display(value: str | None, chunk_size: int = 8) -> str:
+    if not value:
+        return "n/a"
+    return " ".join(value[index : index + chunk_size] for index in range(0, len(value), chunk_size))
+
+
+def _count_client_summary(items: list[dict[str, Any]]) -> dict[str, int]:
+    return {
+        "online": sum(1 for item in items if item.get("heartbeat_presence_status") == "online"),
+        "stale": sum(1 for item in items if item.get("heartbeat_presence_status") == "stale"),
+        "pending": sum(1 for item in items if item.get("enrollment_status") == "pending"),
+        "working": sum(1 for item in items if item.get("heartbeat_workload_status") == "working"),
+        "blocked": sum(1 for item in items if item.get("heartbeat_workload_status") == "blocked"),
+    }
+
+
+def _catalog_query_state_from_values(values: dict[str, str]) -> dict[str, str]:
+    keys = (
+        "extraction_status",
+        "preview_status",
+        "origin_kind",
+        "media_type",
+        "preview_capability",
+        "is_favorite",
+        "is_archived",
+        "cataloged_since_utc",
+        "cataloged_before_utc",
+    )
+    state: dict[str, str] = {}
+    for key in keys:
+        value = values.get(key, "").strip()
+        if value:
+            state[key] = value
+    return state
+
+
+def _catalog_query_state_from_args() -> dict[str, str]:
+    values = {key: request.args.get(key, "") for key in request.args.keys()}
+    return _catalog_query_state_from_values(values)
+
+
+def _catalog_query_state_from_form() -> dict[str, str]:
+    values = {key: request.form.get(key, "") for key in request.form.keys()}
+    return _catalog_query_state_from_values(values)
+
+
 def create_app(*, api_fetcher: ApiFetcher | None = None, api_poster: ApiPoster | None = None) -> Flask:
     app = Flask(__name__)
+    app.jinja_env.globals["format_sha_for_display"] = _format_sha_for_display
     fetcher = api_fetcher or _default_api_fetcher
     poster = api_poster or _default_api_poster
     page_size = 50
     insight_page_size = 25
+
+    def _catalog_action_redirect(
+        *,
+        relative_path: str,
+        page: str,
+        query_state: dict[str, str],
+        return_to: str,
+        action_message: str | None = None,
+        action_error: str | None = None,
+    ):
+        if return_to == "asset" and relative_path:
+            return redirect(
+                url_for(
+                    "catalog_asset_detail",
+                    relative_path=relative_path,
+                    page=page,
+                    action_message=action_message,
+                    action_error=action_error,
+                    **query_state,
+                )
+            )
+        return redirect(
+            url_for(
+                "catalog",
+                page=page,
+                action_message=action_message,
+                action_error=action_error,
+                **query_state,
+            )
+        )
 
     @app.get("/")
     def index() -> str:
@@ -111,6 +211,7 @@ def create_app(*, api_fetcher: ApiFetcher | None = None, api_poster: ApiPoster |
         for item in items:
             size_bytes = int(item.get("size_bytes", 0))
             item["size_human"] = _format_size_bytes(size_bytes)
+            item["sha256_display"] = _format_sha_for_display(str(item.get("sha256_hex") or ""))
 
         return render_template(
             "files.html",
@@ -186,6 +287,7 @@ def create_app(*, api_fetcher: ApiFetcher | None = None, api_poster: ApiPoster |
         return render_template(
             "clients.html",
             clients=items,
+            client_summary=_count_client_summary(items),
             page=page,
             page_size=page_size,
             total=total,
@@ -292,6 +394,8 @@ def create_app(*, api_fetcher: ApiFetcher | None = None, api_poster: ApiPoster |
             error_message = "Unable to reach photovault-api duplicates endpoint."
 
         groups = list(payload.get("items", []))
+        for group in groups:
+            group["sha256_display"] = _format_sha_for_display(str(group.get("sha256_hex") or ""))
         return render_template(
             "duplicates.html",
             groups=groups,
@@ -311,9 +415,18 @@ def create_app(*, api_fetcher: ApiFetcher | None = None, api_poster: ApiPoster |
             latest_run = {"latest_run": None}
             error_message = "Unable to reach photovault-api conflict inspection endpoints."
 
+        conflicts_list = list(payload.get("items", []))
+        for conflict in conflicts_list:
+            conflict["previous_sha256_display"] = _format_sha_for_display(
+                str(conflict.get("previous_sha256_hex") or "")
+            )
+            conflict["current_sha256_display"] = _format_sha_for_display(
+                str(conflict.get("current_sha256_hex") or "")
+            )
+
         return render_template(
             "conflicts.html",
-            conflicts=list(payload.get("items", [])),
+            conflicts=conflicts_list,
             total=int(payload.get("total", 0)),
             latest_run=latest_run.get("latest_run"),
             error_message=error_message,
@@ -330,6 +443,11 @@ def create_app(*, api_fetcher: ApiFetcher | None = None, api_poster: ApiPoster |
         offset = (page - 1) * page_size
         extraction_status_filter = request.args.get("extraction_status", "").strip()
         origin_kind_filter = request.args.get("origin_kind", "").strip()
+        media_type_filter = request.args.get("media_type", "").strip()
+        preview_capability_filter = request.args.get("preview_capability", "").strip()
+        preview_status_filter = request.args.get("preview_status", "").strip()
+        is_favorite_filter = request.args.get("is_favorite", "").strip()
+        is_archived_filter = request.args.get("is_archived", "").strip()
         cataloged_since_filter = request.args.get("cataloged_since_utc", "").strip()
         cataloged_before_filter = request.args.get("cataloged_before_utc", "").strip()
         action_message = request.args.get("action_message")
@@ -340,6 +458,16 @@ def create_app(*, api_fetcher: ApiFetcher | None = None, api_poster: ApiPoster |
             query["extraction_status"] = extraction_status_filter
         if origin_kind_filter:
             query["origin_kind"] = origin_kind_filter
+        if media_type_filter:
+            query["media_type"] = media_type_filter
+        if preview_capability_filter:
+            query["preview_capability"] = preview_capability_filter
+        if preview_status_filter:
+            query["preview_status"] = preview_status_filter
+        if is_favorite_filter:
+            query["is_favorite"] = is_favorite_filter
+        if is_archived_filter:
+            query["is_archived"] = is_archived_filter
         if cataloged_since_filter:
             query["cataloged_since_utc"] = cataloged_since_filter
         if cataloged_before_filter:
@@ -360,25 +488,7 @@ def create_app(*, api_fetcher: ApiFetcher | None = None, api_poster: ApiPoster |
         for item in items:
             size_bytes = int(item.get("size_bytes", 0))
             item["size_human"] = _format_size_bytes(size_bytes)
-            metadata_bits: list[str] = []
-            capture = item.get("capture_timestamp_utc")
-            if capture:
-                metadata_bits.append(f"captured {capture}")
-            make = (item.get("camera_make") or "").strip()
-            model = (item.get("camera_model") or "").strip()
-            if make or model:
-                metadata_bits.append("camera " + " ".join([part for part in [make, model] if part]))
-            lens_model = (item.get("lens_model") or "").strip()
-            if lens_model:
-                metadata_bits.append(f"lens {lens_model}")
-            width = item.get("image_width")
-            height = item.get("image_height")
-            if width is not None and height is not None:
-                metadata_bits.append(f"{width}x{height}")
-            orientation = item.get("orientation")
-            if orientation is not None:
-                metadata_bits.append(f"orientation {orientation}")
-            item["metadata_summary"] = " | ".join(metadata_bits)
+            item["metadata_summary"] = _catalog_metadata_summary(item)
             preview_status = str(item.get("preview_status") or "pending")
             if preview_status == "succeeded":
                 item["preview_summary"] = "Preview available"
@@ -386,17 +496,12 @@ def create_app(*, api_fetcher: ApiFetcher | None = None, api_poster: ApiPoster |
                 item["preview_summary"] = "Preview failed"
             else:
                 item["preview_summary"] = "Preview pending"
+            item["filename"] = PurePosixPath(str(item.get("relative_path", ""))).name
+            item["sha256_display"] = _format_sha_for_display(str(item.get("sha256_hex") or ""))
 
-        filter_query: dict[str, str] = {}
-        if extraction_status_filter:
-            filter_query["extraction_status"] = extraction_status_filter
-        if origin_kind_filter:
-            filter_query["origin_kind"] = origin_kind_filter
-        if cataloged_since_filter:
-            filter_query["cataloged_since_utc"] = cataloged_since_filter
-        if cataloged_before_filter:
-            filter_query["cataloged_before_utc"] = cataloged_before_filter
-        filter_query_suffix = f"&{urlencode(filter_query)}" if filter_query else ""
+        filter_query = _catalog_query_state_from_args()
+        previous_url = url_for("catalog", page=page - 1, **filter_query) if has_previous else None
+        next_url = url_for("catalog", page=page + 1, **filter_query) if has_next else None
 
         return render_template(
             "catalog.html",
@@ -413,9 +518,16 @@ def create_app(*, api_fetcher: ApiFetcher | None = None, api_poster: ApiPoster |
             action_error=action_error,
             extraction_status_filter=extraction_status_filter,
             origin_kind_filter=origin_kind_filter,
+            media_type_filter=media_type_filter,
+            preview_capability_filter=preview_capability_filter,
+            preview_status_filter=preview_status_filter,
+            is_favorite_filter=is_favorite_filter,
+            is_archived_filter=is_archived_filter,
             cataloged_since_filter=cataloged_since_filter,
             cataloged_before_filter=cataloged_before_filter,
-            filter_query_suffix=filter_query_suffix,
+            catalog_query_state=filter_query,
+            previous_url=previous_url,
+            next_url=next_url,
             active_page="catalog",
         )
 
@@ -428,6 +540,11 @@ def create_app(*, api_fetcher: ApiFetcher | None = None, api_poster: ApiPoster |
         page = request.args.get("page", "1").strip() or "1"
         extraction_status_filter = request.args.get("extraction_status", "").strip()
         origin_kind_filter = request.args.get("origin_kind", "").strip()
+        media_type_filter = request.args.get("media_type", "").strip()
+        preview_capability_filter = request.args.get("preview_capability", "").strip()
+        preview_status_filter = request.args.get("preview_status", "").strip()
+        is_favorite_filter = request.args.get("is_favorite", "").strip()
+        is_archived_filter = request.args.get("is_archived", "").strip()
         cataloged_since_filter = request.args.get("cataloged_since_utc", "").strip()
         cataloged_before_filter = request.args.get("cataloged_before_utc", "").strip()
         action_message = request.args.get("action_message")
@@ -444,25 +561,10 @@ def create_app(*, api_fetcher: ApiFetcher | None = None, api_poster: ApiPoster |
         if item is not None:
             size_bytes = int(item.get("size_bytes", 0))
             item["size_human"] = _format_size_bytes(size_bytes)
-            metadata_bits: list[str] = []
-            capture = item.get("capture_timestamp_utc")
-            if capture:
-                metadata_bits.append(f"captured {capture}")
-            make = (item.get("camera_make") or "").strip()
-            model = (item.get("camera_model") or "").strip()
-            if make or model:
-                metadata_bits.append("camera " + " ".join([part for part in [make, model] if part]))
-            lens_model = (item.get("lens_model") or "").strip()
-            if lens_model:
-                metadata_bits.append(f"lens {lens_model}")
-            width = item.get("image_width")
-            height = item.get("image_height")
-            if width is not None and height is not None:
-                metadata_bits.append(f"{width}x{height}")
-            orientation = item.get("orientation")
-            if orientation is not None:
-                metadata_bits.append(f"orientation {orientation}")
-            item["metadata_summary"] = " | ".join(metadata_bits)
+            item["metadata_summary"] = _catalog_metadata_summary(item)
+            item["filename"] = PurePosixPath(str(item.get("relative_path", ""))).name
+
+        catalog_query_state = _catalog_query_state_from_args()
 
         return render_template(
             "catalog_asset.html",
@@ -470,48 +572,146 @@ def create_app(*, api_fetcher: ApiFetcher | None = None, api_poster: ApiPoster |
             page=page,
             extraction_status_filter=extraction_status_filter,
             origin_kind_filter=origin_kind_filter,
+            media_type_filter=media_type_filter,
+            preview_capability_filter=preview_capability_filter,
+            preview_status_filter=preview_status_filter,
+            is_favorite_filter=is_favorite_filter,
+            is_archived_filter=is_archived_filter,
             cataloged_since_filter=cataloged_since_filter,
             cataloged_before_filter=cataloged_before_filter,
+            catalog_query_state=catalog_query_state,
             error_message=error_message,
             action_message=action_message,
             action_error=action_error,
             active_page="catalog",
         )
 
-    @app.post("/catalog/actions/preview")
-    def catalog_preview_action():
+    @app.post("/catalog/actions/favorite/mark")
+    def catalog_favorite_mark_action():
         relative_path = request.form.get("relative_path", "").strip()
         page = request.form.get("page", "1").strip() or "1"
-        extraction_status_filter = request.form.get("extraction_status", "").strip()
-        origin_kind_filter = request.form.get("origin_kind", "").strip()
-        cataloged_since_filter = request.form.get("cataloged_since_utc", "").strip()
-        cataloged_before_filter = request.form.get("cataloged_before_utc", "").strip()
-        redirect_query: dict[str, str] = {
-            "relative_path": relative_path,
-            "page": page,
-            "extraction_status": extraction_status_filter,
-            "origin_kind": origin_kind_filter,
-            "cataloged_since_utc": cataloged_since_filter,
-            "cataloged_before_utc": cataloged_before_filter,
-        }
+        return_to = request.form.get("return_to", "catalog").strip() or "catalog"
+        query_state = _catalog_query_state_from_form()
         if not relative_path:
-            return redirect(url_for("catalog", page=page, action_error="Missing catalog relative path."))
+            return _catalog_action_redirect(
+                relative_path=relative_path,
+                page=page,
+                query_state=query_state,
+                return_to=return_to,
+                action_error="Missing catalog relative path.",
+            )
         try:
-            poster("/v1/admin/catalog/preview/retry", {"relative_path": relative_path})
+            poster("/v1/admin/catalog/favorite/mark", {"relative_path": relative_path})
         except (URLError, TimeoutError, ValueError):
-            return redirect(
-                url_for(
-                    "catalog_asset_detail",
-                    **redirect_query,
-                    action_error=f"Preview generation failed for {relative_path}.",
-                )
+            return _catalog_action_redirect(
+                relative_path=relative_path,
+                page=page,
+                query_state=query_state,
+                return_to=return_to,
+                action_error=f"Failed to mark favorite for {relative_path}.",
             )
-        return redirect(
-            url_for(
-                "catalog_asset_detail",
-                **redirect_query,
-                action_message=f"Retried preview generation for {relative_path}.",
+        return _catalog_action_redirect(
+            relative_path=relative_path,
+            page=page,
+            query_state=query_state,
+            return_to=return_to,
+            action_message=f"Marked favorite: {relative_path}.",
+        )
+
+    @app.post("/catalog/actions/favorite/unmark")
+    def catalog_favorite_unmark_action():
+        relative_path = request.form.get("relative_path", "").strip()
+        page = request.form.get("page", "1").strip() or "1"
+        return_to = request.form.get("return_to", "catalog").strip() or "catalog"
+        query_state = _catalog_query_state_from_form()
+        if not relative_path:
+            return _catalog_action_redirect(
+                relative_path=relative_path,
+                page=page,
+                query_state=query_state,
+                return_to=return_to,
+                action_error="Missing catalog relative path.",
             )
+        try:
+            poster("/v1/admin/catalog/favorite/unmark", {"relative_path": relative_path})
+        except (URLError, TimeoutError, ValueError):
+            return _catalog_action_redirect(
+                relative_path=relative_path,
+                page=page,
+                query_state=query_state,
+                return_to=return_to,
+                action_error=f"Failed to unmark favorite for {relative_path}.",
+            )
+        return _catalog_action_redirect(
+            relative_path=relative_path,
+            page=page,
+            query_state=query_state,
+            return_to=return_to,
+            action_message=f"Unmarked favorite: {relative_path}.",
+        )
+
+    @app.post("/catalog/actions/archive/mark")
+    def catalog_archive_mark_action():
+        relative_path = request.form.get("relative_path", "").strip()
+        page = request.form.get("page", "1").strip() or "1"
+        return_to = request.form.get("return_to", "catalog").strip() or "catalog"
+        query_state = _catalog_query_state_from_form()
+        if not relative_path:
+            return _catalog_action_redirect(
+                relative_path=relative_path,
+                page=page,
+                query_state=query_state,
+                return_to=return_to,
+                action_error="Missing catalog relative path.",
+            )
+        try:
+            poster("/v1/admin/catalog/archive/mark", {"relative_path": relative_path})
+        except (URLError, TimeoutError, ValueError):
+            return _catalog_action_redirect(
+                relative_path=relative_path,
+                page=page,
+                query_state=query_state,
+                return_to=return_to,
+                action_error=f"Failed to archive {relative_path}.",
+            )
+        return _catalog_action_redirect(
+            relative_path=relative_path,
+            page=page,
+            query_state=query_state,
+            return_to=return_to,
+            action_message=f"Archived asset: {relative_path}.",
+        )
+
+    @app.post("/catalog/actions/archive/unmark")
+    def catalog_archive_unmark_action():
+        relative_path = request.form.get("relative_path", "").strip()
+        page = request.form.get("page", "1").strip() or "1"
+        return_to = request.form.get("return_to", "catalog").strip() or "catalog"
+        query_state = _catalog_query_state_from_form()
+        if not relative_path:
+            return _catalog_action_redirect(
+                relative_path=relative_path,
+                page=page,
+                query_state=query_state,
+                return_to=return_to,
+                action_error="Missing catalog relative path.",
+            )
+        try:
+            poster("/v1/admin/catalog/archive/unmark", {"relative_path": relative_path})
+        except (URLError, TimeoutError, ValueError):
+            return _catalog_action_redirect(
+                relative_path=relative_path,
+                page=page,
+                query_state=query_state,
+                return_to=return_to,
+                action_error=f"Failed to unarchive {relative_path}.",
+            )
+        return _catalog_action_redirect(
+            relative_path=relative_path,
+            page=page,
+            query_state=query_state,
+            return_to=return_to,
+            action_message=f"Unarchived asset: {relative_path}.",
         )
 
     @app.get("/catalog/preview")
@@ -530,82 +730,5 @@ def create_app(*, api_fetcher: ApiFetcher | None = None, api_poster: ApiPoster |
         except (URLError, TimeoutError, ValueError):
             return Response("preview unavailable", status=404, mimetype="text/plain")
 
-    @app.post("/catalog/actions/retry")
-    def catalog_retry_action():
-        relative_path = request.form.get("relative_path", "").strip()
-        page = request.form.get("page", "1")
-        extraction_status_filter = request.form.get("extraction_status", "").strip()
-        origin_kind_filter = request.form.get("origin_kind", "").strip()
-        cataloged_since_filter = request.form.get("cataloged_since_utc", "").strip()
-        cataloged_before_filter = request.form.get("cataloged_before_utc", "").strip()
-        redirect_query: dict[str, str] = {"page": page}
-        if extraction_status_filter:
-            redirect_query["extraction_status"] = extraction_status_filter
-        if origin_kind_filter:
-            redirect_query["origin_kind"] = origin_kind_filter
-        if cataloged_since_filter:
-            redirect_query["cataloged_since_utc"] = cataloged_since_filter
-        if cataloged_before_filter:
-            redirect_query["cataloged_before_utc"] = cataloged_before_filter
-        if not relative_path:
-            return redirect(
-                url_for("catalog", **redirect_query, action_error="Missing catalog relative path for retry.")
-            )
-        try:
-            poster("/v1/admin/catalog/extraction/retry", {"relative_path": relative_path})
-        except (URLError, TimeoutError, ValueError):
-            return redirect(
-                url_for("catalog", **redirect_query, action_error=f"Retry failed for {relative_path}.")
-            )
-        return redirect(
-            url_for("catalog", **redirect_query, action_message=f"Retried extraction for {relative_path}.")
-        )
-
-    @app.post("/catalog/actions/backfill")
-    def catalog_backfill_action():
-        page = request.form.get("page", "1")
-        extraction_status_filter = request.form.get("extraction_status", "").strip()
-        origin_kind_filter = request.form.get("origin_kind", "").strip()
-        cataloged_since_filter = request.form.get("cataloged_since_utc", "").strip()
-        cataloged_before_filter = request.form.get("cataloged_before_utc", "").strip()
-        redirect_query: dict[str, str] = {"page": page}
-        if extraction_status_filter:
-            redirect_query["extraction_status"] = extraction_status_filter
-        if origin_kind_filter:
-            redirect_query["origin_kind"] = origin_kind_filter
-        if cataloged_since_filter:
-            redirect_query["cataloged_since_utc"] = cataloged_since_filter
-        if cataloged_before_filter:
-            redirect_query["cataloged_before_utc"] = cataloged_before_filter
-        raw_statuses = request.form.get("target_statuses", "pending,failed")
-        statuses = [part.strip() for part in raw_statuses.split(",") if part.strip()]
-        try:
-            limit = max(1, min(500, int(request.form.get("limit", "100"))))
-        except ValueError:
-            limit = 100
-
-        try:
-            response = poster(
-                "/v1/admin/catalog/extraction/backfill",
-                {"target_statuses": statuses or ["pending", "failed"], "limit": limit},
-            )
-        except (URLError, TimeoutError, ValueError):
-            return redirect(
-                url_for("catalog", **redirect_query, action_error="Catalog extraction backfill failed.")
-            )
-
-        processed_count = int(response.get("processed_count", 0))
-        succeeded_count = int(response.get("succeeded_count", 0))
-        failed_count = int(response.get("failed_count", 0))
-        return redirect(
-            url_for(
-                "catalog",
-                **redirect_query,
-                action_message=(
-                    f"Backfill processed {processed_count} asset(s): "
-                    f"{succeeded_count} succeeded, {failed_count} failed."
-                ),
-            )
-        )
 
     return app

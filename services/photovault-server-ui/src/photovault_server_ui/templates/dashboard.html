@@ -1,115 +1,218 @@
 {% extends "base.html" %}
+{% from "macros.html" import status_badge %}
 {% set title = "Overview" %}
 {% block content %}
-<section>
-  <h1>Server Overview</h1>
-  <p class="muted">M4 storage and indexing inspection surface.</p>
-  <div class="grid">
-    <div class="metric">
-      <div class="label">Total known SHA256</div>
-      <div class="value">{{ overview.total_known_sha256 }}</div>
+<section class="page-hero">
+  <div class="d-flex flex-column flex-lg-row justify-content-between gap-3 align-items-lg-end">
+    <div>
+      <div class="eyebrow text-uppercase text-secondary fw-semibold small mb-2">Primary Surface</div>
+      <h1 class="display-5 fw-semibold mb-2">Server Overview</h1>
+      <p class="lead text-secondary mb-0">Compact operator view for storage, client activity, and catalog health.</p>
     </div>
-    <div class="metric">
-      <div class="label">Total stored files</div>
-      <div class="value">{{ overview.total_stored_files }}</div>
-    </div>
-    <div class="metric">
-      <div class="label">Indexed files</div>
-      <div class="value">{{ overview.indexed_files }}</div>
-    </div>
-    <div class="metric">
-      <div class="label">Uploaded files</div>
-      <div class="value">{{ overview.uploaded_files }}</div>
-    </div>
-    <div class="metric">
-      <div class="label">Duplicate file paths</div>
-      <div class="value">{{ overview.duplicate_file_paths }}</div>
-    </div>
-    <div class="metric">
-      <div class="label">Indexed in last 24h</div>
-      <div class="value">{{ overview.recent_indexed_files_24h }}</div>
-    </div>
-    <div class="metric">
-      <div class="label">Uploaded in last 24h</div>
-      <div class="value">{{ overview.recent_uploaded_files_24h }}</div>
+    <div class="d-flex flex-wrap gap-2">
+      <a class="btn btn-primary" href="/catalog">Open Catalog</a>
+      <a class="btn btn-outline-secondary" href="/clients">Review Clients</a>
     </div>
   </div>
 </section>
 
-<section class="panel" style="margin-top: 0.9rem;">
-  <h2 style="margin-top: 0;">Recent Activity</h2>
-  <table>
-    <thead>
-      <tr>
-        <th>Signal</th>
-        <th>Latest UTC timestamp</th>
-      </tr>
-    </thead>
-    <tbody>
-      <tr>
-        <td>Last indexed file</td>
-        <td class="mono">{{ overview.last_indexed_at_utc or "No indexed files yet" }}</td>
-      </tr>
-      <tr>
-        <td>Last uploaded file</td>
-        <td class="mono">{{ overview.last_uploaded_at_utc or "No uploaded files yet" }}</td>
-      </tr>
-    </tbody>
-  </table>
+<section class="row g-3 mb-4">
+  <div class="col-6 col-xl">
+    <div class="card kpi-card h-100">
+      <div class="card-body">
+        <div class="text-secondary small text-uppercase fw-semibold">Known SHA groups</div>
+        <div class="display-6 fw-semibold mb-0">{{ overview.total_known_sha256 }}</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-6 col-xl">
+    <div class="card kpi-card h-100">
+      <div class="card-body">
+        <div class="text-secondary small text-uppercase fw-semibold">Stored files</div>
+        <div class="display-6 fw-semibold mb-0">{{ overview.total_stored_files }}</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-6 col-xl">
+    <div class="card kpi-card h-100">
+      <div class="card-body">
+        <div class="text-secondary small text-uppercase fw-semibold">Indexed files</div>
+        <div class="display-6 fw-semibold mb-0">{{ overview.indexed_files }}</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-6 col-xl">
+    <div class="card kpi-card h-100">
+      <div class="card-body">
+        <div class="text-secondary small text-uppercase fw-semibold">Uploaded files</div>
+        <div class="display-6 fw-semibold mb-0">{{ overview.uploaded_files }}</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-6 col-xl">
+    <div class="card kpi-card h-100">
+      <div class="card-body">
+        <div class="text-secondary small text-uppercase fw-semibold">Duplicate paths</div>
+        <div class="display-6 fw-semibold mb-0">{{ overview.duplicate_file_paths }}</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-6 col-xl">
+    <div class="card kpi-card h-100">
+      <div class="card-body">
+        <div class="text-secondary small text-uppercase fw-semibold">Indexed in 24h</div>
+        <div class="display-6 fw-semibold mb-0">{{ overview.recent_indexed_files_24h }}</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-6 col-xl">
+    <div class="card kpi-card h-100">
+      <div class="card-body">
+        <div class="text-secondary small text-uppercase fw-semibold">Uploaded in 24h</div>
+        <div class="display-6 fw-semibold mb-0">{{ overview.recent_uploaded_files_24h }}</div>
+      </div>
+    </div>
+  </div>
 </section>
 
-<section class="panel" style="margin-top: 0.9rem;">
-  <h2 style="margin-top: 0;">Latest Index Run</h2>
-  {% if latest_run %}
-  <table>
-    <thead>
-      <tr>
-        <th>Signal</th>
-        <th>Value</th>
-      </tr>
-    </thead>
-    <tbody>
-      <tr>
-        <td>Completed at</td>
-        <td class="mono">{{ latest_run.completed_at_utc }}</td>
-      </tr>
-      <tr>
-        <td>Scanned files</td>
-        <td>{{ latest_run.scanned_files }}</td>
-      </tr>
-      <tr>
-        <td>Indexed files</td>
-        <td>{{ latest_run.indexed_files }}</td>
-      </tr>
-      <tr>
-        <td>New SHA entries</td>
-        <td>{{ latest_run.new_sha_entries }}</td>
-      </tr>
-      <tr>
-        <td>Existing SHA matches</td>
-        <td>{{ latest_run.existing_sha_matches }}</td>
-      </tr>
-      <tr>
-        <td>Path conflicts</td>
-        <td>{{ latest_run.path_conflicts }}</td>
-      </tr>
-      <tr>
-        <td>Errors</td>
-        <td>{{ latest_run.errors }}</td>
-      </tr>
-    </tbody>
-  </table>
-  {% else %}
-  <p class="muted">No storage index run has been recorded yet.</p>
-  {% endif %}
+<section class="row g-4 mb-4">
+  <div class="col-lg-5">
+    <div class="card surface-card h-100">
+      <div class="card-body">
+        <h2 class="h4 mb-3">Recent Activity</h2>
+        <div class="d-grid gap-3">
+          <div class="summary-chip rounded-4 p-3">
+            <div class="small text-secondary text-uppercase fw-semibold mb-1">Last indexed file</div>
+            <div class="mono">{{ overview.last_indexed_at_utc or "No indexed files yet" }}</div>
+          </div>
+          <div class="summary-chip rounded-4 p-3">
+            <div class="small text-secondary text-uppercase fw-semibold mb-1">Last uploaded file</div>
+            <div class="mono">{{ overview.last_uploaded_at_utc or "No uploaded files yet" }}</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="col-lg-7">
+    <div class="card surface-card h-100">
+      <div class="card-body">
+        <div class="d-flex justify-content-between align-items-start gap-3 mb-3">
+          <div>
+            <h2 class="h4 mb-1">Latest Index Run</h2>
+            <p class="text-secondary mb-0">Most recent storage indexing outcome.</p>
+          </div>
+          {% if latest_run %}
+          {{ status_badge('succeeded', 'Recorded') }}
+          {% else %}
+          {{ status_badge('unknown', 'No run yet') }}
+          {% endif %}
+        </div>
+        {% if latest_run %}
+        <div class="row row-cols-2 row-cols-xl-3 g-3">
+          <div class="col">
+            <div class="summary-chip rounded-4 p-3">
+              <div class="small text-secondary text-uppercase fw-semibold mb-1">Completed at</div>
+              <div class="mono">{{ latest_run.completed_at_utc }}</div>
+            </div>
+          </div>
+          <div class="col">
+            <div class="summary-chip rounded-4 p-3">
+              <div class="small text-secondary text-uppercase fw-semibold mb-1">Scanned</div>
+              <div class="h3 mb-0">{{ latest_run.scanned_files }}</div>
+            </div>
+          </div>
+          <div class="col">
+            <div class="summary-chip rounded-4 p-3">
+              <div class="small text-secondary text-uppercase fw-semibold mb-1">Indexed</div>
+              <div class="h3 mb-0">{{ latest_run.indexed_files }}</div>
+            </div>
+          </div>
+          <div class="col">
+            <div class="summary-chip rounded-4 p-3">
+              <div class="small text-secondary text-uppercase fw-semibold mb-1">New SHA entries</div>
+              <div class="h3 mb-0">{{ latest_run.new_sha_entries }}</div>
+            </div>
+          </div>
+          <div class="col">
+            <div class="summary-chip rounded-4 p-3">
+              <div class="small text-secondary text-uppercase fw-semibold mb-1">Existing matches</div>
+              <div class="h3 mb-0">{{ latest_run.existing_sha_matches }}</div>
+            </div>
+          </div>
+          <div class="col">
+            <div class="summary-chip rounded-4 p-3">
+              <div class="small text-secondary text-uppercase fw-semibold mb-1">Path conflicts / errors</div>
+              <div class="h3 mb-0">{{ latest_run.path_conflicts }} / {{ latest_run.errors }}</div>
+            </div>
+          </div>
+        </div>
+        {% else %}
+        <p class="text-secondary mb-0">No storage index run has been recorded yet.</p>
+        {% endif %}
+      </div>
+    </div>
+  </div>
 </section>
 
-<section class="panel" style="margin-top: 0.9rem;">
-  <h2 style="margin-top: 0;">Inspection Shortcuts</h2>
-  <p class="muted">Use the focused views below for duplicate SHA groups and changed-content path conflicts.</p>
-  <div class="pager">
-    <a href="/duplicates">Open duplicate SHA groups</a>
-    <a href="/conflicts">Open path conflict history</a>
+<section class="row g-4">
+  <div class="col-lg-8">
+    <div class="card surface-card">
+      <div class="card-body">
+        <div class="d-flex justify-content-between align-items-center mb-3">
+          <div>
+            <h2 class="h4 mb-1">Operator Shortcuts</h2>
+            <p class="text-secondary mb-0">Jump into the high-traffic surfaces for day-to-day work.</p>
+          </div>
+        </div>
+        <div class="row g-3">
+          <div class="col-md-4">
+            <div class="card shortcut-card h-100">
+              <div class="card-body">
+                <div class="small text-secondary text-uppercase fw-semibold mb-2">Clients</div>
+                <p class="mb-3">Approve devices, spot stale heartbeats, and review blocked workload.</p>
+                <a class="btn btn-sm btn-outline-primary" href="/clients">Open Clients</a>
+              </div>
+            </div>
+          </div>
+          <div class="col-md-4">
+            <div class="card shortcut-card h-100">
+              <div class="card-body">
+                <div class="small text-secondary text-uppercase fw-semibold mb-2">Catalog</div>
+                <p class="mb-3">Browse previews, inspect metadata, and use favorite/archive controls.</p>
+                <a class="btn btn-sm btn-outline-primary" href="/catalog">Open Catalog</a>
+              </div>
+            </div>
+          </div>
+          <div class="col-md-4">
+            <div class="card shortcut-card h-100">
+              <div class="card-body">
+                <div class="small text-secondary text-uppercase fw-semibold mb-2">Diagnostics</div>
+                <p class="mb-3">Use focused views for files, duplicate groups, and path conflicts.</p>
+                <div class="d-flex flex-wrap gap-2">
+                  <a class="btn btn-sm btn-outline-secondary" href="/files">Files</a>
+                  <a class="btn btn-sm btn-outline-secondary" href="/duplicates">Open duplicate SHA groups</a>
+                  <a class="btn btn-sm btn-outline-secondary" href="/conflicts">Open path conflict history</a>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="col-lg-4">
+    <div class="card surface-card h-100">
+      <div class="card-body">
+        <div class="small text-secondary text-uppercase fw-semibold mb-2">Daily Read</div>
+        <h2 class="h4">What changed most recently?</h2>
+        <p class="text-secondary mb-3">Use recent activity and index-run signals first, then drill into diagnostics only when needed.</p>
+        <ul class="small text-secondary ps-3 mb-0">
+          <li>Clients is the main status surface for current operations.</li>
+          <li>Catalog is the main media browsing surface.</li>
+          <li>Diagnostics tabs are available when you need deeper inspection.</li>
+        </ul>
+      </div>
+    </div>
   </div>
 </section>
 {% endblock %}

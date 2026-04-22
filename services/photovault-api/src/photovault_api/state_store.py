@@ -7,6 +7,34 @@ from datetime import UTC, datetime, timedelta
 from threading import Lock
 from typing import Protocol
 
+_MEDIA_TYPE_SUFFIXES: dict[str, tuple[str, ...]] = {
+    "jpeg": (".jpg", ".jpeg"),
+    "png": (".png",),
+    "heic": (".heic", ".heif"),
+    "raw": (".arw", ".cr2", ".cr3", ".dng", ".nef", ".orf", ".raf", ".rw2"),
+    "video": (".mp4", ".mov", ".avi", ".mkv", ".m4v", ".mts"),
+}
+_PREVIEWABLE_SUFFIXES = frozenset(
+    suffix
+    for media_type in ("jpeg", "png", "heic", "raw")
+    for suffix in _MEDIA_TYPE_SUFFIXES[media_type]
+)
+
+
+def _media_type_for_path(relative_path: str) -> str:
+    lowered = relative_path.lower()
+    for media_type, suffixes in _MEDIA_TYPE_SUFFIXES.items():
+        if lowered.endswith(suffixes):
+            return media_type
+    return "other"
+
+
+def _preview_capability_for_path(relative_path: str) -> str:
+    lowered = relative_path.lower()
+    if lowered.endswith(tuple(_PREVIEWABLE_SUFFIXES)):
+        return "previewable"
+    return "not_previewable"
+
 
 @dataclass(frozen=True)
 class TempUploadRecord:
@@ -57,6 +85,8 @@ class MediaAssetRecord:
     image_height: int | None
     orientation: int | None
     lens_model: str | None
+    is_favorite: bool = False
+    is_archived: bool = False
 
 
 @dataclass(frozen=True)
@@ -220,12 +250,25 @@ class UploadStateStore(Protocol):
         limit: int,
         offset: int,
         extraction_status: str | None = None,
+        preview_status: str | None = None,
         origin_kind: str | None = None,
+        media_type: str | None = None,
+        preview_capability: str | None = None,
+        is_favorite: bool | None = None,
+        is_archived: bool | None = None,
         cataloged_since_utc: str | None = None,
         cataloged_before_utc: str | None = None,
     ) -> tuple[int, list[MediaAssetRecord]]: ...
 
     def get_media_asset_by_path(self, relative_path: str) -> MediaAssetRecord | None: ...
+
+    def set_media_asset_favorite(
+        self, *, relative_path: str, is_favorite: bool, updated_at_utc: str
+    ) -> MediaAssetRecord | None: ...
+
+    def set_media_asset_archived(
+        self, *, relative_path: str, is_archived: bool, updated_at_utc: str
+    ) -> MediaAssetRecord | None: ...
 
     def list_media_assets_for_extraction(
         self, *, extraction_statuses: list[str], limit: int
@@ -500,6 +543,8 @@ class InMemoryUploadStateStore:
                 image_height=existing.image_height if existing is not None else None,
                 orientation=existing.orientation if existing is not None else None,
                 lens_model=existing.lens_model if existing is not None else None,
+                is_favorite=existing.is_favorite if existing is not None else False,
+                is_archived=existing.is_archived if existing is not None else False,
             )
             self.media_asset_extractions.setdefault(
                 relative_path,
@@ -538,7 +583,12 @@ class InMemoryUploadStateStore:
         limit: int,
         offset: int,
         extraction_status: str | None = None,
+        preview_status: str | None = None,
         origin_kind: str | None = None,
+        media_type: str | None = None,
+        preview_capability: str | None = None,
+        is_favorite: bool | None = None,
+        is_archived: bool | None = None,
         cataloged_since_utc: str | None = None,
         cataloged_before_utc: str | None = None,
     ) -> tuple[int, list[MediaAssetRecord]]:
@@ -547,8 +597,24 @@ class InMemoryUploadStateStore:
             ordered = sorted(ordered, key=lambda item: item.last_cataloged_at_utc, reverse=True)
             if extraction_status is not None:
                 ordered = [item for item in ordered if item.extraction_status == extraction_status]
+            if preview_status is not None:
+                ordered = [item for item in ordered if item.preview_status == preview_status]
             if origin_kind is not None:
                 ordered = [item for item in ordered if item.origin_kind == origin_kind]
+            if media_type is not None:
+                ordered = [
+                    item for item in ordered if _media_type_for_path(item.relative_path) == media_type
+                ]
+            if preview_capability is not None:
+                ordered = [
+                    item
+                    for item in ordered
+                    if _preview_capability_for_path(item.relative_path) == preview_capability
+                ]
+            if is_favorite is not None:
+                ordered = [item for item in ordered if item.is_favorite == is_favorite]
+            if is_archived is not None:
+                ordered = [item for item in ordered if item.is_archived == is_archived]
             if cataloged_since_utc is not None:
                 ordered = [item for item in ordered if item.last_cataloged_at_utc >= cataloged_since_utc]
             if cataloged_before_utc is not None:
@@ -559,6 +625,90 @@ class InMemoryUploadStateStore:
     def get_media_asset_by_path(self, relative_path: str) -> MediaAssetRecord | None:
         with self._lock:
             return self.media_assets.get(relative_path)
+
+    def set_media_asset_favorite(
+        self, *, relative_path: str, is_favorite: bool, updated_at_utc: str
+    ) -> MediaAssetRecord | None:
+        del updated_at_utc
+        with self._lock:
+            existing = self.media_assets.get(relative_path)
+            if existing is None:
+                return None
+            updated = MediaAssetRecord(
+                relative_path=existing.relative_path,
+                sha256_hex=existing.sha256_hex,
+                size_bytes=existing.size_bytes,
+                origin_kind=existing.origin_kind,
+                last_observed_origin_kind=existing.last_observed_origin_kind,
+                provenance_job_name=existing.provenance_job_name,
+                provenance_original_filename=existing.provenance_original_filename,
+                first_cataloged_at_utc=existing.first_cataloged_at_utc,
+                last_cataloged_at_utc=existing.last_cataloged_at_utc,
+                extraction_status=existing.extraction_status,
+                extraction_last_attempted_at_utc=existing.extraction_last_attempted_at_utc,
+                extraction_last_succeeded_at_utc=existing.extraction_last_succeeded_at_utc,
+                extraction_last_failed_at_utc=existing.extraction_last_failed_at_utc,
+                extraction_failure_detail=existing.extraction_failure_detail,
+                preview_status=existing.preview_status,
+                preview_relative_path=existing.preview_relative_path,
+                preview_last_attempted_at_utc=existing.preview_last_attempted_at_utc,
+                preview_last_succeeded_at_utc=existing.preview_last_succeeded_at_utc,
+                preview_last_failed_at_utc=existing.preview_last_failed_at_utc,
+                preview_failure_detail=existing.preview_failure_detail,
+                capture_timestamp_utc=existing.capture_timestamp_utc,
+                camera_make=existing.camera_make,
+                camera_model=existing.camera_model,
+                image_width=existing.image_width,
+                image_height=existing.image_height,
+                orientation=existing.orientation,
+                lens_model=existing.lens_model,
+                is_favorite=is_favorite,
+                is_archived=existing.is_archived,
+            )
+            self.media_assets[relative_path] = updated
+            return updated
+
+    def set_media_asset_archived(
+        self, *, relative_path: str, is_archived: bool, updated_at_utc: str
+    ) -> MediaAssetRecord | None:
+        del updated_at_utc
+        with self._lock:
+            existing = self.media_assets.get(relative_path)
+            if existing is None:
+                return None
+            updated = MediaAssetRecord(
+                relative_path=existing.relative_path,
+                sha256_hex=existing.sha256_hex,
+                size_bytes=existing.size_bytes,
+                origin_kind=existing.origin_kind,
+                last_observed_origin_kind=existing.last_observed_origin_kind,
+                provenance_job_name=existing.provenance_job_name,
+                provenance_original_filename=existing.provenance_original_filename,
+                first_cataloged_at_utc=existing.first_cataloged_at_utc,
+                last_cataloged_at_utc=existing.last_cataloged_at_utc,
+                extraction_status=existing.extraction_status,
+                extraction_last_attempted_at_utc=existing.extraction_last_attempted_at_utc,
+                extraction_last_succeeded_at_utc=existing.extraction_last_succeeded_at_utc,
+                extraction_last_failed_at_utc=existing.extraction_last_failed_at_utc,
+                extraction_failure_detail=existing.extraction_failure_detail,
+                preview_status=existing.preview_status,
+                preview_relative_path=existing.preview_relative_path,
+                preview_last_attempted_at_utc=existing.preview_last_attempted_at_utc,
+                preview_last_succeeded_at_utc=existing.preview_last_succeeded_at_utc,
+                preview_last_failed_at_utc=existing.preview_last_failed_at_utc,
+                preview_failure_detail=existing.preview_failure_detail,
+                capture_timestamp_utc=existing.capture_timestamp_utc,
+                camera_make=existing.camera_make,
+                camera_model=existing.camera_model,
+                image_width=existing.image_width,
+                image_height=existing.image_height,
+                orientation=existing.orientation,
+                lens_model=existing.lens_model,
+                is_favorite=existing.is_favorite,
+                is_archived=is_archived,
+            )
+            self.media_assets[relative_path] = updated
+            return updated
 
     def list_media_assets_for_extraction(
         self, *, extraction_statuses: list[str], limit: int
@@ -732,6 +882,8 @@ class InMemoryUploadStateStore:
                 image_height=existing_asset.image_height,
                 orientation=existing_asset.orientation,
                 lens_model=existing_asset.lens_model,
+                is_favorite=existing_asset.is_favorite,
+                is_archived=existing_asset.is_archived,
             )
 
     def list_duplicate_sha_groups(
@@ -1080,8 +1232,22 @@ class PostgresUploadStateStore:
                         provenance_job_name TEXT,
                         provenance_original_filename TEXT,
                         first_cataloged_at_utc TEXT NOT NULL,
-                        last_cataloged_at_utc TEXT NOT NULL
+                        last_cataloged_at_utc TEXT NOT NULL,
+                        is_favorite BOOLEAN NOT NULL DEFAULT FALSE,
+                        is_archived BOOLEAN NOT NULL DEFAULT FALSE
                     );
+                    """
+                )
+                cur.execute(
+                    """
+                    ALTER TABLE api_media_assets
+                    ADD COLUMN IF NOT EXISTS is_favorite BOOLEAN NOT NULL DEFAULT FALSE;
+                    """
+                )
+                cur.execute(
+                    """
+                    ALTER TABLE api_media_assets
+                    ADD COLUMN IF NOT EXISTS is_archived BOOLEAN NOT NULL DEFAULT FALSE;
                     """
                 )
                 cur.execute(
@@ -1434,9 +1600,11 @@ class PostgresUploadStateStore:
                         provenance_job_name,
                         provenance_original_filename,
                         first_cataloged_at_utc,
-                        last_cataloged_at_utc
+                        last_cataloged_at_utc,
+                        is_favorite,
+                        is_archived
                     )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, FALSE, FALSE)
                     ON CONFLICT (relative_path) DO UPDATE
                     SET sha256_hex = EXCLUDED.sha256_hex,
                         size_bytes = EXCLUDED.size_bytes,
@@ -1449,7 +1617,9 @@ class PostgresUploadStateStore:
                             EXCLUDED.provenance_original_filename,
                             api_media_assets.provenance_original_filename
                         ),
-                        last_cataloged_at_utc = EXCLUDED.last_cataloged_at_utc;
+                        last_cataloged_at_utc = EXCLUDED.last_cataloged_at_utc,
+                        is_favorite = api_media_assets.is_favorite,
+                        is_archived = api_media_assets.is_archived;
                     """,
                     (
                         relative_path,
@@ -1471,7 +1641,12 @@ class PostgresUploadStateStore:
         limit: int,
         offset: int,
         extraction_status: str | None = None,
+        preview_status: str | None = None,
         origin_kind: str | None = None,
+        media_type: str | None = None,
+        preview_capability: str | None = None,
+        is_favorite: bool | None = None,
+        is_archived: bool | None = None,
         cataloged_since_utc: str | None = None,
         cataloged_before_utc: str | None = None,
     ) -> tuple[int, list[MediaAssetRecord]]:
@@ -1480,9 +1655,39 @@ class PostgresUploadStateStore:
         if extraction_status is not None:
             where_clauses.append("COALESCE(me.extraction_status, 'pending') = %s")
             params.append(extraction_status)
+        if preview_status is not None:
+            where_clauses.append("COALESCE(mp.preview_status, 'pending') = %s")
+            params.append(preview_status)
         if origin_kind is not None:
             where_clauses.append("ma.origin_kind = %s")
             params.append(origin_kind)
+        if is_favorite is not None:
+            where_clauses.append("ma.is_favorite = %s")
+            params.append(is_favorite)
+        if is_archived is not None:
+            where_clauses.append("ma.is_archived = %s")
+            params.append(is_archived)
+        if media_type is not None:
+            media_type_suffixes = _MEDIA_TYPE_SUFFIXES.get(media_type)
+            if media_type_suffixes is not None:
+                like_clauses = ["LOWER(ma.relative_path) LIKE %s" for _ in media_type_suffixes]
+                where_clauses.append("(" + " OR ".join(like_clauses) + ")")
+                params.extend([f"%{suffix}" for suffix in media_type_suffixes])
+            else:
+                all_suffixes = [suffix for values in _MEDIA_TYPE_SUFFIXES.values() for suffix in values]
+                not_like_clauses = ["LOWER(ma.relative_path) NOT LIKE %s" for _ in all_suffixes]
+                where_clauses.append("(" + " AND ".join(not_like_clauses) + ")")
+                params.extend([f"%{suffix}" for suffix in all_suffixes])
+        if preview_capability is not None:
+            previewable_suffixes = tuple(sorted(_PREVIEWABLE_SUFFIXES))
+            if preview_capability == "previewable":
+                like_clauses = ["LOWER(ma.relative_path) LIKE %s" for _ in previewable_suffixes]
+                where_clauses.append("(" + " OR ".join(like_clauses) + ")")
+                params.extend([f"%{suffix}" for suffix in previewable_suffixes])
+            else:
+                not_like_clauses = ["LOWER(ma.relative_path) NOT LIKE %s" for _ in previewable_suffixes]
+                where_clauses.append("(" + " AND ".join(not_like_clauses) + ")")
+                params.extend([f"%{suffix}" for suffix in previewable_suffixes])
         if cataloged_since_utc is not None:
             where_clauses.append("ma.last_cataloged_at_utc >= %s")
             params.append(cataloged_since_utc)
@@ -1521,6 +1726,8 @@ class PostgresUploadStateStore:
                         ma.provenance_original_filename,
                         ma.first_cataloged_at_utc,
                         ma.last_cataloged_at_utc,
+                        ma.is_favorite,
+                        ma.is_archived,
                         COALESCE(me.extraction_status, 'pending') AS extraction_status,
                         me.last_attempted_at_utc,
                         me.last_succeeded_at_utc,
@@ -1563,24 +1770,26 @@ class PostgresUploadStateStore:
                         provenance_original_filename=str(row[6]) if row[6] is not None else None,
                         first_cataloged_at_utc=str(row[7]),
                         last_cataloged_at_utc=str(row[8]),
-                        extraction_status=str(row[9]),
-                        extraction_last_attempted_at_utc=str(row[10]) if row[10] is not None else None,
-                        extraction_last_succeeded_at_utc=str(row[11]) if row[11] is not None else None,
-                        extraction_last_failed_at_utc=str(row[12]) if row[12] is not None else None,
-                        extraction_failure_detail=str(row[13]) if row[13] is not None else None,
-                        preview_status=str(row[14]),
-                        preview_relative_path=str(row[15]) if row[15] is not None else None,
-                        preview_last_attempted_at_utc=str(row[16]) if row[16] is not None else None,
-                        preview_last_succeeded_at_utc=str(row[17]) if row[17] is not None else None,
-                        preview_last_failed_at_utc=str(row[18]) if row[18] is not None else None,
-                        preview_failure_detail=str(row[19]) if row[19] is not None else None,
-                        capture_timestamp_utc=str(row[20]) if row[20] is not None else None,
-                        camera_make=str(row[21]) if row[21] is not None else None,
-                        camera_model=str(row[22]) if row[22] is not None else None,
-                        image_width=int(row[23]) if row[23] is not None else None,
-                        image_height=int(row[24]) if row[24] is not None else None,
-                        orientation=int(row[25]) if row[25] is not None else None,
-                        lens_model=str(row[26]) if row[26] is not None else None,
+                        is_favorite=bool(row[9]),
+                        is_archived=bool(row[10]),
+                        extraction_status=str(row[11]),
+                        extraction_last_attempted_at_utc=str(row[12]) if row[12] is not None else None,
+                        extraction_last_succeeded_at_utc=str(row[13]) if row[13] is not None else None,
+                        extraction_last_failed_at_utc=str(row[14]) if row[14] is not None else None,
+                        extraction_failure_detail=str(row[15]) if row[15] is not None else None,
+                        preview_status=str(row[16]),
+                        preview_relative_path=str(row[17]) if row[17] is not None else None,
+                        preview_last_attempted_at_utc=str(row[18]) if row[18] is not None else None,
+                        preview_last_succeeded_at_utc=str(row[19]) if row[19] is not None else None,
+                        preview_last_failed_at_utc=str(row[20]) if row[20] is not None else None,
+                        preview_failure_detail=str(row[21]) if row[21] is not None else None,
+                        capture_timestamp_utc=str(row[22]) if row[22] is not None else None,
+                        camera_make=str(row[23]) if row[23] is not None else None,
+                        camera_model=str(row[24]) if row[24] is not None else None,
+                        image_width=int(row[25]) if row[25] is not None else None,
+                        image_height=int(row[26]) if row[26] is not None else None,
+                        orientation=int(row[27]) if row[27] is not None else None,
+                        lens_model=str(row[28]) if row[28] is not None else None,
                     )
                     for row in rows
                 ]
@@ -1601,6 +1810,8 @@ class PostgresUploadStateStore:
                         ma.provenance_original_filename,
                         ma.first_cataloged_at_utc,
                         ma.last_cataloged_at_utc,
+                        ma.is_favorite,
+                        ma.is_archived,
                         COALESCE(me.extraction_status, 'pending') AS extraction_status,
                         me.last_attempted_at_utc,
                         me.last_succeeded_at_utc,
@@ -1642,25 +1853,67 @@ class PostgresUploadStateStore:
                     provenance_original_filename=str(row[6]) if row[6] is not None else None,
                     first_cataloged_at_utc=str(row[7]),
                     last_cataloged_at_utc=str(row[8]),
-                    extraction_status=str(row[9]),
-                    extraction_last_attempted_at_utc=str(row[10]) if row[10] is not None else None,
-                    extraction_last_succeeded_at_utc=str(row[11]) if row[11] is not None else None,
-                    extraction_last_failed_at_utc=str(row[12]) if row[12] is not None else None,
-                    extraction_failure_detail=str(row[13]) if row[13] is not None else None,
-                    preview_status=str(row[14]),
-                    preview_relative_path=str(row[15]) if row[15] is not None else None,
-                    preview_last_attempted_at_utc=str(row[16]) if row[16] is not None else None,
-                    preview_last_succeeded_at_utc=str(row[17]) if row[17] is not None else None,
-                    preview_last_failed_at_utc=str(row[18]) if row[18] is not None else None,
-                    preview_failure_detail=str(row[19]) if row[19] is not None else None,
-                    capture_timestamp_utc=str(row[20]) if row[20] is not None else None,
-                    camera_make=str(row[21]) if row[21] is not None else None,
-                    camera_model=str(row[22]) if row[22] is not None else None,
-                    image_width=int(row[23]) if row[23] is not None else None,
-                    image_height=int(row[24]) if row[24] is not None else None,
-                    orientation=int(row[25]) if row[25] is not None else None,
-                    lens_model=str(row[26]) if row[26] is not None else None,
+                    is_favorite=bool(row[9]),
+                    is_archived=bool(row[10]),
+                    extraction_status=str(row[11]),
+                    extraction_last_attempted_at_utc=str(row[12]) if row[12] is not None else None,
+                    extraction_last_succeeded_at_utc=str(row[13]) if row[13] is not None else None,
+                    extraction_last_failed_at_utc=str(row[14]) if row[14] is not None else None,
+                    extraction_failure_detail=str(row[15]) if row[15] is not None else None,
+                    preview_status=str(row[16]),
+                    preview_relative_path=str(row[17]) if row[17] is not None else None,
+                    preview_last_attempted_at_utc=str(row[18]) if row[18] is not None else None,
+                    preview_last_succeeded_at_utc=str(row[19]) if row[19] is not None else None,
+                    preview_last_failed_at_utc=str(row[20]) if row[20] is not None else None,
+                    preview_failure_detail=str(row[21]) if row[21] is not None else None,
+                    capture_timestamp_utc=str(row[22]) if row[22] is not None else None,
+                    camera_make=str(row[23]) if row[23] is not None else None,
+                    camera_model=str(row[24]) if row[24] is not None else None,
+                    image_width=int(row[25]) if row[25] is not None else None,
+                    image_height=int(row[26]) if row[26] is not None else None,
+                    orientation=int(row[27]) if row[27] is not None else None,
+                    lens_model=str(row[28]) if row[28] is not None else None,
                 )
+
+    def set_media_asset_favorite(
+        self, *, relative_path: str, is_favorite: bool, updated_at_utc: str
+    ) -> MediaAssetRecord | None:
+        del updated_at_utc
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE api_media_assets
+                    SET is_favorite = %s
+                    WHERE relative_path = %s;
+                    """,
+                    (is_favorite, relative_path),
+                )
+                if cur.rowcount <= 0:
+                    conn.commit()
+                    return None
+            conn.commit()
+        return self.get_media_asset_by_path(relative_path)
+
+    def set_media_asset_archived(
+        self, *, relative_path: str, is_archived: bool, updated_at_utc: str
+    ) -> MediaAssetRecord | None:
+        del updated_at_utc
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE api_media_assets
+                    SET is_archived = %s
+                    WHERE relative_path = %s;
+                    """,
+                    (is_archived, relative_path),
+                )
+                if cur.rowcount <= 0:
+                    conn.commit()
+                    return None
+            conn.commit()
+        return self.get_media_asset_by_path(relative_path)
 
     def list_media_assets_for_extraction(
         self, *, extraction_statuses: list[str], limit: int
@@ -1681,6 +1934,8 @@ class PostgresUploadStateStore:
                         ma.provenance_original_filename,
                         ma.first_cataloged_at_utc,
                         ma.last_cataloged_at_utc,
+                        ma.is_favorite,
+                        ma.is_archived,
                         COALESCE(me.extraction_status, 'pending') AS extraction_status,
                         me.last_attempted_at_utc,
                         me.last_succeeded_at_utc,
@@ -1722,24 +1977,26 @@ class PostgresUploadStateStore:
                         provenance_original_filename=str(row[6]) if row[6] is not None else None,
                         first_cataloged_at_utc=str(row[7]),
                         last_cataloged_at_utc=str(row[8]),
-                        extraction_status=str(row[9]),
-                        extraction_last_attempted_at_utc=str(row[10]) if row[10] is not None else None,
-                        extraction_last_succeeded_at_utc=str(row[11]) if row[11] is not None else None,
-                        extraction_last_failed_at_utc=str(row[12]) if row[12] is not None else None,
-                        extraction_failure_detail=str(row[13]) if row[13] is not None else None,
-                        preview_status=str(row[14]),
-                        preview_relative_path=str(row[15]) if row[15] is not None else None,
-                        preview_last_attempted_at_utc=str(row[16]) if row[16] is not None else None,
-                        preview_last_succeeded_at_utc=str(row[17]) if row[17] is not None else None,
-                        preview_last_failed_at_utc=str(row[18]) if row[18] is not None else None,
-                        preview_failure_detail=str(row[19]) if row[19] is not None else None,
-                        capture_timestamp_utc=str(row[20]) if row[20] is not None else None,
-                        camera_make=str(row[21]) if row[21] is not None else None,
-                        camera_model=str(row[22]) if row[22] is not None else None,
-                        image_width=int(row[23]) if row[23] is not None else None,
-                        image_height=int(row[24]) if row[24] is not None else None,
-                        orientation=int(row[25]) if row[25] is not None else None,
-                        lens_model=str(row[26]) if row[26] is not None else None,
+                        is_favorite=bool(row[9]),
+                        is_archived=bool(row[10]),
+                        extraction_status=str(row[11]),
+                        extraction_last_attempted_at_utc=str(row[12]) if row[12] is not None else None,
+                        extraction_last_succeeded_at_utc=str(row[13]) if row[13] is not None else None,
+                        extraction_last_failed_at_utc=str(row[14]) if row[14] is not None else None,
+                        extraction_failure_detail=str(row[15]) if row[15] is not None else None,
+                        preview_status=str(row[16]),
+                        preview_relative_path=str(row[17]) if row[17] is not None else None,
+                        preview_last_attempted_at_utc=str(row[18]) if row[18] is not None else None,
+                        preview_last_succeeded_at_utc=str(row[19]) if row[19] is not None else None,
+                        preview_last_failed_at_utc=str(row[20]) if row[20] is not None else None,
+                        preview_failure_detail=str(row[21]) if row[21] is not None else None,
+                        capture_timestamp_utc=str(row[22]) if row[22] is not None else None,
+                        camera_make=str(row[23]) if row[23] is not None else None,
+                        camera_model=str(row[24]) if row[24] is not None else None,
+                        image_width=int(row[25]) if row[25] is not None else None,
+                        image_height=int(row[26]) if row[26] is not None else None,
+                        orientation=int(row[27]) if row[27] is not None else None,
+                        lens_model=str(row[28]) if row[28] is not None else None,
                     )
                     for row in rows
                 ]

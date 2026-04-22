@@ -1,152 +1,269 @@
 {% extends "base.html" %}
+{% from "macros.html" import pager, status_badge %}
 {% set title = "Clients" %}
 {% block content %}
-<section class="panel">
-  <h1 style="margin-top:0;">Client Presence</h1>
-  <p class="muted" style="margin-top:0.25rem;">Showing {{ start_index }}-{{ end_index }} of {{ total }} enrolled clients.</p>
-  <form method="get" action="/clients" class="filter-grid" style="margin: 0.75rem 0 1rem;">
-    <input type="hidden" name="page" value="1">
-    <label>
-      Presence
-      <select name="presence_status">
-        <option value="">all</option>
-        <option value="online" {% if clients_query_state.presence_status == "online" %}selected{% endif %}>online</option>
-        <option value="stale" {% if clients_query_state.presence_status == "stale" %}selected{% endif %}>stale</option>
-        <option value="unknown" {% if clients_query_state.presence_status == "unknown" %}selected{% endif %}>unknown</option>
-      </select>
-    </label>
-    <label>
-      Workload
-      <select name="workload_status">
-        <option value="">all</option>
-        <option value="working" {% if clients_query_state.workload_status == "working" %}selected{% endif %}>working</option>
-        <option value="blocked" {% if clients_query_state.workload_status == "blocked" %}selected{% endif %}>blocked</option>
-        <option value="waiting" {% if clients_query_state.workload_status == "waiting" %}selected{% endif %}>waiting</option>
-        <option value="idle" {% if clients_query_state.workload_status == "idle" %}selected{% endif %}>idle</option>
-      </select>
-    </label>
-    <label>
-      Enrollment
-      <select name="enrollment_status">
-        <option value="">all</option>
-        <option value="approved" {% if clients_query_state.enrollment_status == "approved" %}selected{% endif %}>approved</option>
-        <option value="pending" {% if clients_query_state.enrollment_status == "pending" %}selected{% endif %}>pending</option>
-        <option value="revoked" {% if clients_query_state.enrollment_status == "revoked" %}selected{% endif %}>revoked</option>
-      </select>
-    </label>
-    <label>
-      Sort
-      <select name="sort_by">
-        <option value="last_seen" {% if clients_query_state.sort_by == "last_seen" %}selected{% endif %}>last seen</option>
-        <option value="presence_status" {% if clients_query_state.sort_by == "presence_status" %}selected{% endif %}>presence</option>
-        <option value="workload_status" {% if clients_query_state.sort_by == "workload_status" %}selected{% endif %}>workload</option>
-        <option value="client_id" {% if clients_query_state.sort_by == "client_id" %}selected{% endif %}>client id</option>
-      </select>
-    </label>
-    <label>
-      Order
-      <select name="sort_order">
-        <option value="desc" {% if clients_query_state.sort_order == "desc" %}selected{% endif %}>desc</option>
-        <option value="asc" {% if clients_query_state.sort_order == "asc" %}selected{% endif %}>asc</option>
-      </select>
-    </label>
-    <div class="actions-inline">
-      <button class="primary" type="submit">Apply</button>
-      <a href="/clients">Reset</a>
+<section class="page-hero">
+  <div class="eyebrow text-uppercase text-secondary fw-semibold small mb-2">Primary Surface</div>
+  <h1 class="display-5 fw-semibold mb-2">Client Presence</h1>
+  <p class="lead text-secondary mb-0">Compact operator list for enrollment, availability, and current workload.</p>
+</section>
+
+<section class="row g-3 mb-4">
+  <div class="col-6 col-xl">
+    <div class="card kpi-card h-100">
+      <div class="card-body">
+        <div class="small text-secondary text-uppercase fw-semibold">Online</div>
+        <div class="display-6 fw-semibold mb-0">{{ client_summary.online }}</div>
+      </div>
     </div>
-  </form>
-
-  {% if clients %}
-  <table>
-    <thead>
-      <tr>
-        <th>Client</th>
-        <th>Status</th>
-        <th>First Seen</th>
-        <th>Last Enrolled</th>
-        <th>Approved At</th>
-        <th>Revoked At</th>
-        <th>Token</th>
-        <th>Presence</th>
-        <th>Daemon State</th>
-        <th>Workload</th>
-        <th>Active Job</th>
-        <th>Backoff/Auth/Error</th>
-        <th>Actions</th>
-      </tr>
-    </thead>
-    <tbody>
-      {% for client in clients %}
-      <tr>
-        <td>
-          <div class="stack">
-            <strong>{{ client.display_name }}</strong>
-            <span class="mono">{{ client.client_id }}</span>
-          </div>
-        </td>
-        <td><span class="badge {{ client.enrollment_status }}">{{ client.enrollment_status }}</span></td>
-        <td class="mono">{{ client.first_seen_at_utc }}</td>
-        <td class="mono">{{ client.last_enrolled_at_utc }}</td>
-        <td class="mono">{{ client.approved_at_utc or "-" }}</td>
-        <td class="mono">{{ client.revoked_at_utc or "-" }}</td>
-        <td class="mono">{{ "issued" if client.auth_token else "-" }}</td>
-        <td>
-          <span class="badge {{ client.heartbeat_presence_status }}">{{ client.heartbeat_presence_status }}</span>
-          <div class="mono">{{ client.heartbeat_last_seen_at_utc or "n/a" }}</div>
-        </td>
-        <td class="mono">{{ client.heartbeat_daemon_state or "n/a" }}</td>
-        <td>{{ client.heartbeat_workload_status or "n/a" }}</td>
-        <td class="mono">{{ client.heartbeat_active_job_summary or "n/a" }}</td>
-        <td class="mono">
-          {% if client.heartbeat_retry_backoff_summary %}
-          <div>{{ client.heartbeat_retry_backoff_summary }}</div>
-          {% endif %}
-          {% if client.heartbeat_auth_block_reason %}
-          <div>auth: {{ client.heartbeat_auth_block_reason }}</div>
-          {% endif %}
-          {% if client.heartbeat_recent_error_summary %}
-          <div>{{ client.heartbeat_recent_error_summary }}</div>
-          {% endif %}
-          {% if not client.heartbeat_retry_backoff_summary and not client.heartbeat_auth_block_reason and not client.heartbeat_recent_error_summary %}
-          <div>n/a</div>
-          {% endif %}
-        </td>
-        <td>
-          <div class="actions-inline">
-            <form method="post" action="/clients/actions/approve">
-              <input type="hidden" name="client_id" value="{{ client.client_id }}">
-              <input type="hidden" name="page" value="{{ page }}">
-              <input type="hidden" name="presence_status" value="{{ clients_query_state.presence_status }}">
-              <input type="hidden" name="workload_status" value="{{ clients_query_state.workload_status }}">
-              <input type="hidden" name="enrollment_status" value="{{ clients_query_state.enrollment_status }}">
-              <input type="hidden" name="sort_by" value="{{ clients_query_state.sort_by }}">
-              <input type="hidden" name="sort_order" value="{{ clients_query_state.sort_order }}">
-              <button class="primary" type="submit">Approve</button>
-            </form>
-            <form method="post" action="/clients/actions/revoke">
-              <input type="hidden" name="client_id" value="{{ client.client_id }}">
-              <input type="hidden" name="page" value="{{ page }}">
-              <input type="hidden" name="presence_status" value="{{ clients_query_state.presence_status }}">
-              <input type="hidden" name="workload_status" value="{{ clients_query_state.workload_status }}">
-              <input type="hidden" name="enrollment_status" value="{{ clients_query_state.enrollment_status }}">
-              <input type="hidden" name="sort_by" value="{{ clients_query_state.sort_by }}">
-              <input type="hidden" name="sort_order" value="{{ clients_query_state.sort_order }}">
-              <button type="submit">Revoke</button>
-            </form>
-          </div>
-        </td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
-  {% else %}
-  <p class="muted">No enrolled clients yet.</p>
-  {% endif %}
-
-  <div class="pager">
-    {% if previous_url %}<a href="{{ previous_url }}">Previous</a>{% endif %}
-    <span class="muted">Page {{ page }}</span>
-    {% if next_url %}<a href="{{ next_url }}">Next</a>{% endif %}
+  </div>
+  <div class="col-6 col-xl">
+    <div class="card kpi-card h-100">
+      <div class="card-body">
+        <div class="small text-secondary text-uppercase fw-semibold">Stale</div>
+        <div class="display-6 fw-semibold mb-0">{{ client_summary.stale }}</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-6 col-xl">
+    <div class="card kpi-card h-100">
+      <div class="card-body">
+        <div class="small text-secondary text-uppercase fw-semibold">Pending approval</div>
+        <div class="display-6 fw-semibold mb-0">{{ client_summary.pending }}</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-6 col-xl">
+    <div class="card kpi-card h-100">
+      <div class="card-body">
+        <div class="small text-secondary text-uppercase fw-semibold">Working</div>
+        <div class="display-6 fw-semibold mb-0">{{ client_summary.working }}</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-6 col-xl">
+    <div class="card kpi-card h-100">
+      <div class="card-body">
+        <div class="small text-secondary text-uppercase fw-semibold">Blocked</div>
+        <div class="display-6 fw-semibold mb-0">{{ client_summary.blocked }}</div>
+      </div>
+    </div>
   </div>
 </section>
+
+<section class="card surface-card filter-card mb-4">
+  <div class="card-body">
+    <div class="d-flex flex-wrap justify-content-between align-items-center gap-3 mb-3">
+      <div>
+        <h2 class="h4 mb-1">Filter Clients</h2>
+        <p class="text-secondary mb-0">Showing {{ start_index }}-{{ end_index }} of {{ total }} enrolled clients.</p>
+      </div>
+    </div>
+    <form method="get" action="/clients" class="row g-2 align-items-end">
+      <input type="hidden" name="page" value="1">
+      <div class="col-sm-6 col-xl-2">
+        <label class="form-label" for="presence_status">Presence</label>
+        <select id="presence_status" class="form-select" name="presence_status">
+          <option value="">all</option>
+          <option value="online" {% if clients_query_state.presence_status == "online" %}selected{% endif %}>online</option>
+          <option value="stale" {% if clients_query_state.presence_status == "stale" %}selected{% endif %}>stale</option>
+          <option value="unknown" {% if clients_query_state.presence_status == "unknown" %}selected{% endif %}>unknown</option>
+        </select>
+      </div>
+      <div class="col-sm-6 col-xl-2">
+        <label class="form-label" for="workload_status">Workload</label>
+        <select id="workload_status" class="form-select" name="workload_status">
+          <option value="">all</option>
+          <option value="working" {% if clients_query_state.workload_status == "working" %}selected{% endif %}>working</option>
+          <option value="blocked" {% if clients_query_state.workload_status == "blocked" %}selected{% endif %}>blocked</option>
+          <option value="waiting" {% if clients_query_state.workload_status == "waiting" %}selected{% endif %}>waiting</option>
+          <option value="idle" {% if clients_query_state.workload_status == "idle" %}selected{% endif %}>idle</option>
+        </select>
+      </div>
+      <div class="col-sm-6 col-xl-2">
+        <label class="form-label" for="enrollment_status">Enrollment</label>
+        <select id="enrollment_status" class="form-select" name="enrollment_status">
+          <option value="">all</option>
+          <option value="approved" {% if clients_query_state.enrollment_status == "approved" %}selected{% endif %}>approved</option>
+          <option value="pending" {% if clients_query_state.enrollment_status == "pending" %}selected{% endif %}>pending</option>
+          <option value="revoked" {% if clients_query_state.enrollment_status == "revoked" %}selected{% endif %}>revoked</option>
+        </select>
+      </div>
+      <div class="col-sm-6 col-xl-2">
+        <label class="form-label" for="sort_by">Sort</label>
+        <select id="sort_by" class="form-select" name="sort_by">
+          <option value="last_seen" {% if clients_query_state.sort_by == "last_seen" %}selected{% endif %}>last seen</option>
+          <option value="presence_status" {% if clients_query_state.sort_by == "presence_status" %}selected{% endif %}>presence</option>
+          <option value="workload_status" {% if clients_query_state.sort_by == "workload_status" %}selected{% endif %}>workload</option>
+          <option value="client_id" {% if clients_query_state.sort_by == "client_id" %}selected{% endif %}>client id</option>
+        </select>
+      </div>
+      <div class="col-sm-6 col-xl-2">
+        <label class="form-label" for="sort_order">Order</label>
+        <select id="sort_order" class="form-select" name="sort_order">
+          <option value="desc" {% if clients_query_state.sort_order == "desc" %}selected{% endif %}>desc</option>
+          <option value="asc" {% if clients_query_state.sort_order == "asc" %}selected{% endif %}>asc</option>
+        </select>
+      </div>
+      <div class="col-sm-6 col-xl-2 d-flex gap-2">
+        <button class="btn btn-primary w-100" type="submit">Apply</button>
+        <a class="btn btn-outline-secondary" href="/clients">Reset</a>
+      </div>
+    </form>
+  </div>
+</section>
+
+{% if clients %}
+<section class="d-grid gap-3 d-lg-none">
+  {% for client in clients %}
+  <article class="card asset-card">
+    <div class="card-body">
+      <div class="d-flex justify-content-between align-items-start gap-3 mb-3">
+        <div>
+          <h2 class="h4 mb-1">{{ client.display_name }}</h2>
+          <div class="mono text-secondary">{{ client.client_id }}</div>
+        </div>
+        <div class="d-flex flex-wrap gap-2 justify-content-end">
+          {{ status_badge(client.enrollment_status) }}
+          {{ status_badge(client.heartbeat_presence_status) }}
+          {{ status_badge(client.heartbeat_workload_status or 'idle', client.heartbeat_workload_status or 'idle') }}
+        </div>
+      </div>
+      <dl class="row mb-3">
+        <dt class="col-4 text-secondary">Last seen</dt>
+        <dd class="col-8 mono">{{ client.heartbeat_last_seen_at_utc or "n/a" }}</dd>
+        <dt class="col-4 text-secondary">Daemon</dt>
+        <dd class="col-8 mono">{{ client.heartbeat_daemon_state or "n/a" }}</dd>
+        <dt class="col-4 text-secondary">Active job</dt>
+        <dd class="col-8 small">{{ client.heartbeat_active_job_summary or "n/a" }}</dd>
+      </dl>
+      <details>
+        <summary class="small fw-semibold text-primary">Technical detail</summary>
+        <div class="pt-3 small text-secondary d-grid gap-2">
+          <div><strong>First seen:</strong> <span class="mono">{{ client.first_seen_at_utc }}</span></div>
+          <div><strong>Last enrolled:</strong> <span class="mono">{{ client.last_enrolled_at_utc }}</span></div>
+          <div><strong>Approved at:</strong> <span class="mono">{{ client.approved_at_utc or "-" }}</span></div>
+          <div><strong>Revoked at:</strong> <span class="mono">{{ client.revoked_at_utc or "-" }}</span></div>
+          <div><strong>Token:</strong> {{ "issued" if client.auth_token else "-" }}</div>
+          <div><strong>Retry/backoff:</strong> {{ client.heartbeat_retry_backoff_summary or "n/a" }}</div>
+          <div><strong>Auth block:</strong> {{ client.heartbeat_auth_block_reason or "n/a" }}</div>
+          <div><strong>Recent error:</strong> {{ client.heartbeat_recent_error_summary or "n/a" }}</div>
+        </div>
+      </details>
+      <div class="d-flex flex-wrap gap-2 mt-3">
+        <form method="post" action="/clients/actions/approve" class="inline-form">
+          <input type="hidden" name="client_id" value="{{ client.client_id }}">
+          <input type="hidden" name="page" value="{{ page }}">
+          <input type="hidden" name="presence_status" value="{{ clients_query_state.presence_status }}">
+          <input type="hidden" name="workload_status" value="{{ clients_query_state.workload_status }}">
+          <input type="hidden" name="enrollment_status" value="{{ clients_query_state.enrollment_status }}">
+          <input type="hidden" name="sort_by" value="{{ clients_query_state.sort_by }}">
+          <input type="hidden" name="sort_order" value="{{ clients_query_state.sort_order }}">
+          <button class="btn btn-primary btn-sm" type="submit">Approve</button>
+        </form>
+        <form method="post" action="/clients/actions/revoke" class="inline-form">
+          <input type="hidden" name="client_id" value="{{ client.client_id }}">
+          <input type="hidden" name="page" value="{{ page }}">
+          <input type="hidden" name="presence_status" value="{{ clients_query_state.presence_status }}">
+          <input type="hidden" name="workload_status" value="{{ clients_query_state.workload_status }}">
+          <input type="hidden" name="enrollment_status" value="{{ clients_query_state.enrollment_status }}">
+          <input type="hidden" name="sort_by" value="{{ clients_query_state.sort_by }}">
+          <input type="hidden" name="sort_order" value="{{ clients_query_state.sort_order }}">
+          <button class="btn btn-outline-secondary btn-sm" type="submit">Revoke</button>
+        </form>
+      </div>
+    </div>
+  </article>
+  {% endfor %}
+</section>
+
+<section class="card surface-card d-none d-lg-block">
+  <div class="table-responsive">
+    <table class="table table-hover align-middle mb-0 table-compact">
+      <thead>
+        <tr>
+          <th>Client</th>
+          <th>Enrollment</th>
+          <th>Presence</th>
+          <th>Workload</th>
+          <th>Last Seen (UTC)</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for client in clients %}
+        <tr>
+          <td>
+            <div class="fw-semibold">{{ client.display_name }}</div>
+            <div class="mono text-secondary">{{ client.client_id }}</div>
+            {% if client.heartbeat_active_job_summary %}
+            <div class="small text-secondary mt-1">{{ client.heartbeat_active_job_summary }}</div>
+            {% endif %}
+            <details class="mt-2">
+              <summary class="small fw-semibold text-primary">Technical detail</summary>
+              <div class="pt-2 small text-secondary d-grid gap-1">
+                <div><strong>First seen:</strong> <span class="mono">{{ client.first_seen_at_utc }}</span></div>
+                <div><strong>Last enrolled:</strong> <span class="mono">{{ client.last_enrolled_at_utc }}</span></div>
+                <div><strong>Approved at:</strong> <span class="mono">{{ client.approved_at_utc or "-" }}</span></div>
+                <div><strong>Revoked at:</strong> <span class="mono">{{ client.revoked_at_utc or "-" }}</span></div>
+                <div><strong>Token:</strong> {{ "issued" if client.auth_token else "-" }}</div>
+                <div><strong>Daemon:</strong> <span class="mono">{{ client.heartbeat_daemon_state or "n/a" }}</span></div>
+                <div><strong>Retry/backoff:</strong> {{ client.heartbeat_retry_backoff_summary or "n/a" }}</div>
+                <div><strong>Auth block:</strong> {{ client.heartbeat_auth_block_reason or "n/a" }}</div>
+                <div><strong>Recent error:</strong> {{ client.heartbeat_recent_error_summary or "n/a" }}</div>
+              </div>
+            </details>
+          </td>
+          <td>{{ status_badge(client.enrollment_status) }}</td>
+          <td>
+            <div class="d-flex flex-column gap-1">
+              {{ status_badge(client.heartbeat_presence_status) }}
+              <span class="mono text-secondary small">{{ client.heartbeat_last_seen_at_utc or "n/a" }}</span>
+            </div>
+          </td>
+          <td>
+            <div class="d-flex flex-column gap-1">
+              {{ status_badge(client.heartbeat_workload_status or 'idle', client.heartbeat_workload_status or 'idle') }}
+              <span class="mono text-secondary small">{{ client.heartbeat_daemon_state or "n/a" }}</span>
+            </div>
+          </td>
+          <td class="mono">{{ client.heartbeat_last_seen_at_utc or "n/a" }}</td>
+          <td>
+            <div class="d-flex flex-wrap gap-2">
+              <form method="post" action="/clients/actions/approve" class="inline-form">
+                <input type="hidden" name="client_id" value="{{ client.client_id }}">
+                <input type="hidden" name="page" value="{{ page }}">
+                <input type="hidden" name="presence_status" value="{{ clients_query_state.presence_status }}">
+                <input type="hidden" name="workload_status" value="{{ clients_query_state.workload_status }}">
+                <input type="hidden" name="enrollment_status" value="{{ clients_query_state.enrollment_status }}">
+                <input type="hidden" name="sort_by" value="{{ clients_query_state.sort_by }}">
+                <input type="hidden" name="sort_order" value="{{ clients_query_state.sort_order }}">
+                <button class="btn btn-primary btn-sm" type="submit">Approve</button>
+              </form>
+              <form method="post" action="/clients/actions/revoke" class="inline-form">
+                <input type="hidden" name="client_id" value="{{ client.client_id }}">
+                <input type="hidden" name="page" value="{{ page }}">
+                <input type="hidden" name="presence_status" value="{{ clients_query_state.presence_status }}">
+                <input type="hidden" name="workload_status" value="{{ clients_query_state.workload_status }}">
+                <input type="hidden" name="enrollment_status" value="{{ clients_query_state.enrollment_status }}">
+                <input type="hidden" name="sort_by" value="{{ clients_query_state.sort_by }}">
+                <input type="hidden" name="sort_order" value="{{ clients_query_state.sort_order }}">
+                <button class="btn btn-outline-secondary btn-sm" type="submit">Revoke</button>
+              </form>
+            </div>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{{ pager(previous_url, next_url, page) }}
+{% else %}
+<section class="card surface-card">
+  <div class="card-body">
+    <p class="text-secondary mb-0">No enrolled clients yet.</p>
+  </div>
+</section>
+{% endif %}
 {% endblock %}

@@ -1,143 +1,228 @@
 {% extends "base.html" %}
-{% set title = "Catalog" %}
+{% from "macros.html" import pager, status_badge %}
+{% set title = "Library" %}
 {% block content %}
-<section>
-  <h1>Media Catalog</h1>
-  <p class="muted">Operator inspection for extracted metadata state and outcomes.</p>
-</section>
-
-<section class="panel" style="margin-bottom: 0.9rem;">
-  <h2 style="margin-top: 0;">Catalog Filters</h2>
-  <form method="get" action="/catalog" class="actions-inline">
-    <label for="extraction_status">Extraction:</label>
-    <select id="extraction_status" name="extraction_status">
-      <option value="" {% if not extraction_status_filter %}selected{% endif %}>All</option>
-      <option value="pending" {% if extraction_status_filter == "pending" %}selected{% endif %}>pending</option>
-      <option value="succeeded" {% if extraction_status_filter == "succeeded" %}selected{% endif %}>succeeded</option>
-      <option value="failed" {% if extraction_status_filter == "failed" %}selected{% endif %}>failed</option>
-    </select>
-    <label for="origin_kind">Origin:</label>
-    <select id="origin_kind" name="origin_kind">
-      <option value="" {% if not origin_kind_filter %}selected{% endif %}>All</option>
-      <option value="uploaded" {% if origin_kind_filter == "uploaded" %}selected{% endif %}>uploaded</option>
-      <option value="indexed" {% if origin_kind_filter == "indexed" %}selected{% endif %}>indexed</option>
-    </select>
-    <label for="cataloged_since_utc">Cataloged Since (UTC):</label>
-    <input id="cataloged_since_utc" type="text" name="cataloged_since_utc" value="{{ cataloged_since_filter }}">
-    <label for="cataloged_before_utc">Cataloged Before (UTC):</label>
-    <input id="cataloged_before_utc" type="text" name="cataloged_before_utc" value="{{ cataloged_before_filter }}">
-    <button class="primary" type="submit">Apply</button>
-    <a href="/catalog" class="muted">Clear</a>
-  </form>
-</section>
-
-<section class="panel" style="margin-bottom: 0.9rem;">
-  <h2 style="margin-top: 0;">Extraction Actions</h2>
-  <p class="muted">Run an explicit bounded backfill for extraction states.</p>
-  <form method="post" action="/catalog/actions/backfill" class="actions-inline">
-    <input type="hidden" name="page" value="{{ page }}">
-    <input type="hidden" name="extraction_status" value="{{ extraction_status_filter }}">
-    <input type="hidden" name="origin_kind" value="{{ origin_kind_filter }}">
-    <input type="hidden" name="cataloged_since_utc" value="{{ cataloged_since_filter }}">
-    <input type="hidden" name="cataloged_before_utc" value="{{ cataloged_before_filter }}">
-    <label for="target_statuses">Statuses:</label>
-    <input id="target_statuses" type="text" name="target_statuses" value="pending,failed">
-    <label for="backfill_limit">Limit:</label>
-    <input id="backfill_limit" type="number" name="limit" min="1" max="500" value="100">
-    <button class="primary" type="submit">Run Backfill</button>
-  </form>
-</section>
-
-<section class="panel">
-  {% if assets %}
-  <p class="muted">Showing {{ start_index }}-{{ end_index }} of {{ total }} cataloged assets.</p>
-  <table>
-    <thead>
-      <tr>
-        <th>Relative Path</th>
-        <th>Origin</th>
-        <th>SHA256</th>
-        <th>Size</th>
-        <th>Extraction</th>
-        <th>Preview</th>
-        <th>Metadata</th>
-        <th>Actions</th>
-      </tr>
-    </thead>
-    <tbody>
-      {% for asset in assets %}
-      <tr>
-        <td class="mono">{{ asset.relative_path }}</td>
-        <td>{{ asset.origin_kind }}<br><span class="muted">last: {{ asset.last_observed_origin_kind }}</span></td>
-        <td class="mono">{{ asset.sha256_hex }}</td>
-        <td>{{ asset.size_human }}</td>
-        <td>
-          <span class="badge {{ asset.extraction_status }}">{{ asset.extraction_status }}</span>
-          <div class="stack mono">
-            <span>attempted: {{ asset.extraction_last_attempted_at_utc or "n/a" }}</span>
-            <span>succeeded: {{ asset.extraction_last_succeeded_at_utc or "n/a" }}</span>
-            <span>failed: {{ asset.extraction_last_failed_at_utc or "n/a" }}</span>
-          </div>
-          {% if asset.extraction_status == "failed" and asset.extraction_failure_detail %}
-          <details>
-            <summary>Failure detail</summary>
-            <div class="mono">{{ asset.extraction_failure_detail }}</div>
-          </details>
-          {% endif %}
-        </td>
-        <td>
-          <span class="badge {{ asset.preview_status }}">{{ asset.preview_status }}</span>
-          <div class="stack mono">
-            <span>attempted: {{ asset.preview_last_attempted_at_utc or "n/a" }}</span>
-            <span>succeeded: {{ asset.preview_last_succeeded_at_utc or "n/a" }}</span>
-            <span>failed: {{ asset.preview_last_failed_at_utc or "n/a" }}</span>
-          </div>
-          {% if asset.preview_status == "failed" and asset.preview_failure_detail %}
-          <details>
-            <summary>Failure detail</summary>
-            <div class="mono">{{ asset.preview_failure_detail }}</div>
-          </details>
-          {% endif %}
-        </td>
-        <td>
-          {% if asset.extraction_status == "succeeded" and asset.metadata_summary %}
-          <div class="mono">{{ asset.metadata_summary }}</div>
-          {% elif asset.extraction_status == "succeeded" %}
-          <span class="muted">No extracted fields available.</span>
-          {% elif asset.extraction_status == "pending" %}
-          <span class="muted">Not attempted yet.</span>
-          {% else %}
-          <span class="muted">Extraction failed.</span>
-          {% endif %}
-        </td>
-        <td>
-          <a href="/catalog/asset?relative_path={{ asset.relative_path | urlencode }}&page={{ page }}&extraction_status={{ extraction_status_filter | urlencode }}&origin_kind={{ origin_kind_filter | urlencode }}&cataloged_since_utc={{ cataloged_since_filter | urlencode }}&cataloged_before_utc={{ cataloged_before_filter | urlencode }}">Inspect</a>
-          <br>
-          <form method="post" action="/catalog/actions/retry">
-            <input type="hidden" name="page" value="{{ page }}">
-            <input type="hidden" name="extraction_status" value="{{ extraction_status_filter }}">
-            <input type="hidden" name="origin_kind" value="{{ origin_kind_filter }}">
-            <input type="hidden" name="cataloged_since_utc" value="{{ cataloged_since_filter }}">
-            <input type="hidden" name="cataloged_before_utc" value="{{ cataloged_before_filter }}">
-            <input type="hidden" name="relative_path" value="{{ asset.relative_path }}">
-            <button type="submit">Retry</button>
-          </form>
-        </td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
-  <div class="pager">
-    {% if has_previous %}
-    <a href="/catalog?page={{ page - 1 }}{{ filter_query_suffix }}">Previous</a>
-    {% endif %}
-    <span class="muted">Page {{ page }}</span>
-    {% if has_next %}
-    <a href="/catalog?page={{ page + 1 }}{{ filter_query_suffix }}">Next</a>
-    {% endif %}
+<section class="page-hero">
+  <div class="d-flex flex-column flex-lg-row justify-content-between gap-3 align-items-lg-end">
+    <div>
+      <div class="eyebrow text-uppercase text-secondary fw-semibold small mb-2">Primary Surface</div>
+      <h1 class="display-5 fw-semibold mb-2">Media Library</h1>
+      <p class="lead text-secondary mb-0">Compact browse view for previews, metadata, and day-to-day organization controls.</p>
+    </div>
+    <button
+      class="btn btn-outline-secondary d-lg-none"
+      type="button"
+      data-bs-toggle="collapse"
+      data-bs-target="#catalogFilters"
+      aria-expanded="false"
+      aria-controls="catalogFilters"
+    >
+      Toggle Filters
+    </button>
   </div>
+</section>
+
+<section class="card surface-card filter-card mb-4">
+  <div class="collapse d-lg-block" id="catalogFilters">
+    <div class="card-body">
+      <div class="d-flex flex-wrap justify-content-between align-items-center gap-3 mb-3">
+        <div>
+          <h2 class="h4 mb-1">Filter Library</h2>
+          <p class="text-secondary mb-0">Showing {{ start_index }}-{{ end_index }} of {{ total }} cataloged assets.</p>
+        </div>
+      </div>
+      <form method="get" action="/catalog" class="row g-2 align-items-end">
+        <div class="col-sm-6 col-xl-2">
+          <label class="form-label" for="extraction_status">Extraction</label>
+          <select id="extraction_status" class="form-select" name="extraction_status">
+            <option value="" {% if not extraction_status_filter %}selected{% endif %}>All</option>
+            <option value="pending" {% if extraction_status_filter == "pending" %}selected{% endif %}>pending</option>
+            <option value="succeeded" {% if extraction_status_filter == "succeeded" %}selected{% endif %}>succeeded</option>
+            <option value="failed" {% if extraction_status_filter == "failed" %}selected{% endif %}>failed</option>
+          </select>
+        </div>
+        <div class="col-sm-6 col-xl-2">
+          <label class="form-label" for="preview_status">Preview</label>
+          <select id="preview_status" class="form-select" name="preview_status">
+            <option value="" {% if not preview_status_filter %}selected{% endif %}>All</option>
+            <option value="pending" {% if preview_status_filter == "pending" %}selected{% endif %}>pending</option>
+            <option value="succeeded" {% if preview_status_filter == "succeeded" %}selected{% endif %}>succeeded</option>
+            <option value="failed" {% if preview_status_filter == "failed" %}selected{% endif %}>failed</option>
+          </select>
+        </div>
+        <div class="col-sm-6 col-xl-2">
+          <label class="form-label" for="origin_kind">Origin</label>
+          <select id="origin_kind" class="form-select" name="origin_kind">
+            <option value="" {% if not origin_kind_filter %}selected{% endif %}>All</option>
+            <option value="uploaded" {% if origin_kind_filter == "uploaded" %}selected{% endif %}>uploaded</option>
+            <option value="indexed" {% if origin_kind_filter == "indexed" %}selected{% endif %}>indexed</option>
+          </select>
+        </div>
+        <div class="col-sm-6 col-xl-2">
+          <label class="form-label" for="media_type">Media Type</label>
+          <select id="media_type" class="form-select" name="media_type">
+            <option value="" {% if not media_type_filter %}selected{% endif %}>All</option>
+            <option value="jpeg" {% if media_type_filter == "jpeg" %}selected{% endif %}>jpeg</option>
+            <option value="png" {% if media_type_filter == "png" %}selected{% endif %}>png</option>
+            <option value="heic" {% if media_type_filter == "heic" %}selected{% endif %}>heic</option>
+            <option value="raw" {% if media_type_filter == "raw" %}selected{% endif %}>raw</option>
+            <option value="video" {% if media_type_filter == "video" %}selected{% endif %}>video</option>
+            <option value="other" {% if media_type_filter == "other" %}selected{% endif %}>other</option>
+          </select>
+        </div>
+        <div class="col-sm-6 col-xl-2">
+          <label class="form-label" for="preview_capability">Preview Capability</label>
+          <select id="preview_capability" class="form-select" name="preview_capability">
+            <option value="" {% if not preview_capability_filter %}selected{% endif %}>All</option>
+            <option value="previewable" {% if preview_capability_filter == "previewable" %}selected{% endif %}>previewable</option>
+            <option value="not_previewable" {% if preview_capability_filter == "not_previewable" %}selected{% endif %}>not_previewable</option>
+          </select>
+        </div>
+        <div class="col-sm-6 col-xl-2">
+          <label class="form-label" for="is_favorite">Favorite</label>
+          <select id="is_favorite" class="form-select" name="is_favorite">
+            <option value="" {% if not is_favorite_filter %}selected{% endif %}>All</option>
+            <option value="true" {% if is_favorite_filter == "true" %}selected{% endif %}>favorite only</option>
+            <option value="false" {% if is_favorite_filter == "false" %}selected{% endif %}>not favorite</option>
+          </select>
+        </div>
+        <div class="col-sm-6 col-xl-2">
+          <label class="form-label" for="is_archived">Archived</label>
+          <select id="is_archived" class="form-select" name="is_archived">
+            <option value="" {% if not is_archived_filter %}selected{% endif %}>All</option>
+            <option value="true" {% if is_archived_filter == "true" %}selected{% endif %}>archived only</option>
+            <option value="false" {% if is_archived_filter == "false" %}selected{% endif %}>visible only</option>
+          </select>
+        </div>
+        <div class="col-sm-6 col-xl-3">
+          <label class="form-label" for="cataloged_since_utc">Cataloged Since (UTC)</label>
+          <input id="cataloged_since_utc" class="form-control" type="text" name="cataloged_since_utc" placeholder="2026-04-22T10:00:00+00:00" value="{{ cataloged_since_filter }}">
+        </div>
+        <div class="col-sm-6 col-xl-3">
+          <label class="form-label" for="cataloged_before_utc">Cataloged Before (UTC)</label>
+          <input id="cataloged_before_utc" class="form-control" type="text" name="cataloged_before_utc" placeholder="2026-04-22T12:00:00+00:00" value="{{ cataloged_before_filter }}">
+        </div>
+        <div class="col-xl-6 d-flex flex-wrap gap-2">
+          <button class="btn btn-primary" type="submit">Apply</button>
+          <a class="btn btn-outline-secondary" href="/catalog">Clear</a>
+        </div>
+      </form>
+    </div>
+  </div>
+</section>
+
+<section class="asset-list">
+  {% if assets %}
+  {% for asset in assets %}
+  <article class="card asset-card">
+    <div class="card-body">
+      <div class="row g-3 g-lg-4 align-items-start">
+        <div class="col-lg-auto">
+          <div class="preview-frame">
+            {% if asset.preview_status == "succeeded" %}
+            <img src="/catalog/preview?relative_path={{ asset.relative_path | urlencode }}" alt="Preview for {{ asset.relative_path }}">
+            {% else %}
+            <div class="text-center text-secondary small px-3">{{ asset.preview_summary }}</div>
+            {% endif %}
+          </div>
+        </div>
+        <div class="col">
+          <div class="d-flex flex-column flex-xl-row justify-content-between gap-3">
+            <div>
+              <h2 class="h4 mb-1">{{ asset.filename }}</h2>
+              <div class="asset-path text-secondary">{{ asset.relative_path }}</div>
+              <div class="d-flex flex-wrap gap-2 mt-3">
+                {{ status_badge(asset.media_type) }}
+                {{ status_badge(asset.preview_capability) }}
+                {{ status_badge(asset.origin_kind) }}
+                {{ status_badge(asset.extraction_status) }}
+                {{ status_badge(asset.preview_status) }}
+                {{ status_badge('favorite' if asset.is_favorite else 'not favorite', 'favorite' if asset.is_favorite else 'not favorite') }}
+                {{ status_badge('archived' if asset.is_archived else 'visible', 'archived' if asset.is_archived else 'visible') }}
+              </div>
+            </div>
+            <div class="asset-actions d-flex flex-column align-items-xl-end gap-2">
+              <a
+                class="btn btn-primary btn-sm"
+                href="/catalog/asset?relative_path={{ asset.relative_path | urlencode }}&page={{ page }}&extraction_status={{ extraction_status_filter | urlencode }}&preview_status={{ preview_status_filter | urlencode }}&origin_kind={{ origin_kind_filter | urlencode }}&media_type={{ media_type_filter | urlencode }}&preview_capability={{ preview_capability_filter | urlencode }}&is_favorite={{ is_favorite_filter | urlencode }}&is_archived={{ is_archived_filter | urlencode }}&cataloged_since_utc={{ cataloged_since_filter | urlencode }}&cataloged_before_utc={{ cataloged_before_filter | urlencode }}"
+              >
+                Inspect Asset
+              </a>
+              <div class="d-flex flex-wrap gap-2 justify-content-xl-end">
+                <form method="post" action="{% if asset.is_favorite %}/catalog/actions/favorite/unmark{% else %}/catalog/actions/favorite/mark{% endif %}" class="inline-form">
+                  <input type="hidden" name="relative_path" value="{{ asset.relative_path }}">
+                  <input type="hidden" name="page" value="{{ page }}">
+                  <input type="hidden" name="return_to" value="catalog">
+                  <input type="hidden" name="extraction_status" value="{{ extraction_status_filter }}">
+                  <input type="hidden" name="preview_status" value="{{ preview_status_filter }}">
+                  <input type="hidden" name="origin_kind" value="{{ origin_kind_filter }}">
+                  <input type="hidden" name="media_type" value="{{ media_type_filter }}">
+                  <input type="hidden" name="preview_capability" value="{{ preview_capability_filter }}">
+                  <input type="hidden" name="is_favorite" value="{{ is_favorite_filter }}">
+                  <input type="hidden" name="is_archived" value="{{ is_archived_filter }}">
+                  <input type="hidden" name="cataloged_since_utc" value="{{ cataloged_since_filter }}">
+                  <input type="hidden" name="cataloged_before_utc" value="{{ cataloged_before_filter }}">
+                  <button class="btn btn-outline-secondary btn-sm" type="submit">{% if asset.is_favorite %}Unfavorite{% else %}Favorite{% endif %}</button>
+                </form>
+                <form method="post" action="{% if asset.is_archived %}/catalog/actions/archive/unmark{% else %}/catalog/actions/archive/mark{% endif %}" class="inline-form">
+                  <input type="hidden" name="relative_path" value="{{ asset.relative_path }}">
+                  <input type="hidden" name="page" value="{{ page }}">
+                  <input type="hidden" name="return_to" value="catalog">
+                  <input type="hidden" name="extraction_status" value="{{ extraction_status_filter }}">
+                  <input type="hidden" name="preview_status" value="{{ preview_status_filter }}">
+                  <input type="hidden" name="origin_kind" value="{{ origin_kind_filter }}">
+                  <input type="hidden" name="media_type" value="{{ media_type_filter }}">
+                  <input type="hidden" name="preview_capability" value="{{ preview_capability_filter }}">
+                  <input type="hidden" name="is_favorite" value="{{ is_favorite_filter }}">
+                  <input type="hidden" name="is_archived" value="{{ is_archived_filter }}">
+                  <input type="hidden" name="cataloged_since_utc" value="{{ cataloged_since_filter }}">
+                  <input type="hidden" name="cataloged_before_utc" value="{{ cataloged_before_filter }}">
+                  <button class="btn btn-outline-secondary btn-sm" type="submit">{% if asset.is_archived %}Unarchive{% else %}Archive{% endif %}</button>
+                </form>
+              </div>
+            </div>
+          </div>
+          <div class="row g-3 mt-1">
+            <div class="col-lg-5">
+              <div class="summary-chip rounded-4 p-3 h-100">
+                <div class="small text-secondary text-uppercase fw-semibold mb-2">Metadata</div>
+                {% if asset.metadata_summary %}
+                <div class="small">{{ asset.metadata_summary }}</div>
+                {% else %}
+                <div class="text-secondary small">No extraction metadata yet.</div>
+                {% endif %}
+              </div>
+            </div>
+            <div class="col-lg-4">
+              <div class="summary-chip rounded-4 p-3 h-100">
+                <div class="small text-secondary text-uppercase fw-semibold mb-2">Provenance</div>
+                <div class="small">{{ asset.origin_kind }}</div>
+                <div class="small text-secondary">Job {{ asset.provenance_job_name or "n/a" }}</div>
+                <div class="small text-secondary">File {{ asset.provenance_original_filename or "n/a" }}</div>
+              </div>
+            </div>
+            <div class="col-lg-3">
+              <div class="summary-chip rounded-4 p-3 h-100">
+                <div class="small text-secondary text-uppercase fw-semibold mb-2">Cataloged</div>
+                <div class="small text-secondary">First</div>
+                <div class="mono mb-2">{{ asset.first_cataloged_at_utc }}</div>
+                <div class="small text-secondary">Last</div>
+                <div class="mono">{{ asset.last_cataloged_at_utc }}</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </article>
+  {% endfor %}
+  {{ pager(previous_url, next_url, page) }}
   {% else %}
-  <p class="muted">No catalog assets are available yet.</p>
+  <section class="card surface-card">
+    <div class="card-body">
+      <p class="text-secondary mb-0">No catalog assets matched the current filters.</p>
+    </div>
+  </section>
   {% endif %}
 </section>
 {% endblock %}

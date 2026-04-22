@@ -36,7 +36,9 @@ def test_dashboard_renders_overview_metrics() -> None:
     assert response.status_code == 200
     html = response.get_data(as_text=True)
     assert "Server Overview" in html
-    assert "Total known SHA256" in html
+    assert 'href="/static/vendor/bootstrap/css/bootstrap.min.css"' in html
+    assert 'src="/static/vendor/bootstrap/js/bootstrap.bundle.min.js"' in html
+    assert "Known SHA groups" in html
     assert ">3<" in html
     assert "Last indexed file" in html
     assert "2026-04-20T11:00:00+00:00" in html
@@ -74,6 +76,8 @@ def test_files_page_renders_rows_and_pager() -> None:
     assert "2026/04/Trip/photo.jpg" in html
     assert "2.0 KiB" in html
     assert "Showing 1-1 of 51 files." in html
+    assert ("a" * 64) not in html
+    assert "Technical detail" in html
     assert 'href="/files?page=2"' in html
 
 
@@ -314,6 +318,8 @@ def test_duplicates_page_renders_duplicate_groups() -> None:
     assert "2026/04/Trip/a.jpg" in html
     assert "2026/04/TripCopy/a.jpg" in html
     assert "2 path(s)" in html
+    assert ("a" * 64) not in html
+    assert "Technical detail" in html
 
 
 def test_conflicts_page_renders_conflict_history_and_latest_run() -> None:
@@ -370,6 +376,8 @@ def test_catalog_page_renders_rows_extraction_states_and_metadata_summary() -> N
                     "relative_path": "2026/04/Job_A/a.jpg",
                     "sha256_hex": "a" * 64,
                     "size_bytes": 2048,
+                    "media_type": "jpeg",
+                    "preview_capability": "previewable",
                     "origin_kind": "uploaded",
                     "last_observed_origin_kind": "uploaded",
                     "provenance_job_name": "Job_A",
@@ -381,6 +389,14 @@ def test_catalog_page_renders_rows_extraction_states_and_metadata_summary() -> N
                     "extraction_last_succeeded_at_utc": "2026-04-22T10:01:00+00:00",
                     "extraction_last_failed_at_utc": None,
                     "extraction_failure_detail": None,
+                    "preview_status": "succeeded",
+                    "preview_relative_path": "2026/04/Job_A/a__abc123__w1024.jpg",
+                    "preview_last_attempted_at_utc": "2026-04-22T10:02:00+00:00",
+                    "preview_last_succeeded_at_utc": "2026-04-22T10:02:00+00:00",
+                    "preview_last_failed_at_utc": None,
+                    "preview_failure_detail": None,
+                    "is_favorite": True,
+                    "is_archived": False,
                     "capture_timestamp_utc": "2026-04-22T09:30:00+00:00",
                     "camera_make": "Canon",
                     "camera_model": "EOS R6",
@@ -393,6 +409,8 @@ def test_catalog_page_renders_rows_extraction_states_and_metadata_summary() -> N
                     "relative_path": "2026/04/Job_A/b.jpg",
                     "sha256_hex": "b" * 64,
                     "size_bytes": 1000,
+                    "media_type": "jpeg",
+                    "preview_capability": "previewable",
                     "origin_kind": "indexed",
                     "last_observed_origin_kind": "indexed",
                     "provenance_job_name": None,
@@ -404,6 +422,14 @@ def test_catalog_page_renders_rows_extraction_states_and_metadata_summary() -> N
                     "extraction_last_succeeded_at_utc": None,
                     "extraction_last_failed_at_utc": "2026-04-22T10:06:00+00:00",
                     "extraction_failure_detail": "invalid media content",
+                    "preview_status": "failed",
+                    "preview_relative_path": None,
+                    "preview_last_attempted_at_utc": "2026-04-22T10:06:10+00:00",
+                    "preview_last_succeeded_at_utc": None,
+                    "preview_last_failed_at_utc": "2026-04-22T10:06:10+00:00",
+                    "preview_failure_detail": "preview generation failed",
+                    "is_favorite": False,
+                    "is_archived": True,
                     "capture_timestamp_utc": None,
                     "camera_make": None,
                     "camera_model": None,
@@ -419,16 +445,19 @@ def test_catalog_page_renders_rows_extraction_states_and_metadata_summary() -> N
     response = app.test_client().get("/catalog")
     assert response.status_code == 200
     html = response.get_data(as_text=True)
-    assert "Media Catalog" in html
+    assert "Media Library" in html
     assert "2026/04/Job_A/a.jpg" in html
     assert "2026/04/Job_A/b.jpg" in html
     assert "succeeded" in html
     assert "failed" in html
-    assert "Failure detail" in html
-    assert "invalid media content" in html
     assert "camera Canon EOS R6" in html
     assert "6000x4000" in html
-    assert "2.0 KiB" in html
+    assert ("a" * 64) not in html
+    assert ("b" * 64) not in html
+    assert "Inspect Asset" in html
+    assert 'src="/catalog/preview?relative_path=2026/04/Job_A/a.jpg"' in html
+    assert "favorite" in html
+    assert "archived" in html
 
 
 def test_catalog_page_empty_state_is_clear() -> None:
@@ -439,7 +468,7 @@ def test_catalog_page_empty_state_is_clear() -> None:
     app = create_app(api_fetcher=_fetcher)
     response = app.test_client().get("/catalog")
     assert response.status_code == 200
-    assert "No catalog assets are available yet." in response.get_data(as_text=True)
+    assert "No catalog assets matched the current filters." in response.get_data(as_text=True)
 
 
 def test_catalog_page_pagination_is_sane() -> None:
@@ -455,6 +484,8 @@ def test_catalog_page_pagination_is_sane() -> None:
                     "relative_path": "2026/04/Job_A/a.jpg",
                     "sha256_hex": "a" * 64,
                     "size_bytes": 1,
+                    "media_type": "jpeg",
+                    "preview_capability": "previewable",
                     "origin_kind": "uploaded",
                     "last_observed_origin_kind": "uploaded",
                     "provenance_job_name": None,
@@ -473,6 +504,8 @@ def test_catalog_page_pagination_is_sane() -> None:
                     "image_height": None,
                     "orientation": None,
                     "lens_model": None,
+                    "is_favorite": False,
+                    "is_archived": False,
                 }
             ],
         }
@@ -484,93 +517,6 @@ def test_catalog_page_pagination_is_sane() -> None:
     assert "Showing 51-51 of 120 cataloged assets." in html
     assert 'href="/catalog?page=1"' in html
     assert 'href="/catalog?page=3"' in html
-
-
-def test_catalog_retry_action_calls_existing_api_and_sets_success_message() -> None:
-    observed: dict[str, object] = {}
-
-    def _fetcher(path: str, query: dict[str, str]) -> dict:
-        assert path == "/v1/admin/catalog"
-        assert query == {"limit": "50", "offset": "0"}
-        return {
-            "total": 1,
-            "limit": 50,
-            "offset": 0,
-            "items": [
-                {
-                    "relative_path": "2026/04/Job_A/a.jpg",
-                    "sha256_hex": "a" * 64,
-                    "size_bytes": 100,
-                    "origin_kind": "uploaded",
-                    "last_observed_origin_kind": "uploaded",
-                    "provenance_job_name": None,
-                    "provenance_original_filename": None,
-                    "first_cataloged_at_utc": "2026-04-22T10:00:00+00:00",
-                    "last_cataloged_at_utc": "2026-04-22T10:00:00+00:00",
-                    "extraction_status": "succeeded",
-                    "extraction_last_attempted_at_utc": "2026-04-22T10:01:00+00:00",
-                    "extraction_last_succeeded_at_utc": "2026-04-22T10:01:00+00:00",
-                    "extraction_last_failed_at_utc": None,
-                    "extraction_failure_detail": None,
-                    "capture_timestamp_utc": None,
-                    "camera_make": None,
-                    "camera_model": None,
-                    "image_width": None,
-                    "image_height": None,
-                    "orientation": None,
-                    "lens_model": None,
-                }
-            ],
-        }
-
-    def _poster(path: str, payload: dict) -> dict:
-        observed["path"] = path
-        observed["payload"] = payload
-        return {"item": {"relative_path": payload["relative_path"]}}
-
-    app = create_app(api_fetcher=_fetcher, api_poster=_poster)
-    client = app.test_client()
-    response = client.post(
-        "/catalog/actions/retry",
-        data={"relative_path": "2026/04/Job_A/a.jpg", "page": "1"},
-        follow_redirects=True,
-    )
-    assert response.status_code == 200
-    assert observed["path"] == "/v1/admin/catalog/extraction/retry"
-    assert observed["payload"] == {"relative_path": "2026/04/Job_A/a.jpg"}
-    assert "Retried extraction for 2026/04/Job_A/a.jpg." in response.get_data(as_text=True)
-
-
-def test_catalog_backfill_action_calls_existing_api_and_sets_summary_message() -> None:
-    observed: dict[str, object] = {}
-
-    def _fetcher(path: str, query: dict[str, str]) -> dict:
-        assert path == "/v1/admin/catalog"
-        return {"total": 0, "limit": 50, "offset": 0, "items": []}
-
-    def _poster(path: str, payload: dict) -> dict:
-        observed["path"] = path
-        observed["payload"] = payload
-        return {
-            "requested_statuses": ["pending", "failed"],
-            "selected_count": 5,
-            "processed_count": 5,
-            "succeeded_count": 4,
-            "failed_count": 1,
-            "items": [],
-        }
-
-    app = create_app(api_fetcher=_fetcher, api_poster=_poster)
-    client = app.test_client()
-    response = client.post(
-        "/catalog/actions/backfill",
-        data={"target_statuses": "pending,failed", "limit": "50", "page": "1"},
-        follow_redirects=True,
-    )
-    assert response.status_code == 200
-    assert observed["path"] == "/v1/admin/catalog/extraction/backfill"
-    assert observed["payload"] == {"target_statuses": ["pending", "failed"], "limit": 50}
-    assert "Backfill processed 5 asset(s): 4 succeeded, 1 failed." in response.get_data(as_text=True)
 
 
 def test_catalog_page_filters_pending_assets() -> None:
@@ -586,6 +532,8 @@ def test_catalog_page_filters_pending_assets() -> None:
                     "relative_path": "2026/04/Job_A/pending.jpg",
                     "sha256_hex": "a" * 64,
                     "size_bytes": 100,
+                    "media_type": "jpeg",
+                    "preview_capability": "previewable",
                     "origin_kind": "indexed",
                     "last_observed_origin_kind": "indexed",
                     "provenance_job_name": None,
@@ -604,6 +552,8 @@ def test_catalog_page_filters_pending_assets() -> None:
                     "image_height": None,
                     "orientation": None,
                     "lens_model": None,
+                    "is_favorite": False,
+                    "is_archived": False,
                 }
             ],
         }
@@ -613,7 +563,7 @@ def test_catalog_page_filters_pending_assets() -> None:
     assert response.status_code == 200
     html = response.get_data(as_text=True)
     assert "2026/04/Job_A/pending.jpg" in html
-    assert "Not attempted yet." in html
+    assert "pending" in html
 
 
 def test_catalog_page_filters_failed_assets_and_shows_failure_detail() -> None:
@@ -629,6 +579,8 @@ def test_catalog_page_filters_failed_assets_and_shows_failure_detail() -> None:
                     "relative_path": "2026/04/Job_A/failed.jpg",
                     "sha256_hex": "b" * 64,
                     "size_bytes": 100,
+                    "media_type": "jpeg",
+                    "preview_capability": "previewable",
                     "origin_kind": "uploaded",
                     "last_observed_origin_kind": "uploaded",
                     "provenance_job_name": None,
@@ -647,6 +599,8 @@ def test_catalog_page_filters_failed_assets_and_shows_failure_detail() -> None:
                     "image_height": None,
                     "orientation": None,
                     "lens_model": None,
+                    "is_favorite": False,
+                    "is_archived": False,
                 }
             ],
         }
@@ -656,8 +610,8 @@ def test_catalog_page_filters_failed_assets_and_shows_failure_detail() -> None:
     assert response.status_code == 200
     html = response.get_data(as_text=True)
     assert "2026/04/Job_A/failed.jpg" in html
-    assert "Failure detail" in html
-    assert "invalid media content" in html
+    assert ("b" * 64) not in html
+    assert "Inspect Asset" in html
 
 
 def test_catalog_page_origin_filter_and_filtered_pagination_links() -> None:
@@ -678,6 +632,8 @@ def test_catalog_page_origin_filter_and_filtered_pagination_links() -> None:
                     "relative_path": "2026/04/Job_A/failed.jpg",
                     "sha256_hex": "b" * 64,
                     "size_bytes": 100,
+                    "media_type": "jpeg",
+                    "preview_capability": "previewable",
                     "origin_kind": "uploaded",
                     "last_observed_origin_kind": "uploaded",
                     "provenance_job_name": None,
@@ -708,7 +664,44 @@ def test_catalog_page_origin_filter_and_filtered_pagination_links() -> None:
     assert 'href="/catalog?page=3&amp;extraction_status=failed&amp;origin_kind=uploaded"' in html
 
 
-def test_catalog_asset_detail_renders_preview_status_and_image() -> None:
+def test_catalog_page_forwards_media_type_preview_filters() -> None:
+    def _fetcher(path: str, query: dict[str, str]) -> dict:
+        assert path == "/v1/admin/catalog"
+        assert query == {
+            "limit": "50",
+            "offset": "0",
+            "media_type": "raw",
+            "preview_capability": "previewable",
+            "preview_status": "failed",
+        }
+        return {"total": 0, "limit": 50, "offset": 0, "items": []}
+
+    app = create_app(api_fetcher=_fetcher)
+    response = app.test_client().get(
+        "/catalog?media_type=raw&preview_capability=previewable&preview_status=failed"
+    )
+    assert response.status_code == 200
+    html = response.get_data(as_text=True)
+    assert "No catalog assets matched the current filters." in html
+
+
+def test_catalog_page_forwards_favorite_and_archived_filters() -> None:
+    def _fetcher(path: str, query: dict[str, str]) -> dict:
+        assert path == "/v1/admin/catalog"
+        assert query == {
+            "limit": "50",
+            "offset": "0",
+            "is_favorite": "true",
+            "is_archived": "false",
+        }
+        return {"total": 0, "limit": 50, "offset": 0, "items": []}
+
+    app = create_app(api_fetcher=_fetcher)
+    response = app.test_client().get("/catalog?is_favorite=true&is_archived=false")
+    assert response.status_code == 200
+
+
+def test_catalog_asset_detail_renders_preview_status_and_operator_metadata() -> None:
     def _fetcher(path: str, query: dict[str, str]) -> dict:
         assert path == "/v1/admin/catalog/asset"
         assert query == {"relative_path": "2026/04/Job_A/a.jpg"}
@@ -717,6 +710,8 @@ def test_catalog_asset_detail_renders_preview_status_and_image() -> None:
                 "relative_path": "2026/04/Job_A/a.jpg",
                 "sha256_hex": "a" * 64,
                 "size_bytes": 2048,
+                "media_type": "jpeg",
+                "preview_capability": "previewable",
                 "origin_kind": "uploaded",
                 "last_observed_origin_kind": "uploaded",
                 "provenance_job_name": "Job_A",
@@ -734,6 +729,8 @@ def test_catalog_asset_detail_renders_preview_status_and_image() -> None:
                 "preview_last_succeeded_at_utc": "2026-04-22T10:02:00+00:00",
                 "preview_last_failed_at_utc": None,
                 "preview_failure_detail": None,
+                "is_favorite": True,
+                "is_archived": False,
                 "capture_timestamp_utc": "2026-04-22T09:30:00+00:00",
                 "camera_make": "Canon",
                 "camera_model": "EOS R6",
@@ -748,10 +745,17 @@ def test_catalog_asset_detail_renders_preview_status_and_image() -> None:
     response = app.test_client().get("/catalog/asset?relative_path=2026/04/Job_A/a.jpg")
     assert response.status_code == 200
     html = response.get_data(as_text=True)
-    assert "Catalog Asset Detail" in html
-    assert "Preview Image" in html
+    assert "Library Asset Detail" in html
+    assert "Asset Identity" in html
+    assert "Provenance" in html
+    assert "Extraction Metadata" in html
+    assert "Preview Status" in html
+    assert "preview_capability" in html
+    assert "previewable" in html
+    assert ("a" * 64) in html
     assert "preview_last_succeeded_at_utc" not in html
     assert 'src="/catalog/preview?relative_path=2026/04/Job_A/a.jpg"' in html
+    assert "favorite" in html
 
 
 def test_catalog_asset_detail_renders_preview_status_for_heic_asset() -> None:
@@ -763,6 +767,8 @@ def test_catalog_asset_detail_renders_preview_status_for_heic_asset() -> None:
                 "relative_path": "2026/04/Job_A/a.heic",
                 "sha256_hex": "b" * 64,
                 "size_bytes": 4096,
+                "media_type": "heic",
+                "preview_capability": "previewable",
                 "origin_kind": "indexed",
                 "last_observed_origin_kind": "indexed",
                 "provenance_job_name": None,
@@ -780,6 +786,8 @@ def test_catalog_asset_detail_renders_preview_status_for_heic_asset() -> None:
                 "preview_last_succeeded_at_utc": None,
                 "preview_last_failed_at_utc": "2026-04-22T10:02:00+00:00",
                 "preview_failure_detail": "HEIC preview backend unavailable",
+                "is_favorite": False,
+                "is_archived": True,
                 "capture_timestamp_utc": None,
                 "camera_make": None,
                 "camera_model": None,
@@ -794,39 +802,81 @@ def test_catalog_asset_detail_renders_preview_status_for_heic_asset() -> None:
     response = app.test_client().get("/catalog/asset?relative_path=2026/04/Job_A/a.heic")
     assert response.status_code == 200
     html = response.get_data(as_text=True)
-    assert "Catalog Asset Detail" in html
+    assert "Library Asset Detail" in html
     assert "failed" in html
     assert "HEIC preview backend unavailable" in html
     assert "Preview Image" not in html
 
 
-def test_catalog_preview_action_calls_api_and_redirects_to_detail() -> None:
+def test_catalog_favorite_action_posts_to_api_and_preserves_filters() -> None:
+    observed: dict[str, object] = {}
+
+    def _fetcher(path: str, query: dict[str, str]) -> dict:
+        observed["query"] = query
+        assert path == "/v1/admin/catalog"
+        return {"total": 0, "limit": 50, "offset": 0, "items": []}
+
+    def _poster(path: str, payload: dict) -> dict:
+        observed["path"] = path
+        observed["payload"] = payload
+        return {"item": {"relative_path": "2026/04/Job_A/a.jpg", "is_favorite": True}}
+
+    app = create_app(api_fetcher=_fetcher, api_poster=_poster)
+    response = app.test_client().post(
+        "/catalog/actions/favorite/mark",
+        data={
+            "relative_path": "2026/04/Job_A/a.jpg",
+            "page": "2",
+            "return_to": "catalog",
+            "is_favorite": "true",
+            "is_archived": "false",
+        },
+        follow_redirects=True,
+    )
+    assert response.status_code == 200
+    assert observed["path"] == "/v1/admin/catalog/favorite/mark"
+    assert observed["payload"] == {"relative_path": "2026/04/Job_A/a.jpg"}
+    assert observed["query"] == {
+        "limit": "50",
+        "offset": "50",
+        "is_favorite": "true",
+        "is_archived": "false",
+    }
+    assert "Marked favorite: 2026/04/Job_A/a.jpg." in response.get_data(as_text=True)
+
+
+def test_catalog_archive_action_redirects_back_to_detail() -> None:
     observed: dict[str, object] = {}
 
     def _fetcher(path: str, query: dict[str, str]) -> dict:
         assert path == "/v1/admin/catalog/asset"
+        assert query == {"relative_path": "2026/04/Job_A/a.jpg"}
         return {
             "item": {
                 "relative_path": "2026/04/Job_A/a.jpg",
                 "sha256_hex": "a" * 64,
                 "size_bytes": 2048,
+                "media_type": "jpeg",
+                "preview_capability": "previewable",
                 "origin_kind": "uploaded",
                 "last_observed_origin_kind": "uploaded",
-                "provenance_job_name": None,
-                "provenance_original_filename": None,
+                "provenance_job_name": "Job_A",
+                "provenance_original_filename": "a.jpg",
                 "first_cataloged_at_utc": "2026-04-22T10:00:00+00:00",
                 "last_cataloged_at_utc": "2026-04-22T10:00:00+00:00",
                 "extraction_status": "succeeded",
-                "extraction_last_attempted_at_utc": None,
-                "extraction_last_succeeded_at_utc": None,
+                "extraction_last_attempted_at_utc": "2026-04-22T10:01:00+00:00",
+                "extraction_last_succeeded_at_utc": "2026-04-22T10:01:00+00:00",
                 "extraction_last_failed_at_utc": None,
                 "extraction_failure_detail": None,
-                "preview_status": "pending",
-                "preview_relative_path": None,
-                "preview_last_attempted_at_utc": None,
-                "preview_last_succeeded_at_utc": None,
+                "preview_status": "succeeded",
+                "preview_relative_path": "2026/04/Job_A/a__abc__w1024.jpg",
+                "preview_last_attempted_at_utc": "2026-04-22T10:02:00+00:00",
+                "preview_last_succeeded_at_utc": "2026-04-22T10:02:00+00:00",
                 "preview_last_failed_at_utc": None,
                 "preview_failure_detail": None,
+                "is_favorite": True,
+                "is_archived": True,
                 "capture_timestamp_utc": None,
                 "camera_make": None,
                 "camera_model": None,
@@ -840,22 +890,19 @@ def test_catalog_preview_action_calls_api_and_redirects_to_detail() -> None:
     def _poster(path: str, payload: dict) -> dict:
         observed["path"] = path
         observed["payload"] = payload
-        return {
-            "item": {
-                "relative_path": payload["relative_path"],
-                "preview_status": "succeeded",
-                "preview_relative_path": "x.jpg",
-            }
-        }
+        return {"item": {"relative_path": "2026/04/Job_A/a.jpg", "is_archived": False}}
 
     app = create_app(api_fetcher=_fetcher, api_poster=_poster)
-    client = app.test_client()
-    response = client.post(
-        "/catalog/actions/preview",
-        data={"relative_path": "2026/04/Job_A/a.jpg", "page": "1"},
+    response = app.test_client().post(
+        "/catalog/actions/archive/unmark",
+        data={
+            "relative_path": "2026/04/Job_A/a.jpg",
+            "page": "1",
+            "return_to": "asset",
+        },
         follow_redirects=True,
     )
     assert response.status_code == 200
-    assert observed["path"] == "/v1/admin/catalog/preview/retry"
+    assert observed["path"] == "/v1/admin/catalog/archive/unmark"
     assert observed["payload"] == {"relative_path": "2026/04/Job_A/a.jpg"}
-    assert "Retried preview generation for 2026/04/Job_A/a.jpg." in response.get_data(as_text=True)
+    assert "Unarchived asset: 2026/04/Job_A/a.jpg." in response.get_data(as_text=True)

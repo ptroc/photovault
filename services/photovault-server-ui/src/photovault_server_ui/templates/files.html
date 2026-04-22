@@ -1,47 +1,62 @@
 {% extends "base.html" %}
+{% from "macros.html" import pager %}
 {% set title = "Files" %}
 {% block content %}
-<section>
-  <h1>Server Files</h1>
-  <p class="muted">Known files in server storage, capped per page.</p>
+<section class="page-hero">
+  <div class="eyebrow text-uppercase text-secondary fw-semibold small mb-2">Diagnostics</div>
+  <h1 class="display-5 fw-semibold mb-2">Server Files</h1>
+  <p class="lead text-secondary mb-0">Focused storage inventory with technical detail tucked behind expandable sections.</p>
 </section>
 
-<section class="panel">
-  {% if files %}
-  <p class="muted">Showing {{ start_index }}-{{ end_index }} of {{ total }} files.</p>
-  <table>
-    <thead>
-      <tr>
-        <th>Relative Path</th>
-        <th>SHA256</th>
-        <th>Size</th>
-        <th>Source</th>
-        <th>Last Seen (UTC)</th>
-      </tr>
-    </thead>
-    <tbody>
-      {% for file in files %}
-      <tr>
-        <td class="mono">{{ file.relative_path }}</td>
-        <td class="mono">{{ file.sha256_hex }}</td>
-        <td>{{ file.size_human }}</td>
-        <td>{{ file.source_kind }}</td>
-        <td class="mono">{{ file.last_seen_at_utc }}</td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
-  <div class="pager">
-    {% if has_previous %}
-    <a href="/files?page={{ page - 1 }}">Previous</a>
-    {% endif %}
-    <span class="muted">Page {{ page }}</span>
-    {% if has_next %}
-    <a href="/files?page={{ page + 1 }}">Next</a>
+<section class="card surface-card">
+  <div class="card-body border-bottom">
+    <h2 class="h4 mb-1">Known files</h2>
+    {% if files %}
+    <p class="text-secondary mb-0">Showing {{ start_index }}-{{ end_index }} of {{ total }} files.</p>
+    {% else %}
+    <p class="text-secondary mb-0">Known files in server storage, capped per page.</p>
     {% endif %}
   </div>
+  {% if files %}
+  <div class="table-responsive">
+    <table class="table table-hover align-middle mb-0 table-compact">
+      <thead>
+        <tr>
+          <th>Relative Path</th>
+          <th>Size</th>
+          <th>Source</th>
+          <th>Last Seen (UTC)</th>
+          <th>Technical</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for file in files %}
+        <tr>
+          <td class="mono">{{ file.relative_path }}</td>
+          <td>{{ file.size_human }}</td>
+          <td>{{ file.source_kind }}</td>
+          <td class="mono">{{ file.last_seen_at_utc }}</td>
+          <td>
+            <details>
+              <summary class="small fw-semibold text-primary">Technical detail</summary>
+              <div class="small pt-2 text-secondary">
+                <div><strong>SHA256:</strong> <span class="mono">{{ file.sha256_display }}</span></div>
+                <div><strong>First seen:</strong> <span class="mono">{{ file.first_seen_at_utc or "n/a" }}</span></div>
+              </div>
+            </details>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <div class="card-body">
+    {{ pager('/files?page=' ~ (page - 1) if has_previous else none, '/files?page=' ~ (page + 1) if has_next else none, page) }}
+  </div>
   {% else %}
-  <p class="muted">No files are indexed or uploaded yet.</p>
+  <div class="card-body">
+    <p class="text-secondary mb-0">No files are indexed or uploaded yet.</p>
+  </div>
   {% endif %}
 </section>
 {% endblock %}

@@ -106,6 +106,8 @@ class AdminCatalogItem(BaseModel):
     relative_path: str
     sha256_hex: str
     size_bytes: int
+    media_type: str
+    preview_capability: str
     origin_kind: str
     last_observed_origin_kind: str
     provenance_job_name: str | None
@@ -130,6 +132,8 @@ class AdminCatalogItem(BaseModel):
     image_height: int | None
     orientation: int | None
     lens_model: str | None
+    is_favorite: bool = False
+    is_archived: bool = False
 
 
 class AdminCatalogListResponse(BaseModel):
@@ -156,6 +160,14 @@ class AdminRetryPreviewResponse(BaseModel):
 
 
 class AdminCatalogAssetResponse(BaseModel):
+    item: AdminCatalogItem
+
+
+class AdminCatalogOrganizationRequest(BaseModel):
+    relative_path: str = Field(min_length=1)
+
+
+class AdminCatalogOrganizationResponse(BaseModel):
     item: AdminCatalogItem
 
 
@@ -339,6 +351,18 @@ _PREVIEW_RAW_SUFFIXES = {
     ".raf",
     ".rw2",
 }
+_MEDIA_TYPE_SUFFIXES: dict[str, tuple[str, ...]] = {
+    "jpeg": tuple(sorted(_PREVIEW_RASTER_SUFFIXES - {".png"})),
+    "png": (".png",),
+    "heic": tuple(sorted(_PREVIEW_HEIC_SUFFIXES)),
+    "raw": tuple(sorted(_PREVIEW_RAW_SUFFIXES)),
+    "video": (".avi", ".m4v", ".mkv", ".mov", ".mp4", ".mts"),
+}
+_PREVIEWABLE_SUFFIXES = frozenset(
+    suffix
+    for media_type in ("jpeg", "png", "heic", "raw")
+    for suffix in _MEDIA_TYPE_SUFFIXES[media_type]
+)
 _RAW_EMBEDDED_PREVIEW_TAGS = ("PreviewImage", "JpgFromRaw", "OtherImage", "ThumbnailImage")
 
 
@@ -556,6 +580,21 @@ def _render_preview_source(path: Path) -> Image.Image:
     raise ValueError(f"unsupported media format for preview: {file_suffix or 'unknown'}")
 
 
+def _media_type_for_relative_path(relative_path: str) -> str:
+    lowered = relative_path.lower()
+    for media_type, suffixes in _MEDIA_TYPE_SUFFIXES.items():
+        if lowered.endswith(suffixes):
+            return media_type
+    return "other"
+
+
+def _preview_capability_for_relative_path(relative_path: str) -> str:
+    lowered = relative_path.lower()
+    if lowered.endswith(tuple(_PREVIEWABLE_SUFFIXES)):
+        return "previewable"
+    return "not_previewable"
+
+
 def _upsert_storage_and_catalog_record(
     *,
     store: UploadStateStore,
@@ -703,6 +742,8 @@ def _to_admin_catalog_item(record: object) -> AdminCatalogItem:
         relative_path=str(record.relative_path),
         sha256_hex=str(record.sha256_hex),
         size_bytes=int(record.size_bytes),
+        media_type=_media_type_for_relative_path(str(record.relative_path)),
+        preview_capability=_preview_capability_for_relative_path(str(record.relative_path)),
         origin_kind=str(record.origin_kind),
         last_observed_origin_kind=str(record.last_observed_origin_kind),
         provenance_job_name=(
@@ -763,7 +804,22 @@ def _to_admin_catalog_item(record: object) -> AdminCatalogItem:
         image_height=int(record.image_height) if record.image_height is not None else None,
         orientation=int(record.orientation) if record.orientation is not None else None,
         lens_model=str(record.lens_model) if record.lens_model is not None else None,
+        is_favorite=bool(getattr(record, "is_favorite", False)),
+        is_archived=bool(getattr(record, "is_archived", False)),
     )
+
+
+def _parse_boolean_filter(raw_value: str | None, *, field_name: str) -> bool | None:
+    if raw_value is None:
+        return None
+    lowered = raw_value.strip().lower()
+    if lowered == "":
+        return None
+    if lowered == "true":
+        return True
+    if lowered == "false":
+        return False
+    raise HTTPException(status_code=400, detail=f"invalid {field_name} filter")
 
 
 def _heartbeat_presence_status(record: ClientHeartbeatRecord | None, *, now_utc: datetime) -> str:
@@ -1408,23 +1464,44 @@ def create_app(
         limit: int = Query(default=50, ge=1, le=200),
         offset: int = Query(default=0, ge=0),
         extraction_status: str | None = Query(default=None),
+        preview_status: str | None = Query(default=None),
         origin_kind: str | None = Query(default=None),
+        media_type: str | None = Query(default=None),
+        preview_capability: str | None = Query(default=None),
+        is_favorite: str | None = Query(default=None),
+        is_archived: str | None = Query(default=None),
         cataloged_since_utc: str | None = Query(default=None),
         cataloged_before_utc: str | None = Query(default=None),
     ) -> AdminCatalogListResponse:
         allowed_extraction_status = {"pending", "succeeded", "failed"}
         if extraction_status is not None and extraction_status not in allowed_extraction_status:
             raise HTTPException(status_code=400, detail="invalid extraction_status filter")
+        allowed_preview_status = {"pending", "succeeded", "failed"}
+        if preview_status is not None and preview_status not in allowed_preview_status:
+            raise HTTPException(status_code=400, detail="invalid preview_status filter")
         allowed_origin_kind = {"uploaded", "indexed"}
         if origin_kind is not None and origin_kind not in allowed_origin_kind:
             raise HTTPException(status_code=400, detail="invalid origin_kind filter")
+        allowed_media_type = {"jpeg", "png", "heic", "raw", "video", "other"}
+        if media_type is not None and media_type not in allowed_media_type:
+            raise HTTPException(status_code=400, detail="invalid media_type filter")
+        allowed_preview_capability = {"previewable", "not_previewable"}
+        if preview_capability is not None and preview_capability not in allowed_preview_capability:
+            raise HTTPException(status_code=400, detail="invalid preview_capability filter")
+        is_favorite_filter = _parse_boolean_filter(is_favorite, field_name="is_favorite")
+        is_archived_filter = _parse_boolean_filter(is_archived, field_name="is_archived")
 
         store: UploadStateStore = app.state.upload_state_store
         total, records = store.list_media_assets(
             limit=limit,
             offset=offset,
             extraction_status=extraction_status,
+            preview_status=preview_status,
             origin_kind=origin_kind,
+            media_type=media_type,
+            preview_capability=preview_capability,
+            is_favorite=is_favorite_filter,
+            is_archived=is_archived_filter,
             cataloged_since_utc=cataloged_since_utc,
             cataloged_before_utc=cataloged_before_utc,
         )
@@ -1444,6 +1521,74 @@ def create_app(
         if record is None:
             raise HTTPException(status_code=404, detail="catalog asset not found")
         return AdminCatalogAssetResponse(item=_to_admin_catalog_item(record))
+
+    @app.post(
+        "/v1/admin/catalog/favorite/mark",
+        response_model=AdminCatalogOrganizationResponse,
+    )
+    def admin_mark_catalog_favorite(
+        payload: AdminCatalogOrganizationRequest,
+    ) -> AdminCatalogOrganizationResponse:
+        store: UploadStateStore = app.state.upload_state_store
+        updated = store.set_media_asset_favorite(
+            relative_path=payload.relative_path,
+            is_favorite=True,
+            updated_at_utc=datetime.now(UTC).isoformat(),
+        )
+        if updated is None:
+            raise HTTPException(status_code=404, detail="catalog asset not found")
+        return AdminCatalogOrganizationResponse(item=_to_admin_catalog_item(updated))
+
+    @app.post(
+        "/v1/admin/catalog/favorite/unmark",
+        response_model=AdminCatalogOrganizationResponse,
+    )
+    def admin_unmark_catalog_favorite(
+        payload: AdminCatalogOrganizationRequest,
+    ) -> AdminCatalogOrganizationResponse:
+        store: UploadStateStore = app.state.upload_state_store
+        updated = store.set_media_asset_favorite(
+            relative_path=payload.relative_path,
+            is_favorite=False,
+            updated_at_utc=datetime.now(UTC).isoformat(),
+        )
+        if updated is None:
+            raise HTTPException(status_code=404, detail="catalog asset not found")
+        return AdminCatalogOrganizationResponse(item=_to_admin_catalog_item(updated))
+
+    @app.post(
+        "/v1/admin/catalog/archive/mark",
+        response_model=AdminCatalogOrganizationResponse,
+    )
+    def admin_mark_catalog_archived(
+        payload: AdminCatalogOrganizationRequest,
+    ) -> AdminCatalogOrganizationResponse:
+        store: UploadStateStore = app.state.upload_state_store
+        updated = store.set_media_asset_archived(
+            relative_path=payload.relative_path,
+            is_archived=True,
+            updated_at_utc=datetime.now(UTC).isoformat(),
+        )
+        if updated is None:
+            raise HTTPException(status_code=404, detail="catalog asset not found")
+        return AdminCatalogOrganizationResponse(item=_to_admin_catalog_item(updated))
+
+    @app.post(
+        "/v1/admin/catalog/archive/unmark",
+        response_model=AdminCatalogOrganizationResponse,
+    )
+    def admin_unmark_catalog_archived(
+        payload: AdminCatalogOrganizationRequest,
+    ) -> AdminCatalogOrganizationResponse:
+        store: UploadStateStore = app.state.upload_state_store
+        updated = store.set_media_asset_archived(
+            relative_path=payload.relative_path,
+            is_archived=False,
+            updated_at_utc=datetime.now(UTC).isoformat(),
+        )
+        if updated is None:
+            raise HTTPException(status_code=404, detail="catalog asset not found")
+        return AdminCatalogOrganizationResponse(item=_to_admin_catalog_item(updated))
 
     @app.post("/v1/admin/catalog/preview/retry", response_model=AdminRetryPreviewResponse)
     def admin_retry_catalog_preview(payload: AdminRetryPreviewRequest) -> AdminRetryPreviewResponse:

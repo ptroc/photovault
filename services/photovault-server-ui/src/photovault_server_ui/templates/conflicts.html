@@ -1,49 +1,90 @@
 {% extends "base.html" %}
 {% set title = "Conflicts" %}
 {% block content %}
-<section>
-  <h1>Path Conflict History</h1>
-  <p class="muted">Paths whose on-disk content changed across index runs.</p>
+<section class="page-hero">
+  <div class="eyebrow text-uppercase text-secondary fw-semibold small mb-2">Diagnostics</div>
+  <h1 class="display-5 fw-semibold mb-2">Path Conflict History</h1>
+  <p class="lead text-secondary mb-0">Changed-content paths and the latest index signal in a compact diagnostic view.</p>
 </section>
 
-<section class="panel">
-  <h2 style="margin-top: 0;">Latest Index Outcome</h2>
-  {% if latest_run %}
-  <p class="muted">
-    Completed <span class="mono">{{ latest_run.completed_at_utc }}</span>:
-    scanned {{ latest_run.scanned_files }}, indexed {{ latest_run.indexed_files }},
-    conflicts {{ latest_run.path_conflicts }}, errors {{ latest_run.errors }}.
-  </p>
-  {% else %}
-  <p class="muted">No storage index run has been recorded yet.</p>
-  {% endif %}
+<section class="card surface-card mb-4">
+  <div class="card-body">
+    <div class="d-flex justify-content-between align-items-start gap-3">
+      <div>
+        <h2 class="h4 mb-1">Latest Index Outcome</h2>
+        <p class="text-secondary mb-0">Quick summary from the most recent storage index run.</p>
+      </div>
+    </div>
+    {% if latest_run %}
+    <div class="row row-cols-2 row-cols-xl-4 g-3 mt-1">
+      <div class="col">
+        <div class="summary-chip rounded-4 p-3">
+          <div class="small text-secondary text-uppercase fw-semibold mb-1">Completed</div>
+          <div class="mono">{{ latest_run.completed_at_utc }}</div>
+        </div>
+      </div>
+      <div class="col">
+        <div class="summary-chip rounded-4 p-3">
+          <div class="small text-secondary text-uppercase fw-semibold mb-1">Scanned / indexed</div>
+          <div class="h4 mb-0">{{ latest_run.scanned_files }} / {{ latest_run.indexed_files }}</div>
+        </div>
+      </div>
+      <div class="col">
+        <div class="summary-chip rounded-4 p-3">
+          <div class="small text-secondary text-uppercase fw-semibold mb-1">Conflicts</div>
+          <div class="h4 mb-0">{{ latest_run.path_conflicts }}</div>
+        </div>
+      </div>
+      <div class="col">
+        <div class="summary-chip rounded-4 p-3">
+          <div class="small text-secondary text-uppercase fw-semibold mb-1">Errors</div>
+          <div class="h4 mb-0">{{ latest_run.errors }}</div>
+        </div>
+      </div>
+    </div>
+    {% else %}
+    <p class="text-secondary mb-0 mt-2">No storage index run has been recorded yet.</p>
+    {% endif %}
+  </div>
 </section>
 
-<section class="panel" style="margin-top: 0.9rem;">
-  {% if conflicts %}
-  <p class="muted">Showing {{ conflicts|length }} conflict record(s) out of {{ total }}.</p>
-  <table>
-    <thead>
-      <tr>
-        <th>Relative Path</th>
-        <th>Previous SHA256</th>
-        <th>Current SHA256</th>
-        <th>Detected (UTC)</th>
-      </tr>
-    </thead>
-    <tbody>
+<section class="card surface-card">
+  <div class="card-body border-bottom">
+    <h2 class="h4 mb-1">Recorded conflicts</h2>
+    <p class="text-secondary mb-0">
+      {% if conflicts %}
+      Showing {{ conflicts|length }} conflict record(s) out of {{ total }}.
+      {% else %}
+      Paths whose on-disk content changed across index runs.
+      {% endif %}
+    </p>
+  </div>
+  <div class="card-body">
+    {% if conflicts %}
+    <div class="asset-list">
       {% for conflict in conflicts %}
-      <tr>
-        <td class="mono">{{ conflict.relative_path }}</td>
-        <td class="mono">{{ conflict.previous_sha256_hex }}</td>
-        <td class="mono">{{ conflict.current_sha256_hex }}</td>
-        <td class="mono">{{ conflict.detected_at_utc }}</td>
-      </tr>
+      <article class="card asset-card">
+        <div class="card-body">
+          <div class="d-flex flex-column flex-lg-row justify-content-between gap-3">
+            <div>
+              <h2 class="h5 mb-1 mono">{{ conflict.relative_path }}</h2>
+              <div class="text-secondary">Detected <span class="mono">{{ conflict.detected_at_utc }}</span></div>
+            </div>
+            <details>
+              <summary class="small fw-semibold text-primary">Technical detail</summary>
+              <div class="small pt-2 text-secondary d-grid gap-1">
+                <div><strong>Previous SHA256:</strong> <span class="mono">{{ conflict.previous_sha256_display }}</span></div>
+                <div><strong>Current SHA256:</strong> <span class="mono">{{ conflict.current_sha256_display }}</span></div>
+              </div>
+            </details>
+          </div>
+        </div>
+      </article>
       {% endfor %}
-    </tbody>
-  </table>
-  {% else %}
-  <p class="muted">No path conflicts have been recorded.</p>
-  {% endif %}
+    </div>
+    {% else %}
+    <p class="text-secondary mb-0">No path conflicts have been recorded.</p>
+    {% endif %}
+  </div>
 </section>
 {% endblock %}
