@@ -1,0 +1,43 @@
+{% macro status_badge(status, label=None) -%}
+  {% set normalized = (status or 'unknown')|lower %}
+  {% set classes = {
+    'approved': 'text-bg-success',
+    'succeeded': 'text-bg-success',
+    'online': 'text-bg-success',
+    'visible': 'text-bg-success',
+    'favorite': 'text-bg-success',
+    'working': 'text-bg-primary',
+    'uploaded': 'text-bg-primary',
+    'indexed': 'text-bg-primary',
+    'pending': 'text-bg-warning',
+    'stale': 'text-bg-warning',
+    'waiting': 'text-bg-warning',
+    'not_previewable': 'text-bg-warning',
+    'failed': 'text-bg-danger',
+    'revoked': 'text-bg-danger',
+    'blocked': 'text-bg-danger',
+    'archived': 'text-bg-dark',
+    'idle': 'text-bg-secondary',
+    'unknown': 'text-bg-secondary',
+    'not favorite': 'text-bg-secondary'
+  } %}
+  <span class="badge rounded-pill {{ classes.get(normalized, 'text-bg-secondary') }}">
+    {{ (label or status or 'unknown')|replace('_', ' ') }}
+  </span>
+{%- endmacro %}
+
+{% macro pager(previous_url, next_url, page) -%}
+  <nav aria-label="Pagination" class="mt-4">
+    <ul class="pagination pagination-sm mb-0">
+      <li class="page-item {{ '' if previous_url else 'disabled' }}">
+        <a class="page-link" href="{{ previous_url or '#' }}">Previous</a>
+      </li>
+      <li class="page-item disabled">
+        <span class="page-link">Page {{ page }}</span>
+      </li>
+      <li class="page-item {{ '' if next_url else 'disabled' }}">
+        <a class="page-link" href="{{ next_url or '#' }}">Next</a>
+      </li>
+    </ul>
+  </nav>
+{%- endmacro %}

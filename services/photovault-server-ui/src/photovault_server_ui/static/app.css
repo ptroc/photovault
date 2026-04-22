@@ -1,0 +1,111 @@
+:root {
+  color-scheme: light;
+}
+
+body.server-shell {
+  background:
+    radial-gradient(circle at top right, rgba(21, 101, 192, 0.12), transparent 32%),
+    linear-gradient(180deg, #f8fbff 0%, #eef3f8 100%);
+  min-height: 100vh;
+}
+
+.navbar-brand {
+  letter-spacing: -0.02em;
+}
+
+.diagnostic-link {
+  color: var(--bs-secondary-color);
+}
+
+.page-hero {
+  margin-bottom: 1.5rem;
+}
+
+.page-hero h1 {
+  letter-spacing: -0.03em;
+}
+
+.eyebrow {
+  letter-spacing: 0.08em;
+}
+
+.surface-card,
+.kpi-card,
+.shortcut-card,
+.asset-card {
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  box-shadow: 0 0.5rem 1.5rem rgba(15, 23, 42, 0.06);
+}
+
+.kpi-card .display-6 {
+  letter-spacing: -0.04em;
+}
+
+.summary-chip {
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  background: rgba(255, 255, 255, 0.75);
+}
+
+.preview-frame {
+  width: 132px;
+  height: 100px;
+  border-radius: 0.9rem;
+  overflow: hidden;
+  background: linear-gradient(135deg, #eef3f8 0%, #dbe6f4 100%);
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.preview-frame img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.preview-frame.preview-frame-lg {
+  width: 100%;
+  height: auto;
+  min-height: 320px;
+}
+
+.asset-path,
+.technical-copy,
+.mono {
+  font-family: ui-monospace, SFMono-Regular, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.86rem;
+  word-break: break-word;
+}
+
+.asset-actions form,
+.inline-form {
+  margin: 0;
+}
+
+.asset-list > * + * {
+  margin-top: 1rem;
+}
+
+.table-compact th {
+  font-size: 0.77rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--bs-secondary-color);
+}
+
+.accordion-button:not(.collapsed) {
+  background: rgba(13, 110, 253, 0.08);
+  color: inherit;
+}
+
+.filter-card {
+  position: relative;
+}
+
+@media (max-width: 991.98px) {
+  .preview-frame {
+    width: 100%;
+    height: 180px;
+  }
+}
