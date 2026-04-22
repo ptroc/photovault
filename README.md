@@ -1,5 +1,7 @@
 # photovault
 
+## THIS REPO IS NOT PRODUCTION READY, CODE IS IN ALPHA PHASE AT THIS POINT
+
 **photovault** is an offline-first, self-hosted photo ingestion and backup system designed primarily for photographers and camera-based workflows.
 
 It focuses on:
