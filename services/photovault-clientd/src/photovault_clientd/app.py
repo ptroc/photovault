@@ -1,6 +1,7 @@
 """Local control-plane API exposed by photovault-clientd."""
 
 import asyncio
+import json
 import os
 import socket
 import threading
@@ -31,6 +32,7 @@ from photovault_clientd.db import (
     create_ingest_job,
     fetch_ingest_job_detail,
     fetch_network_ap_config,
+    fetch_network_portal_handoff_state,
     fetch_next_copy_candidate,
     fetch_recent_daemon_events,
     fetch_server_auth_state,
@@ -51,6 +53,7 @@ from photovault_clientd.db import (
     set_network_ap_apply_result,
     transition_daemon_state,
     upsert_network_ap_config,
+    upsert_network_portal_handoff_state,
 )
 from photovault_clientd.engine import (
     DEFAULT_AUTO_PROGRESS_MAX_STEPS,
@@ -365,6 +368,120 @@ def create_app(
             "last_apply_error": row["last_apply_error"],
         }
 
+    def _load_or_init_portal_handoff_state(conn, now_utc: str) -> dict[str, object]:
+        existing = fetch_network_portal_handoff_state(conn)
+        if existing is not None:
+            return existing
+        upsert_network_portal_handoff_state(
+            conn,
+            active=False,
+            started_at_utc=None,
+            previous_eth_route_prefs_json=json.dumps([]),
+            updated_at_utc=now_utc,
+        )
+        conn.commit()
+        created = fetch_network_portal_handoff_state(conn)
+        if created is None:
+            raise RuntimeError("failed to initialize network_portal_handoff_state singleton row")
+        return created
+
+    def _parse_portal_handoff_route_prefs(raw_json: object) -> list[dict[str, str]]:
+        if raw_json is None:
+            return []
+        if not isinstance(raw_json, str):
+            raise ValueError("portal handoff route preferences must be serialized JSON text")
+        if not raw_json.strip():
+            return []
+        payload = json.loads(raw_json)
+        if not isinstance(payload, list):
+            raise ValueError("portal handoff route preferences must be a JSON list")
+
+        normalized: list[dict[str, str]] = []
+        for item in payload:
+            if not isinstance(item, dict):
+                raise ValueError("portal handoff route preference entries must be JSON objects")
+            connection_name = str(item.get("connection_name", "")).strip()
+            if not connection_name:
+                raise ValueError("portal handoff route preference entry is missing connection_name")
+            normalized.append(
+                {
+                    "connection_name": connection_name,
+                    "device_name": str(item.get("device_name", "")).strip(),
+                    "ipv4_never_default": str(item.get("ipv4_never_default", "no")).strip().lower()
+                    or "no",
+                    "ipv6_never_default": str(item.get("ipv6_never_default", "no")).strip().lower()
+                    or "no",
+                }
+            )
+        return normalized
+
+    def _portal_handoff_state_view(conn, now_utc: str) -> dict[str, object]:
+        row = _load_or_init_portal_handoff_state(conn, now_utc)
+        return {
+            "active": bool(row["active"]),
+            "started_at_utc": row["started_at_utc"],
+            "previous_eth_route_prefs_json": str(row["previous_eth_route_prefs_json"]),
+        }
+
+    def _snapshot_with_portal_handoff_state(
+        *,
+        conn,
+        snapshot_payload: dict[str, object],
+        now_utc: str,
+    ) -> dict[str, object]:
+        handoff_state = _portal_handoff_state_view(conn, now_utc)
+        snapshot_payload["portal_handoff_active"] = bool(handoff_state["active"])
+        snapshot_payload["portal_handoff_started_at_utc"] = handoff_state["started_at_utc"]
+        return snapshot_payload
+
+    def _clear_portal_handoff_state(conn, now_utc: str) -> None:
+        upsert_network_portal_handoff_state(
+            conn,
+            active=False,
+            started_at_utc=None,
+            previous_eth_route_prefs_json=json.dumps([]),
+            updated_at_utc=now_utc,
+        )
+
+    def _restore_portal_handoff_if_active(conn, now_utc: str) -> None:
+        handoff_state = _load_or_init_portal_handoff_state(conn, now_utc)
+        if not bool(handoff_state["active"]):
+            return
+
+        try:
+            previous_route_prefs = _parse_portal_handoff_route_prefs(
+                handoff_state["previous_eth_route_prefs_json"]
+            )
+            restore_result = resolved_network_manager.stop_portal_handoff(
+                previous_eth_route_prefs=previous_route_prefs
+            )
+            _clear_portal_handoff_state(conn, now_utc)
+            append_daemon_event(
+                conn,
+                level=EventLevel.INFO,
+                category="NETWORK_PORTAL_HANDOFF_RESTORED_ON_STARTUP",
+                message=(
+                    "restored portal handoff route preferences on startup for connections: "
+                    f"{', '.join(restore_result.get('restored_ethernet_connections', [])) or 'none'}"
+                ),
+                created_at_utc=now_utc,
+                from_state=get_daemon_state_safe(conn),
+                to_state=get_daemon_state_safe(conn),
+            )
+            conn.commit()
+        except (NetworkManagerError, ValueError, json.JSONDecodeError) as exc:
+            append_daemon_event(
+                conn,
+                level=EventLevel.ERROR,
+                category="NETWORK_PORTAL_HANDOFF_RESTORE_FAILED",
+                message=f"failed to restore portal handoff state on startup: {exc}",
+                created_at_utc=now_utc,
+                from_state=get_daemon_state_safe(conn),
+                to_state=ClientState.ERROR_DAEMON,
+            )
+            conn.commit()
+            raise RuntimeError("failed to restore portal handoff state on startup") from exc
+
     def _ensure_ap_baseline(conn, now_utc: str) -> dict[str, object]:
         ap_config = _load_or_init_ap_config(conn, now_utc)
         result = resolved_network_manager.ensure_ap_profile(
@@ -431,6 +548,7 @@ def create_app(
                 raise RuntimeError("state invariant checks failed at startup")
 
             transition_daemon_state(conn, ClientState.BOOTSTRAP, now, reason="daemon startup")
+            _restore_portal_handoff_if_active(conn, now)
             bootstrap_recovery(conn, now)
             resume_state = consume_bootstrap_queue(conn, now)
             transition_daemon_state(
@@ -613,10 +731,16 @@ def create_app(
     def network_status() -> dict[str, object]:
         conn = open_db(db_path)
         try:
+            now = datetime.now(UTC).isoformat()
             ap_config = _load_or_init_ap_config(conn, datetime.now(UTC).isoformat())
             snapshot = resolved_network_manager.status_snapshot(str(ap_config["profile_name"]))
+            snapshot_payload = _snapshot_with_portal_handoff_state(
+                conn=conn,
+                snapshot_payload=snapshot.to_dict(),
+                now_utc=now,
+            )
             return {
-                "snapshot": snapshot.to_dict(),
+                "snapshot": snapshot_payload,
                 "ap_config": _ap_config_view(conn),
             }
         except NetworkManagerError as exc:
@@ -699,6 +823,11 @@ def create_app(
                 password=request.password,
                 ap_profile_name=str(ap_config["profile_name"]),
             )
+            result["snapshot"] = _snapshot_with_portal_handoff_state(
+                conn=conn,
+                snapshot_payload=dict(result["snapshot"]),
+                now_utc=now,
+            )
             return result
         except NetworkManagerError as exc:
             raise HTTPException(status_code=503, detail=exc.to_payload()) from exc
@@ -707,12 +836,113 @@ def create_app(
 
     @app.post("/network/upstream-recheck")
     def network_upstream_recheck() -> dict[str, object]:
+        now = datetime.now(UTC).isoformat()
         conn = open_db(db_path)
         try:
-            ap_config = _load_or_init_ap_config(conn, datetime.now(UTC).isoformat())
-            return resolved_network_manager.recheck_upstream_status(
+            ap_config = _load_or_init_ap_config(conn, now)
+            result = resolved_network_manager.recheck_upstream_status(
                 str(ap_config["profile_name"])
             )
+            result["snapshot"] = _snapshot_with_portal_handoff_state(
+                conn=conn,
+                snapshot_payload=dict(result["snapshot"]),
+                now_utc=now,
+            )
+            return result
+        except NetworkManagerError as exc:
+            raise HTTPException(status_code=503, detail=exc.to_payload()) from exc
+        finally:
+            conn.close()
+
+    @app.post("/network/portal-handoff/start")
+    def network_portal_handoff_start() -> dict[str, object]:
+        now = datetime.now(UTC).isoformat()
+        conn = open_db(db_path)
+        try:
+            ap_config = _load_or_init_ap_config(conn, now)
+            current_state = _load_or_init_portal_handoff_state(conn, now)
+            if bool(current_state["active"]):
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "PORTAL_HANDOFF_INVALID_STATE",
+                        "message": "Portal handoff is already active.",
+                        "suggestion": "Stop portal handoff before starting it again.",
+                    },
+                )
+            result = resolved_network_manager.start_portal_handoff(
+                ap_profile_name=str(ap_config["profile_name"])
+            )
+            previous_route_prefs = result.get("previous_eth_route_prefs", [])
+            upsert_network_portal_handoff_state(
+                conn,
+                active=True,
+                started_at_utc=now,
+                previous_eth_route_prefs_json=json.dumps(previous_route_prefs),
+                updated_at_utc=now,
+            )
+            conn.commit()
+            snapshot = resolved_network_manager.status_snapshot(str(ap_config["profile_name"]))
+            snapshot_payload = _snapshot_with_portal_handoff_state(
+                conn=conn,
+                snapshot_payload=snapshot.to_dict(),
+                now_utc=now,
+            )
+            return {
+                "started": True,
+                "modified_ethernet_connections": result.get("modified_ethernet_connections", []),
+                "snapshot": snapshot_payload,
+            }
+        except NetworkManagerError as exc:
+            raise HTTPException(status_code=503, detail=exc.to_payload()) from exc
+        finally:
+            conn.close()
+
+    @app.post("/network/portal-handoff/stop")
+    def network_portal_handoff_stop() -> dict[str, object]:
+        now = datetime.now(UTC).isoformat()
+        conn = open_db(db_path)
+        try:
+            ap_config = _load_or_init_ap_config(conn, now)
+            current_state = _load_or_init_portal_handoff_state(conn, now)
+            if not bool(current_state["active"]):
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "PORTAL_HANDOFF_INVALID_STATE",
+                        "message": "Portal handoff is not active.",
+                        "suggestion": "Start portal handoff first, then stop it when login is complete.",
+                    },
+                )
+            previous_route_prefs = _parse_portal_handoff_route_prefs(
+                current_state["previous_eth_route_prefs_json"]
+            )
+            result = resolved_network_manager.stop_portal_handoff(
+                previous_eth_route_prefs=previous_route_prefs
+            )
+            _clear_portal_handoff_state(conn, now)
+            conn.commit()
+            snapshot = resolved_network_manager.status_snapshot(str(ap_config["profile_name"]))
+            snapshot_payload = _snapshot_with_portal_handoff_state(
+                conn=conn,
+                snapshot_payload=snapshot.to_dict(),
+                now_utc=now,
+            )
+            return {
+                "stopped": True,
+                "restored_ethernet_connections": result.get("restored_ethernet_connections", []),
+                "snapshot": snapshot_payload,
+            }
+        except (ValueError, json.JSONDecodeError) as exc:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "PORTAL_HANDOFF_RESTORE_INVALID",
+                    "message": "Failed to stop portal handoff: stored route preference state is invalid.",
+                    "detail": str(exc),
+                    "suggestion": "Inspect daemon logs and reset portal handoff state before retry.",
+                },
+            ) from exc
         except NetworkManagerError as exc:
             raise HTTPException(status_code=503, detail=exc.to_payload()) from exc
         finally:

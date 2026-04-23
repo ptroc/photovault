@@ -43,6 +43,8 @@ def _network_snapshot() -> dict[str, object]:
         "upstream_no_usable_internet": False,
         "upstream_internet_reachable": True,
         "captive_portal_detected": False,
+        "portal_handoff_active": False,
+        "portal_handoff_started_at_utc": None,
         "next_operator_action": "Local AP is available and upstream Internet is reachable.",
     }
 
@@ -318,6 +320,8 @@ def _overview_payloads(
                 "upstream_no_usable_internet": False,
                 "upstream_internet_reachable": True,
                 "captive_portal_detected": False,
+                "portal_handoff_active": False,
+                "portal_handoff_started_at_utc": None,
                 "next_operator_action": (
                     "Upstream network is connected. Verify AP settings and continue operations."
                 ),
@@ -983,6 +987,43 @@ def test_network_page_renders_captive_portal_guidance() -> None:
     assert "http://neverssl.com" in page
     assert "cpa-test" in page
     assert "Upstream status: captive_portal_likely" in page
+    assert "Start portal handoff" in page
+
+
+def test_network_page_renders_active_portal_handoff_guidance() -> None:
+    payloads = _overview_payloads()
+    network_status = dict(payloads["/network/status"])
+    snapshot = dict(network_status["snapshot"])
+    snapshot.update(
+        {
+            "general": {
+                "state": "connected",
+                "connectivity": "portal",
+                "wifi": "enabled",
+            },
+            "upstream_connectivity": "portal",
+            "upstream_status": "captive_portal_likely",
+            "upstream_no_usable_internet": True,
+            "upstream_internet_reachable": False,
+            "captive_portal_detected": True,
+            "portal_handoff_active": True,
+            "portal_handoff_started_at_utc": "2026-04-22T21:00:00+00:00",
+        }
+    )
+    network_status["snapshot"] = snapshot
+    payloads["/network/status"] = network_status
+
+    def fake_daemon_get(_: str, path: str) -> object:
+        return payloads[path]
+
+    app = create_app(
+        daemon_get=fake_daemon_get,
+        dependency_snapshot_get=_dependency_snapshot,
+    )
+    page = app.test_client().get("/network").get_data(as_text=True)
+    assert "Portal handoff active." in page
+    assert "Stop portal handoff" in page
+    assert "wired remote admin access may be temporarily affected" in page
 
 
 def test_network_ap_update_success_and_error_render() -> None:
@@ -1140,3 +1181,58 @@ def test_network_upstream_recheck_success_and_error_render() -> None:
     )
     error_body = app_with_error.test_client().post("/network/upstream-recheck").get_data(as_text=True)
     assert "Failed to recheck upstream connectivity: daemon API returned HTTP 503" in error_body
+
+
+def test_network_portal_handoff_start_and_stop_render() -> None:
+    payloads = _overview_payloads()
+
+    def fake_daemon_get(_: str, path: str) -> object:
+        return payloads[path]
+
+    def success_daemon_post(_: str, path: str, payload: dict[str, object]) -> object:
+        if path == "/network/portal-handoff/start":
+            return {"started": True}
+        if path == "/network/portal-handoff/stop":
+            return {"stopped": True}
+        raise AssertionError(f"unexpected path: {path}")
+
+    app = create_app(
+        daemon_get=fake_daemon_get,
+        daemon_post=success_daemon_post,
+        dependency_snapshot_get=_dependency_snapshot,
+    )
+    start_body = app.test_client().post("/network/portal-handoff/start").get_data(as_text=True)
+    assert "Portal handoff started." in start_body
+    stop_body = app.test_client().post("/network/portal-handoff/stop").get_data(as_text=True)
+    assert "Portal handoff stopped and Ethernet route preferences were restored." in stop_body
+
+
+def test_network_portal_handoff_start_and_stop_error_render() -> None:
+    payloads = _overview_payloads()
+
+    def fake_daemon_get(_: str, path: str) -> object:
+        return payloads[path]
+
+    def failing_daemon_post(_: str, path: str, payload: dict[str, object]) -> object:
+        request = httpx.Request("POST", f"http://127.0.0.1:9101{path}")
+        response = httpx.Response(
+            status_code=503,
+            json={
+                "detail": {
+                    "code": "NM_COMMAND_FAILED",
+                    "message": "forced failure",
+                }
+            },
+            request=request,
+        )
+        raise httpx.HTTPStatusError("failure", request=request, response=response)
+
+    app = create_app(
+        daemon_get=fake_daemon_get,
+        daemon_post=failing_daemon_post,
+        dependency_snapshot_get=_dependency_snapshot,
+    )
+    start_error = app.test_client().post("/network/portal-handoff/start").get_data(as_text=True)
+    assert "Failed to start portal handoff: daemon API returned HTTP 503" in start_error
+    stop_error = app.test_client().post("/network/portal-handoff/stop").get_data(as_text=True)
+    assert "Failed to stop portal handoff: daemon API returned HTTP 503" in stop_error

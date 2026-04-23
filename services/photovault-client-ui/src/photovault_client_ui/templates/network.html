@@ -19,6 +19,7 @@
 
       {% if network_snapshot %}
         {% set upstream_status = network_snapshot.upstream_status or "disconnected" %}
+        {% set portal_handoff_active = network_snapshot.portal_handoff_active if network_snapshot.portal_handoff_active is defined else false %}
         <div class="kpi {% if network_snapshot.local_ap_ready and network_snapshot.upstream_internet_reachable %}status-ok{% elif network_snapshot.local_ap_ready %}status-warn{% else %}status-error{% endif %}">
           {{ upstream_status }}
         </div>
@@ -32,19 +33,42 @@
           Upstream STA connected: {{ "yes" if network_snapshot.sta_connected else "no" }}<br>
           Upstream internet usable: {{ "no" if network_snapshot.upstream_no_usable_internet else "yes" }}<br>
           Upstream Internet reachable: {{ "yes" if network_snapshot.upstream_internet_reachable else "no" }}<br>
-          Captive portal suspected: {{ "yes" if network_snapshot.captive_portal_detected else "no" }}
+          Captive portal suspected: {{ "yes" if network_snapshot.captive_portal_detected else "no" }}<br>
+          Portal handoff active: {{ "yes" if portal_handoff_active else "no" }}
         </p>
+        {% if portal_handoff_active and network_snapshot.portal_handoff_started_at_utc is defined and network_snapshot.portal_handoff_started_at_utc %}
+          <p class="muted">
+            Portal handoff started: {{ network_snapshot.portal_handoff_started_at_utc }}
+          </p>
+        {% endif %}
         <p class="muted">
           AP device(s): {{ network_snapshot.ap_device_names | join(", ") if network_snapshot.ap_device_names else "none" }}<br>
           STA device(s): {{ network_snapshot.sta_device_names | join(", ") if network_snapshot.sta_device_names else "none" }}<br>
           STA connection(s): {{ network_snapshot.sta_connection_names | join(", ") if network_snapshot.sta_connection_names else "none" }}
         </p>
-        {% if upstream_status == "captive_portal_likely" %}
+        {% if upstream_status == "captive_portal_likely" and portal_handoff_active %}
+          <div class="banner banner-warning">
+            <strong>Portal handoff active.</strong>
+            <span>Local AP remains available. Complete login using a device connected to <code>{{ network_snapshot.ap_profile.ssid }}</code>.</span>
+            <span>1. Join <code>{{ network_snapshot.ap_profile.ssid }}</code> from a phone/laptop.</span>
+            <span>2. Open <code>http://neverssl.com</code>.</span>
+            <span>3. Complete captive portal login.</span>
+            <span>4. Return here and click <strong>Recheck upstream status</strong>.</span>
+            <span>5. Click <strong>Stop portal handoff</strong> once upstream Internet is usable.</span>
+            <span>Warning: while handoff is active, wired remote admin access may be temporarily affected.</span>
+            <form method="post" action="/network/portal-handoff/stop">
+              <button type="submit" class="secondary">Stop portal handoff</button>
+            </form>
+          </div>
+        {% elif upstream_status == "captive_portal_likely" %}
           <div class="banner banner-warning">
             <strong>Captive portal login likely required.</strong>
             <span>Local appliance access stays available through AP <code>{{ network_snapshot.ap_profile.ssid }}</code> while upstream login is completed.</span>
             <span>Use a phone or laptop joined to upstream Wi-Fi ({{ network_snapshot.sta_connection_names | join(", ") if network_snapshot.sta_connection_names else "current STA" }}) and open <code>http://neverssl.com</code> to complete hotel/portal login.</span>
             <span>After login succeeds, return here and click <strong>Recheck upstream status</strong>.</span>
+            <form method="post" action="/network/portal-handoff/start">
+              <button type="submit" class="secondary">Start portal handoff</button>
+            </form>
           </div>
         {% elif upstream_status == "no_usable_internet" %}
           <div class="banner banner-warning">

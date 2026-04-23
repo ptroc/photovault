@@ -3,6 +3,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 from photovault_clientd.app import create_app
+from photovault_clientd.db import open_db, upsert_network_portal_handoff_state
 from photovault_clientd.networking import (
     AccessPointProfile,
     NetworkDevice,
@@ -63,6 +64,10 @@ class _FakeNetworkManager:
         self.fail_connect = False
         self.recheck_called = False
         self.fail_recheck = False
+        self.start_handoff_calls: list[dict[str, str]] = []
+        self.fail_start_handoff = False
+        self.stop_handoff_calls: list[list[dict[str, str]]] = []
+        self.fail_stop_handoff = False
 
     def ensure_ap_profile(self, *, profile_name: str, ssid: str, password: str) -> dict[str, object]:
         self.ensure_calls.append(
@@ -134,6 +139,46 @@ class _FakeNetworkManager:
             "snapshot": _snapshot(ap_profile_name).to_dict(),
         }
 
+    def start_portal_handoff(self, *, ap_profile_name: str = "photovault-ap") -> dict[str, object]:
+        self.start_handoff_calls.append({"ap_profile_name": ap_profile_name})
+        if self.fail_start_handoff:
+            raise NetworkManagerError(
+                OperatorError(
+                    code="NM_PORTAL_HANDOFF_INVALID_STATE",
+                    message="Cannot start portal handoff: upstream state is not captive portal.",
+                    detail="forced handoff start failure",
+                    suggestion="retry",
+                )
+            )
+        return {
+            "modified_ethernet_connections": ["Wired connection 1"],
+            "previous_eth_route_prefs": [
+                {
+                    "connection_name": "Wired connection 1",
+                    "device_name": "eth0",
+                    "ipv4_never_default": "no",
+                    "ipv6_never_default": "no",
+                }
+            ],
+        }
+
+    def stop_portal_handoff(self, *, previous_eth_route_prefs: list[dict[str, str]]) -> dict[str, object]:
+        self.stop_handoff_calls.append(previous_eth_route_prefs)
+        if self.fail_stop_handoff:
+            raise NetworkManagerError(
+                OperatorError(
+                    code="NM_COMMAND_FAILED",
+                    message="Failed to stop captive-portal handoff: nmcli command failed.",
+                    detail="forced handoff stop failure",
+                    suggestion="retry",
+                )
+            )
+        return {
+            "restored_ethernet_connections": [
+                entry["connection_name"] for entry in previous_eth_route_prefs
+            ]
+        }
+
 
 def test_startup_ensures_ap_profile_idempotently(tmp_path: Path) -> None:
     db_path = tmp_path / "state.sqlite3"
@@ -166,6 +211,8 @@ def test_network_status_and_ap_config_endpoints_return_normalized_payload(tmp_pa
         assert status_payload["snapshot"]["local_ap_ready"] is True
         assert status_payload["snapshot"]["upstream_status"] == "internet_reachable"
         assert status_payload["snapshot"]["upstream_internet_reachable"] is True
+        assert status_payload["snapshot"]["portal_handoff_active"] is False
+        assert status_payload["snapshot"]["portal_handoff_started_at_utc"] is None
 
         config_response = client.get("/network/ap-config")
         assert config_response.status_code == 200
@@ -260,6 +307,7 @@ def test_network_upstream_recheck_endpoint_returns_snapshot_and_error_handling(t
         payload = ok_response.json()
         assert payload["connectivity_check"] == "full"
         assert payload["snapshot"]["upstream_status"] == "internet_reachable"
+        assert payload["snapshot"]["portal_handoff_active"] is False
         assert manager.recheck_called is True
 
     manager_failure = _FakeNetworkManager()
@@ -269,3 +317,93 @@ def test_network_upstream_recheck_endpoint_returns_snapshot_and_error_handling(t
         failure = client.post("/network/upstream-recheck")
         assert failure.status_code == 503
         assert failure.json()["detail"]["code"] == "NM_COMMAND_FAILED"
+
+
+def test_network_portal_handoff_start_stop_endpoints_and_state(tmp_path: Path) -> None:
+    manager = _FakeNetworkManager()
+    app = create_app(db_path=tmp_path / "state.sqlite3", network_manager=manager)
+    with TestClient(app) as client:
+        start = client.post("/network/portal-handoff/start")
+        assert start.status_code == 200
+        start_payload = start.json()
+        assert start_payload["started"] is True
+        assert start_payload["modified_ethernet_connections"] == ["Wired connection 1"]
+        assert start_payload["snapshot"]["portal_handoff_active"] is True
+        assert start_payload["snapshot"]["portal_handoff_started_at_utc"] is not None
+
+        stop = client.post("/network/portal-handoff/stop")
+        assert stop.status_code == 200
+        stop_payload = stop.json()
+        assert stop_payload["stopped"] is True
+        assert stop_payload["restored_ethernet_connections"] == ["Wired connection 1"]
+        assert stop_payload["snapshot"]["portal_handoff_active"] is False
+        assert stop_payload["snapshot"]["portal_handoff_started_at_utc"] is None
+
+        invalid_stop = client.post("/network/portal-handoff/stop")
+        assert invalid_stop.status_code == 409
+        assert invalid_stop.json()["detail"]["code"] == "PORTAL_HANDOFF_INVALID_STATE"
+
+    assert manager.start_handoff_calls == [{"ap_profile_name": "photovault-ap"}]
+    assert manager.stop_handoff_calls
+
+
+def test_network_portal_handoff_start_stop_failure_paths(tmp_path: Path) -> None:
+    manager_start_failure = _FakeNetworkManager()
+    manager_start_failure.fail_start_handoff = True
+    app_start_failure = create_app(
+        db_path=tmp_path / "start-failure.sqlite3",
+        network_manager=manager_start_failure,
+    )
+    with TestClient(app_start_failure) as client:
+        failure = client.post("/network/portal-handoff/start")
+        assert failure.status_code == 503
+        assert failure.json()["detail"]["code"] == "NM_PORTAL_HANDOFF_INVALID_STATE"
+
+    manager_stop_failure = _FakeNetworkManager()
+    manager_stop_failure.fail_stop_handoff = True
+    app_stop_failure = create_app(
+        db_path=tmp_path / "stop-failure.sqlite3",
+        network_manager=manager_stop_failure,
+    )
+    with TestClient(app_stop_failure) as client:
+        start_ok = client.post("/network/portal-handoff/start")
+        assert start_ok.status_code == 200
+        stop_failure = client.post("/network/portal-handoff/stop")
+        assert stop_failure.status_code == 503
+        assert stop_failure.json()["detail"]["code"] == "NM_COMMAND_FAILED"
+
+
+def test_startup_restores_stale_active_portal_handoff_state(tmp_path: Path) -> None:
+    db_path = tmp_path / "state.sqlite3"
+    conn = open_db(db_path)
+    upsert_network_portal_handoff_state(
+        conn,
+        active=True,
+        started_at_utc="2026-04-22T20:00:00+00:00",
+        previous_eth_route_prefs_json=(
+            '[{"connection_name":"Wired connection 1","device_name":"eth0",'
+            '"ipv4_never_default":"no","ipv6_never_default":"no"}]'
+        ),
+        updated_at_utc="2026-04-22T20:00:00+00:00",
+    )
+    conn.commit()
+    conn.close()
+
+    manager = _FakeNetworkManager()
+    app = create_app(db_path=db_path, network_manager=manager)
+    with TestClient(app):
+        pass
+
+    assert len(manager.stop_handoff_calls) >= 1
+    with sqlite3.connect(db_path) as check_conn:
+        row = check_conn.execute(
+            """
+            SELECT active, started_at_utc, previous_eth_route_prefs_json
+            FROM network_portal_handoff_state
+            WHERE id = 1;
+            """
+        ).fetchone()
+    assert row is not None
+    assert int(row[0]) == 0
+    assert row[1] is None
+    assert row[2] == "[]"

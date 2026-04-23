@@ -1,5 +1,6 @@
 """SQLite schema and persistence helpers for photovault-clientd."""
 
+import json
 import sqlite3
 from pathlib import Path
 from typing import Callable, Sequence
@@ -80,7 +81,7 @@ DETECTED_MEDIA_EVENT_TYPES = (
     DETECTED_MEDIA_EVENT_REMOVED,
 )
 
-LATEST_SCHEMA_VERSION = 7
+LATEST_SCHEMA_VERSION = 8
 CLIENT_ENROLLMENT_PENDING = "pending"
 CLIENT_ENROLLMENT_APPROVED = "approved"
 CLIENT_ENROLLMENT_REVOKED = "revoked"
@@ -316,6 +317,20 @@ def _apply_migration_v7(conn: sqlite3.Connection) -> None:
     )
 
 
+def _apply_migration_v8(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS network_portal_handoff_state (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            active INTEGER NOT NULL DEFAULT 0,
+            started_at_utc TEXT,
+            previous_eth_route_prefs_json TEXT NOT NULL,
+            updated_at_utc TEXT NOT NULL
+        );
+        """
+    )
+
+
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     1: _apply_migration_v1,
     2: _apply_migration_v2,
@@ -324,6 +339,7 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     5: _apply_migration_v5,
     6: _apply_migration_v6,
     7: _apply_migration_v7,
+    8: _apply_migration_v8,
 }
 
 
@@ -859,6 +875,56 @@ def set_network_ap_apply_result(
         WHERE id = 1;
         """,
         (last_applied_at_utc, last_apply_error),
+    )
+
+
+def fetch_network_portal_handoff_state(conn: sqlite3.Connection) -> dict[str, object] | None:
+    row = conn.execute(
+        """
+        SELECT active, started_at_utc, previous_eth_route_prefs_json, updated_at_utc
+        FROM network_portal_handoff_state
+        WHERE id = 1;
+        """
+    ).fetchone()
+    if row is None:
+        return None
+    return {
+        "active": bool(int(row[0])),
+        "started_at_utc": row[1],
+        "previous_eth_route_prefs_json": str(row[2]),
+        "updated_at_utc": str(row[3]),
+    }
+
+
+def upsert_network_portal_handoff_state(
+    conn: sqlite3.Connection,
+    *,
+    active: bool,
+    started_at_utc: str | None,
+    previous_eth_route_prefs_json: str | None,
+    updated_at_utc: str,
+) -> None:
+    serialized_previous = previous_eth_route_prefs_json
+    if serialized_previous is None:
+        serialized_previous = json.dumps([])
+    conn.execute(
+        """
+        INSERT INTO network_portal_handoff_state (
+            id, active, started_at_utc, previous_eth_route_prefs_json, updated_at_utc
+        )
+        VALUES (1, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE
+        SET active = excluded.active,
+            started_at_utc = excluded.started_at_utc,
+            previous_eth_route_prefs_json = excluded.previous_eth_route_prefs_json,
+            updated_at_utc = excluded.updated_at_utc;
+        """,
+        (
+            1 if active else 0,
+            started_at_utc,
+            serialized_previous,
+            updated_at_utc,
+        ),
     )
 
 

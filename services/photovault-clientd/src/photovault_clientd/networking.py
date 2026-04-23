@@ -72,6 +72,8 @@ class NetworkStatusSnapshot:
     upstream_internet_reachable: bool
     captive_portal_detected: bool
     next_operator_action: str
+    portal_handoff_active: bool = False
+    portal_handoff_started_at_utc: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -312,6 +314,44 @@ class NetworkManagerAdapter:
         raw = row.get("GENERAL.IP4-CONNECTIVITY", "")
         return _normalize_connectivity_value(raw)
 
+    def _active_ethernet_connections(self) -> list[dict[str, str]]:
+        targets: list[dict[str, str]] = []
+        seen_connection_names: set[str] = set()
+        for device in self._network_devices():
+            if device.type != "ethernet" or device.state.lower() != "connected":
+                continue
+            connection_name = device.connection.strip()
+            if not connection_name or connection_name == "--" or connection_name in seen_connection_names:
+                continue
+            seen_connection_names.add(connection_name)
+            targets.append(
+                {
+                    "connection_name": connection_name,
+                    "device_name": device.device.strip(),
+                }
+            )
+        return targets
+
+    def _connection_route_preferences(self, connection_name: str) -> dict[str, str]:
+        output = self._run(
+            [
+                "-m",
+                "multiline",
+                "-f",
+                "connection.id,ipv4.never-default,ipv6.never-default",
+                "connection",
+                "show",
+                connection_name,
+            ],
+            action=f"inspect route preferences for connection {connection_name}",
+        )
+        records = parse_nmcli_multiline(output)
+        row = records[0] if records else {}
+        return {
+            "ipv4_never_default": _normalize_never_default_value(row.get("ipv4.never-default", "")),
+            "ipv6_never_default": _normalize_never_default_value(row.get("ipv6.never-default", "")),
+        }
+
     def get_ap_profile(self, profile_name: str = DEFAULT_AP_PROFILE_NAME) -> AccessPointProfile:
         exists = profile_name in self._connection_names()
         if not exists:
@@ -388,6 +428,12 @@ class NetworkManagerAdapter:
                 "yes",
                 "802-11-wireless-security.key-mgmt",
                 "wpa-psk",
+                "802-11-wireless-security.proto",
+                "rsn",
+                "802-11-wireless-security.pairwise",
+                "ccmp",
+                "802-11-wireless-security.group",
+                "ccmp",
                 "802-11-wireless-security.psk",
                 password,
                 "ipv4.method",
@@ -530,6 +576,158 @@ class NetworkManagerAdapter:
         return {
             "connectivity_check": connectivity_check,
             "snapshot": snapshot.to_dict(),
+        }
+
+    def start_portal_handoff(self, *, ap_profile_name: str = DEFAULT_AP_PROFILE_NAME) -> dict[str, Any]:
+        snapshot = self.status_snapshot(ap_profile_name)
+        if not snapshot.sta_connected:
+            raise NetworkManagerError(
+                OperatorError(
+                    code="NM_PORTAL_HANDOFF_INVALID_STATE",
+                    message="Cannot start portal handoff: upstream STA is not connected.",
+                    detail=f"upstream_status={snapshot.upstream_status}",
+                    suggestion="Join upstream Wi-Fi first, then retry portal handoff.",
+                )
+            )
+        if not snapshot.local_ap_ready:
+            raise NetworkManagerError(
+                OperatorError(
+                    code="NM_PORTAL_HANDOFF_INVALID_STATE",
+                    message="Cannot start portal handoff: local AP is not ready.",
+                    detail=f"upstream_status={snapshot.upstream_status}",
+                    suggestion="Restore local AP readiness before starting portal handoff.",
+                )
+            )
+        if snapshot.upstream_status != "captive_portal_likely":
+            raise NetworkManagerError(
+                OperatorError(
+                    code="NM_PORTAL_HANDOFF_INVALID_STATE",
+                    message=(
+                        "Cannot start portal handoff: upstream state is not captive portal."
+                    ),
+                    detail=f"upstream_status={snapshot.upstream_status}",
+                    suggestion="Start handoff only when captive-portal guidance is active.",
+                )
+            )
+
+        active_ethernet_connections = self._active_ethernet_connections()
+        if not active_ethernet_connections:
+            raise NetworkManagerError(
+                OperatorError(
+                    code="NM_PORTAL_HANDOFF_NO_ETH",
+                    message="Cannot start portal handoff: no active Ethernet connection was found.",
+                    detail="no connected ethernet devices",
+                    suggestion=(
+                        "Attach active Ethernet management uplink before starting portal handoff."
+                    ),
+                )
+            )
+
+        previous_eth_route_prefs: list[dict[str, str]] = []
+        for target in active_ethernet_connections:
+            route_prefs = self._connection_route_preferences(target["connection_name"])
+            previous_eth_route_prefs.append(
+                {
+                    "connection_name": target["connection_name"],
+                    "device_name": target["device_name"],
+                    "ipv4_never_default": route_prefs["ipv4_never_default"],
+                    "ipv6_never_default": route_prefs["ipv6_never_default"],
+                }
+            )
+
+        for target in previous_eth_route_prefs:
+            connection_name = target["connection_name"]
+            device_name = target["device_name"]
+            action = f"start captive-portal handoff via connection {connection_name}"
+            self._run(
+                [
+                    "connection",
+                    "modify",
+                    connection_name,
+                    "ipv4.never-default",
+                    "yes",
+                    "ipv6.never-default",
+                    "yes",
+                ],
+                action=action,
+            )
+            up_command = ["connection", "up", connection_name]
+            if device_name:
+                up_command.extend(["ifname", device_name])
+            self._run(up_command, action=action)
+
+        return {
+            "snapshot": snapshot.to_dict(),
+            "modified_ethernet_connections": [
+                target["connection_name"] for target in previous_eth_route_prefs
+            ],
+            "previous_eth_route_prefs": previous_eth_route_prefs,
+        }
+
+    def stop_portal_handoff(self, *, previous_eth_route_prefs: list[dict[str, str]]) -> dict[str, Any]:
+        if not previous_eth_route_prefs:
+            raise NetworkManagerError(
+                OperatorError(
+                    code="NM_PORTAL_HANDOFF_RESTORE_INVALID",
+                    message="Cannot stop portal handoff: previous Ethernet route preferences are missing.",
+                    detail="empty route preference list",
+                    suggestion="Start portal handoff before attempting to stop it.",
+                )
+            )
+
+        normalized_targets: list[dict[str, str]] = []
+        for target in previous_eth_route_prefs:
+            connection_name = str(target.get("connection_name", "")).strip()
+            if not connection_name:
+                raise NetworkManagerError(
+                    OperatorError(
+                        code="NM_PORTAL_HANDOFF_RESTORE_INVALID",
+                        message=(
+                            "Cannot stop portal handoff: route preference payload is missing "
+                            "connection_name."
+                        ),
+                        detail=str(target),
+                        suggestion="Re-run portal handoff start before stopping it.",
+                    )
+                )
+            normalized_targets.append(
+                {
+                    "connection_name": connection_name,
+                    "device_name": str(target.get("device_name", "")).strip(),
+                    "ipv4_never_default": _normalize_never_default_value(
+                        str(target.get("ipv4_never_default", "no"))
+                    ),
+                    "ipv6_never_default": _normalize_never_default_value(
+                        str(target.get("ipv6_never_default", "no"))
+                    ),
+                }
+            )
+
+        restored_connection_names: list[str] = []
+        for target in normalized_targets:
+            connection_name = target["connection_name"]
+            device_name = target["device_name"]
+            action = f"stop captive-portal handoff via connection {connection_name}"
+            self._run(
+                [
+                    "connection",
+                    "modify",
+                    connection_name,
+                    "ipv4.never-default",
+                    target["ipv4_never_default"],
+                    "ipv6.never-default",
+                    target["ipv6_never_default"],
+                ],
+                action=action,
+            )
+            up_command = ["connection", "up", connection_name]
+            if device_name:
+                up_command.extend(["ifname", device_name])
+            self._run(up_command, action=action)
+            restored_connection_names.append(connection_name)
+
+        return {
+            "restored_ethernet_connections": restored_connection_names,
         }
 
     def status_snapshot(self, profile_name: str = DEFAULT_AP_PROFILE_NAME) -> NetworkStatusSnapshot:
@@ -730,6 +928,13 @@ def _extract_http_status_code(headers_output: str) -> int | None:
         if status.isdigit():
             return int(status)
     return None
+
+
+def _normalize_never_default_value(raw: str) -> str:
+    normalized = raw.strip().lower()
+    if normalized in {"yes", "true", "1"}:
+        return "yes"
+    return "no"
 
 
 def _sta_profile_name(ssid: str) -> str:

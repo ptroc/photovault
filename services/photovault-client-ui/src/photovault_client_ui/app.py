@@ -1651,6 +1651,33 @@ def create_app(
             )
         )
 
+    @app.post("/network/portal-handoff/start")
+    def start_portal_handoff() -> str:
+        try:
+            daemon_post(daemon_base_url, "/network/portal-handoff/start", {})
+        except httpx.HTTPError as exc:
+            return _render_network(
+                network_error=f"Failed to start portal handoff: {_describe_http_error(exc)}"
+            )
+        return _render_network(
+            network_notice=(
+                "Portal handoff started. Join local AP from phone/laptop, complete portal login "
+                "using http://neverssl.com, then recheck and stop handoff."
+            )
+        )
+
+    @app.post("/network/portal-handoff/stop")
+    def stop_portal_handoff() -> str:
+        try:
+            daemon_post(daemon_base_url, "/network/portal-handoff/stop", {})
+        except httpx.HTTPError as exc:
+            return _render_network(
+                network_error=f"Failed to stop portal handoff: {_describe_http_error(exc)}"
+            )
+        return _render_network(
+            network_notice="Portal handoff stopped and Ethernet route preferences were restored."
+        )
+
     @app.post("/network/ap-config")
     def update_ap_config() -> str:
         ssid = request.form.get("ssid", "")

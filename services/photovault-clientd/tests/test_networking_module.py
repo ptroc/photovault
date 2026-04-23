@@ -47,6 +47,74 @@ def test_adapter_normalizes_missing_nmcli() -> None:
     assert exc.value.operator_error.code == "NMCLI_MISSING"
 
 
+def test_ensure_ap_profile_enforces_wpa2_rsn_ccmp() -> None:
+    observed: list[list[str]] = []
+    expected_modify = [
+        "connection",
+        "modify",
+        "photovault-ap",
+        "802-11-wireless.mode",
+        "ap",
+        "802-11-wireless.band",
+        "bg",
+        "connection.autoconnect",
+        "yes",
+        "802-11-wireless-security.key-mgmt",
+        "wpa-psk",
+        "802-11-wireless-security.proto",
+        "rsn",
+        "802-11-wireless-security.pairwise",
+        "ccmp",
+        "802-11-wireless-security.group",
+        "ccmp",
+        "802-11-wireless-security.psk",
+        "photovault123",
+        "ipv4.method",
+        "shared",
+        "ipv6.method",
+        "ignore",
+    ]
+    outputs = {
+        tuple(["-t", "-f", "NAME", "connection", "show"]): "photovault-ap\n",
+        tuple(expected_modify): "",
+        tuple(["connection", "modify", "photovault-ap", "802-11-wireless.ssid", "photovault-ap"]): "",
+        tuple(
+            [
+                "-m",
+                "multiline",
+                "-f",
+                (
+                    "connection.id,connection.autoconnect,802-11-wireless.ssid,"
+                    "802-11-wireless.mode,802-11-wireless-security.key-mgmt,GENERAL.STATE"
+                ),
+                "connection",
+                "show",
+                "photovault-ap",
+            ]
+        ): (
+            "connection.id: photovault-ap\nconnection.autoconnect: yes\n"
+            "802-11-wireless.ssid: photovault-ap\n802-11-wireless.mode: ap\n"
+            "802-11-wireless-security.key-mgmt: wpa-psk\nGENERAL.STATE: activated\n"
+        ),
+    }
+
+    def runner(args: list[str]) -> str:
+        observed.append(args)
+        key = tuple(args)
+        if key not in outputs:
+            raise AssertionError(f"unexpected nmcli args: {args}")
+        return outputs[key]
+
+    adapter = NetworkManagerAdapter(command_runner=runner)
+    payload = adapter.ensure_ap_profile(
+        profile_name="photovault-ap",
+        ssid="photovault-ap",
+        password="photovault123",
+    )
+    assert expected_modify in observed
+    assert payload["ap_profile"]["key_mgmt"] == "wpa-psk"
+
+
 def test_adapter_builds_status_snapshot_from_nmcli_outputs() -> None:
     outputs = {
         tuple(["-m", "multiline", "-f", "STATE,CONNECTIVITY,WIFI", "general"]): (
@@ -734,3 +802,256 @@ def test_connect_sta_network_surfaces_invalid_profile_error() -> None:
             ap_profile_name="photovault-ap",
         )
     assert exc.value.operator_error.code == "NM_WIFI_PROFILE_INVALID"
+
+
+def test_start_portal_handoff_requires_captive_portal_state() -> None:
+    outputs = {
+        tuple(["-m", "multiline", "-f", "STATE,CONNECTIVITY,WIFI", "general"]): (
+            "STATE: connected\nCONNECTIVITY: full\nWIFI: enabled\n"
+        ),
+        tuple(["-m", "multiline", "-f", "DEVICE,TYPE,STATE,CONNECTION", "device", "status"]): (
+            "DEVICE: wlan1\nTYPE: wifi\nSTATE: connected\nCONNECTION: photovault-ap\n"
+            "DEVICE: wlan0\nTYPE: wifi\nSTATE: connected\nCONNECTION: cpa-test\n"
+            "DEVICE: eth0\nTYPE: ethernet\nSTATE: connected\nCONNECTION: Wired connection 1\n"
+        ),
+        tuple(["-m", "multiline", "-f", "GENERAL.IP4-CONNECTIVITY", "device", "show", "wlan0"]): (
+            "GENERAL.IP4-CONNECTIVITY: 4 (full)\n"
+        ),
+        tuple(
+            ["-m", "multiline", "-f", "IN-USE,SSID,SIGNAL,SECURITY,CHAN,RATE", "device", "wifi", "list"]
+        ): "IN-USE: *\nSSID: cpa-test\nSIGNAL: 60\nSECURITY: --\nCHAN: 6\nRATE: 260 Mbit/s\n",
+        tuple(["-t", "-f", "NAME", "connection", "show"]): (
+            "photovault-ap\ncpa-test\nWired connection 1\n"
+        ),
+        tuple(
+            [
+                "-m",
+                "multiline",
+                "-f",
+                (
+                    "connection.id,connection.autoconnect,802-11-wireless.ssid,"
+                    "802-11-wireless.mode,802-11-wireless-security.key-mgmt,GENERAL.STATE"
+                ),
+                "connection",
+                "show",
+                "photovault-ap",
+            ]
+        ): (
+            "connection.id: photovault-ap\nconnection.autoconnect: yes\n"
+            "802-11-wireless.ssid: photovault-ap\n802-11-wireless.mode: ap\n"
+            "802-11-wireless-security.key-mgmt: wpa-psk\nGENERAL.STATE: activated\n"
+        ),
+    }
+
+    def runner(args: list[str]) -> str:
+        key = tuple(args)
+        if key not in outputs:
+            raise AssertionError(f"unexpected nmcli args: {args}")
+        return outputs[key]
+
+    adapter = NetworkManagerAdapter(command_runner=runner, connectivity_probe=lambda _device: "full")
+    with pytest.raises(NetworkManagerError) as exc:
+        adapter.start_portal_handoff(ap_profile_name="photovault-ap")
+    assert exc.value.operator_error.code == "NM_PORTAL_HANDOFF_INVALID_STATE"
+
+
+def test_start_portal_handoff_modifies_active_ethernet_connections() -> None:
+    observed: list[list[str]] = []
+    outputs = {
+        tuple(["-m", "multiline", "-f", "STATE,CONNECTIVITY,WIFI", "general"]): (
+            "STATE: connected\nCONNECTIVITY: full\nWIFI: enabled\n"
+        ),
+        tuple(["-m", "multiline", "-f", "DEVICE,TYPE,STATE,CONNECTION", "device", "status"]): (
+            "DEVICE: wlan1\nTYPE: wifi\nSTATE: connected\nCONNECTION: photovault-ap\n"
+            "DEVICE: wlan0\nTYPE: wifi\nSTATE: connected\nCONNECTION: cpa-test\n"
+            "DEVICE: eth0\nTYPE: ethernet\nSTATE: connected\nCONNECTION: Wired connection 1\n"
+        ),
+        tuple(["-m", "multiline", "-f", "GENERAL.IP4-CONNECTIVITY", "device", "show", "wlan0"]): (
+            "GENERAL.IP4-CONNECTIVITY: 4 (full)\n"
+        ),
+        tuple(
+            ["-m", "multiline", "-f", "IN-USE,SSID,SIGNAL,SECURITY,CHAN,RATE", "device", "wifi", "list"]
+        ): "IN-USE: *\nSSID: cpa-test\nSIGNAL: 60\nSECURITY: --\nCHAN: 6\nRATE: 260 Mbit/s\n",
+        tuple(["-t", "-f", "NAME", "connection", "show"]): (
+            "photovault-ap\ncpa-test\nWired connection 1\n"
+        ),
+        tuple(
+            [
+                "-m",
+                "multiline",
+                "-f",
+                (
+                    "connection.id,connection.autoconnect,802-11-wireless.ssid,"
+                    "802-11-wireless.mode,802-11-wireless-security.key-mgmt,GENERAL.STATE"
+                ),
+                "connection",
+                "show",
+                "photovault-ap",
+            ]
+        ): (
+            "connection.id: photovault-ap\nconnection.autoconnect: yes\n"
+            "802-11-wireless.ssid: photovault-ap\n802-11-wireless.mode: ap\n"
+            "802-11-wireless-security.key-mgmt: wpa-psk\nGENERAL.STATE: activated\n"
+        ),
+        tuple(
+            [
+                "-m",
+                "multiline",
+                "-f",
+                "connection.id,ipv4.never-default,ipv6.never-default",
+                "connection",
+                "show",
+                "Wired connection 1",
+            ]
+        ): (
+            "connection.id: Wired connection 1\n"
+            "ipv4.never-default: no\n"
+            "ipv6.never-default: no\n"
+        ),
+        tuple(
+            [
+                "connection",
+                "modify",
+                "Wired connection 1",
+                "ipv4.never-default",
+                "yes",
+                "ipv6.never-default",
+                "yes",
+            ]
+        ): "",
+        tuple(["connection", "up", "Wired connection 1", "ifname", "eth0"]): "",
+    }
+
+    def runner(args: list[str]) -> str:
+        observed.append(args)
+        key = tuple(args)
+        if key not in outputs:
+            raise AssertionError(f"unexpected nmcli args: {args}")
+        return outputs[key]
+
+    adapter = NetworkManagerAdapter(command_runner=runner, connectivity_probe=lambda _device: "portal")
+    payload = adapter.start_portal_handoff(ap_profile_name="photovault-ap")
+    assert payload["modified_ethernet_connections"] == ["Wired connection 1"]
+    assert payload["previous_eth_route_prefs"] == [
+        {
+            "connection_name": "Wired connection 1",
+            "device_name": "eth0",
+            "ipv4_never_default": "no",
+            "ipv6_never_default": "no",
+        }
+    ]
+    assert [
+        "connection",
+        "modify",
+        "Wired connection 1",
+        "ipv4.never-default",
+        "yes",
+        "ipv6.never-default",
+        "yes",
+    ] in observed
+    assert ["connection", "up", "Wired connection 1", "ifname", "eth0"] in observed
+
+
+def test_start_portal_handoff_requires_active_ethernet_connection() -> None:
+    outputs = {
+        tuple(["-m", "multiline", "-f", "STATE,CONNECTIVITY,WIFI", "general"]): (
+            "STATE: connected\nCONNECTIVITY: full\nWIFI: enabled\n"
+        ),
+        tuple(["-m", "multiline", "-f", "DEVICE,TYPE,STATE,CONNECTION", "device", "status"]): (
+            "DEVICE: wlan1\nTYPE: wifi\nSTATE: connected\nCONNECTION: photovault-ap\n"
+            "DEVICE: wlan0\nTYPE: wifi\nSTATE: connected\nCONNECTION: cpa-test\n"
+        ),
+        tuple(["-m", "multiline", "-f", "GENERAL.IP4-CONNECTIVITY", "device", "show", "wlan0"]): (
+            "GENERAL.IP4-CONNECTIVITY: 4 (full)\n"
+        ),
+        tuple(
+            ["-m", "multiline", "-f", "IN-USE,SSID,SIGNAL,SECURITY,CHAN,RATE", "device", "wifi", "list"]
+        ): "IN-USE: *\nSSID: cpa-test\nSIGNAL: 60\nSECURITY: --\nCHAN: 6\nRATE: 260 Mbit/s\n",
+        tuple(["-t", "-f", "NAME", "connection", "show"]): (
+            "photovault-ap\ncpa-test\n"
+        ),
+        tuple(
+            [
+                "-m",
+                "multiline",
+                "-f",
+                (
+                    "connection.id,connection.autoconnect,802-11-wireless.ssid,"
+                    "802-11-wireless.mode,802-11-wireless-security.key-mgmt,GENERAL.STATE"
+                ),
+                "connection",
+                "show",
+                "photovault-ap",
+            ]
+        ): (
+            "connection.id: photovault-ap\nconnection.autoconnect: yes\n"
+            "802-11-wireless.ssid: photovault-ap\n802-11-wireless.mode: ap\n"
+            "802-11-wireless-security.key-mgmt: wpa-psk\nGENERAL.STATE: activated\n"
+        ),
+    }
+
+    def runner(args: list[str]) -> str:
+        key = tuple(args)
+        if key not in outputs:
+            raise AssertionError(f"unexpected nmcli args: {args}")
+        return outputs[key]
+
+    adapter = NetworkManagerAdapter(command_runner=runner, connectivity_probe=lambda _device: "portal")
+    with pytest.raises(NetworkManagerError) as exc:
+        adapter.start_portal_handoff(ap_profile_name="photovault-ap")
+    assert exc.value.operator_error.code == "NM_PORTAL_HANDOFF_NO_ETH"
+
+
+def test_stop_portal_handoff_restores_previous_route_preferences() -> None:
+    observed: list[list[str]] = []
+    outputs = {
+        tuple(
+            [
+                "connection",
+                "modify",
+                "Wired connection 1",
+                "ipv4.never-default",
+                "no",
+                "ipv6.never-default",
+                "no",
+            ]
+        ): "",
+        tuple(["connection", "up", "Wired connection 1", "ifname", "eth0"]): "",
+    }
+
+    def runner(args: list[str]) -> str:
+        observed.append(args)
+        key = tuple(args)
+        if key not in outputs:
+            raise AssertionError(f"unexpected nmcli args: {args}")
+        return outputs[key]
+
+    adapter = NetworkManagerAdapter(command_runner=runner)
+    payload = adapter.stop_portal_handoff(
+        previous_eth_route_prefs=[
+            {
+                "connection_name": "Wired connection 1",
+                "device_name": "eth0",
+                "ipv4_never_default": "no",
+                "ipv6_never_default": "no",
+            }
+        ]
+    )
+    assert payload["restored_ethernet_connections"] == ["Wired connection 1"]
+    assert [
+        "connection",
+        "modify",
+        "Wired connection 1",
+        "ipv4.never-default",
+        "no",
+        "ipv6.never-default",
+        "no",
+    ] in observed
+    assert ["connection", "up", "Wired connection 1", "ifname", "eth0"] in observed
+
+
+def test_stop_portal_handoff_requires_previous_route_preferences() -> None:
+    adapter = NetworkManagerAdapter(command_runner=lambda _args: "")
+    with pytest.raises(NetworkManagerError) as exc:
+        adapter.stop_portal_handoff(previous_eth_route_prefs=[])
+    assert exc.value.operator_error.code == "NM_PORTAL_HANDOFF_RESTORE_INVALID"
