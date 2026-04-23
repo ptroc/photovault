@@ -24,4 +24,5 @@ photovault_server_ui = [
   "static/app.css",
   "static/vendor/bootstrap/css/bootstrap.min.css",
   "static/vendor/bootstrap/js/bootstrap.bundle.min.js",
+  "static/vendor/htmx/htmx.min.js",
 ]

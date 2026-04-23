@@ -1,0 +1,96 @@
+{% from "macros.html" import status_badge %}
+{# Lightbox body. Swapped into #libraryLightboxBody by HTMX. The surrounding
+   modal provides the header and close affordance; this fragment renders
+   the enlarged preview plus inline metadata. Prev/next are left to the
+   parent grid to handle (keyboard or the buttons below), because the grid
+   owns the ordering. #}
+<div class="library-lightbox-root">
+  <div class="library-lightbox-preview">
+    {% if asset.preview_status == "succeeded" %}
+      <img
+        src="/catalog/preview?relative_path={{ asset.relative_path | urlencode }}"
+        alt="Preview for {{ asset.filename }}"
+      >
+    {% else %}
+      <div class="library-lightbox-placeholder">
+        <span>{{ asset.preview_summary }}</span>
+      </div>
+    {% endif %}
+  </div>
+  <div class="library-lightbox-meta">
+    <h3 class="h5 mb-1">{{ asset.filename }}</h3>
+    <div class="small text-secondary mb-2">{{ asset.relative_path }}</div>
+    <div class="d-flex flex-wrap gap-1 mb-2">
+      {{ status_badge(asset.media_type) }}
+      {{ status_badge(asset.extraction_status or 'unknown', 'extraction ' + (asset.extraction_status or 'unknown')) }}
+      {{ status_badge(asset.preview_status or 'unknown', 'preview ' + (asset.preview_status or 'unknown')) }}
+      {% if asset.is_favorite %}{{ status_badge('favorite') }}{% endif %}
+      {% if asset.is_archived %}{{ status_badge('archived') }}{% endif %}
+    </div>
+    {% if asset.metadata_summary %}
+      <p class="small text-secondary mb-2">{{ asset.metadata_summary }}</p>
+    {% endif %}
+    {% if asset.exposure_summary %}
+      <p class="small library-lightbox-exposure mb-2"><strong>{{ asset.exposure_summary }}</strong></p>
+    {% endif %}
+    <dl class="small library-lightbox-dl">
+      <dt>Size</dt><dd>{{ asset.size_human }}</dd>
+      {% if asset.shutter_speed_display %}
+        <dt>Shutter</dt><dd>{{ asset.shutter_speed_display }}</dd>
+      {% endif %}
+      {% if asset.f_number %}
+        <dt>Aperture</dt><dd>f/{{ '%g' % asset.f_number }}</dd>
+      {% endif %}
+      {% if asset.iso_speed %}
+        <dt>ISO</dt><dd>{{ asset.iso_speed }}</dd>
+      {% endif %}
+      {% if asset.focal_length_mm %}
+        <dt>Focal length</dt>
+        <dd>
+          {{ '%g' % asset.focal_length_mm }} mm{% if asset.focal_length_35mm_mm %}
+            <span class="text-secondary">({{ asset.focal_length_35mm_mm }} mm eq.)</span>
+          {% endif %}
+        </dd>
+      {% elif asset.focal_length_35mm_mm %}
+        <dt>Focal length</dt><dd>{{ asset.focal_length_35mm_mm }} mm eq.</dd>
+      {% endif %}
+      {% if asset.camera_make or asset.camera_model %}
+        <dt>Camera</dt>
+        <dd>
+          {{ (asset.camera_make or '').strip() }}
+          {{ (asset.camera_model or '').strip() }}
+        </dd>
+      {% endif %}
+      {% if asset.lens_model %}
+        <dt>Lens</dt><dd>{{ asset.lens_model }}</dd>
+      {% endif %}
+      <dt>Cataloged</dt><dd>{{ asset.last_cataloged_at_utc }}</dd>
+      {% if asset.provenance_job_name %}
+        <dt>Job</dt><dd>{{ asset.provenance_job_name }}</dd>
+      {% endif %}
+    </dl>
+    <div class="d-flex gap-2 mt-3 flex-wrap">
+      <a
+        class="btn btn-primary btn-sm"
+        href="/catalog/asset?relative_path={{ asset.relative_path | urlencode }}"
+      >Inspect</a>
+      {% if index > 0 %}
+        <button
+          class="btn btn-outline-secondary btn-sm library-lightbox-prev"
+          type="button"
+          data-index="{{ index - 1 }}"
+        >← Previous</button>
+      {% endif %}
+      {% if index + 1 < total %}
+        <button
+          class="btn btn-outline-secondary btn-sm library-lightbox-next"
+          type="button"
+          data-index="{{ index + 1 }}"
+        >Next →</button>
+      {% endif %}
+    </div>
+    <div class="small text-secondary mt-2">
+      {{ index + 1 }} of {{ total }} on this page
+    </div>
+  </div>
+</div>

@@ -45,6 +45,9 @@ def _snapshot(profile_name: str = "photovault-ap") -> NetworkStatusSnapshot:
         sta_device_names=["wlan0"],
         sta_connection_names=["studio-wifi"],
         local_ap_ready=True,
+        upstream_connectivity="full",
+        upstream_status="internet_reachable",
+        upstream_no_usable_internet=False,
         upstream_internet_reachable=True,
         captive_portal_detected=False,
         next_operator_action="Upstream network is connected. Verify AP settings and continue operations.",
@@ -58,6 +61,8 @@ class _FakeNetworkManager:
         self.fail_scan = False
         self.connect_calls: list[dict[str, str | None]] = []
         self.fail_connect = False
+        self.recheck_called = False
+        self.fail_recheck = False
 
     def ensure_ap_profile(self, *, profile_name: str, ssid: str, password: str) -> dict[str, object]:
         self.ensure_calls.append(
@@ -113,6 +118,22 @@ class _FakeNetworkManager:
             "snapshot": _snapshot(ap_profile_name).to_dict(),
         }
 
+    def recheck_upstream_status(self, ap_profile_name: str = "photovault-ap") -> dict[str, object]:
+        if self.fail_recheck:
+            raise NetworkManagerError(
+                OperatorError(
+                    code="NM_COMMAND_FAILED",
+                    message="Failed to recheck upstream internet connectivity: nmcli command failed.",
+                    detail="forced recheck failure",
+                    suggestion="retry",
+                )
+            )
+        self.recheck_called = True
+        return {
+            "connectivity_check": "full",
+            "snapshot": _snapshot(ap_profile_name).to_dict(),
+        }
+
 
 def test_startup_ensures_ap_profile_idempotently(tmp_path: Path) -> None:
     db_path = tmp_path / "state.sqlite3"
@@ -143,6 +164,7 @@ def test_network_status_and_ap_config_endpoints_return_normalized_payload(tmp_pa
         assert status_payload["snapshot"]["ap_profile"]["profile_name"] == "photovault-ap"
         assert "next_operator_action" in status_payload["snapshot"]
         assert status_payload["snapshot"]["local_ap_ready"] is True
+        assert status_payload["snapshot"]["upstream_status"] == "internet_reachable"
         assert status_payload["snapshot"]["upstream_internet_reachable"] is True
 
         config_response = client.get("/network/ap-config")
@@ -227,3 +249,23 @@ def test_network_sta_connect_validation_and_failure_handling(tmp_path: Path) -> 
         failure = client.post("/network/sta-connect", json={"ssid": "studio-wifi", "password": "validpass11"})
         assert failure.status_code == 503
         assert failure.json()["detail"]["code"] == "NM_WIFI_AUTH_FAILED"
+
+
+def test_network_upstream_recheck_endpoint_returns_snapshot_and_error_handling(tmp_path: Path) -> None:
+    manager = _FakeNetworkManager()
+    app = create_app(db_path=tmp_path / "state.sqlite3", network_manager=manager)
+    with TestClient(app) as client:
+        ok_response = client.post("/network/upstream-recheck")
+        assert ok_response.status_code == 200
+        payload = ok_response.json()
+        assert payload["connectivity_check"] == "full"
+        assert payload["snapshot"]["upstream_status"] == "internet_reachable"
+        assert manager.recheck_called is True
+
+    manager_failure = _FakeNetworkManager()
+    manager_failure.fail_recheck = True
+    app_failure = create_app(db_path=tmp_path / "state-failure.sqlite3", network_manager=manager_failure)
+    with TestClient(app_failure) as client:
+        failure = client.post("/network/upstream-recheck")
+        assert failure.status_code == 503
+        assert failure.json()["detail"]["code"] == "NM_COMMAND_FAILED"

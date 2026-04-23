@@ -705,6 +705,19 @@ def create_app(
         finally:
             conn.close()
 
+    @app.post("/network/upstream-recheck")
+    def network_upstream_recheck() -> dict[str, object]:
+        conn = open_db(db_path)
+        try:
+            ap_config = _load_or_init_ap_config(conn, datetime.now(UTC).isoformat())
+            return resolved_network_manager.recheck_upstream_status(
+                str(ap_config["profile_name"])
+            )
+        except NetworkManagerError as exc:
+            raise HTTPException(status_code=503, detail=exc.to_payload()) from exc
+        finally:
+            conn.close()
+
     @app.get("/bootstrap/recovery")
     def recovery_queue() -> dict[str, object]:
         conn = open_db(db_path)

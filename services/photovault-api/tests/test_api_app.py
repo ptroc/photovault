@@ -27,6 +27,11 @@ def _jpeg_with_exif_bytes(
     camera_model: str = "EOS R6",
     orientation: int = 6,
     lens_model: str = "RF24-70mm F2.8 L IS USM",
+    exposure_time: tuple[int, int] | None = None,
+    f_number: tuple[int, int] | None = None,
+    iso_speed: int | None = None,
+    focal_length_mm: tuple[int, int] | None = None,
+    focal_length_35mm: int | None = None,
 ) -> bytes:
     image = Image.new("RGB", (width, height), color=(120, 80, 40))
     exif = Image.Exif()
@@ -36,6 +41,16 @@ def _jpeg_with_exif_bytes(
     exif[272] = camera_model
     exif[274] = orientation
     exif[42036] = lens_model
+    if exposure_time is not None:
+        exif[33434] = exposure_time
+    if f_number is not None:
+        exif[33437] = f_number
+    if iso_speed is not None:
+        exif[34855] = iso_speed
+    if focal_length_mm is not None:
+        exif[37386] = focal_length_mm
+    if focal_length_35mm is not None:
+        exif[41989] = focal_length_35mm
     buffer = io.BytesIO()
     image.save(buffer, format="JPEG", exif=exif)
     return buffer.getvalue()
@@ -783,6 +798,11 @@ def test_upload_content_and_verify_writes_filesystem_and_promotes_sha(tmp_path: 
             "image_height": 1,
             "orientation": None,
             "lens_model": None,
+            "exposure_time_s": None,
+            "f_number": None,
+            "iso_speed": None,
+            "focal_length_mm": None,
+            "focal_length_35mm_mm": None,
         }
     ]
 
@@ -2085,6 +2105,11 @@ def test_admin_catalog_returns_paged_results(tmp_path: Path) -> None:
                 "image_height": None,
                 "orientation": None,
                 "lens_model": None,
+                "exposure_time_s": None,
+                "f_number": None,
+                "iso_speed": None,
+                "focal_length_mm": None,
+                "focal_length_35mm_mm": None,
             }
         ],
     }
@@ -2437,3 +2462,244 @@ def test_create_app_uses_postgres_store_when_database_url_env_set(monkeypatch, t
     assert isinstance(store, _FakePostgresStore)
     assert store.database_url == "postgresql://photovault:pw@db/photovault"
     assert store.initialized is True
+
+
+def _seed_folder_tree(store: InMemoryUploadStateStore) -> None:
+    """Populate a store with assets spread across a year/month/job layout.
+
+    Used by /v1/admin/catalog/folders and prefix-filter tests. We seed the
+    store directly via upsert_media_asset so we don't have to drive the
+    full upload pipeline just to observe how the folder aggregation works.
+    """
+    now = "2026-04-22T10:00:00+00:00"
+    fixtures = [
+        ("2026/04/Job_A/a1.jpg", "a1" * 32),
+        ("2026/04/Job_A/a2.jpg", "a2" * 32),
+        ("2026/04/Job_B/b1.jpg", "b1" * 32),
+        ("2026/03/Job_C/c1.jpg", "c1" * 32),
+    ]
+    for relative_path, sha in fixtures:
+        store.upsert_media_asset(
+            relative_path=relative_path,
+            sha256_hex=sha,
+            size_bytes=1024,
+            origin_kind="indexed",
+            observed_at_utc=now,
+        )
+
+
+def test_admin_catalog_folders_reports_counts_at_every_depth(tmp_path: Path) -> None:
+    store = InMemoryUploadStateStore()
+    _seed_folder_tree(store)
+    client = TestClient(
+        create_app(state_store=store, storage_root=tmp_path, bootstrap_token="bootstrap-123")
+    )
+
+    response = client.get("/v1/admin/catalog/folders")
+    assert response.status_code == 200
+    payload = response.json()
+    by_path = {folder["path"]: folder for folder in payload["folders"]}
+
+    # Root year has total_count summing both months.
+    assert by_path["2026"] == {"path": "2026", "depth": 1, "direct_count": 0, "total_count": 4}
+    # Month nodes aggregate their jobs.
+    assert by_path["2026/04"]["total_count"] == 3
+    assert by_path["2026/03"]["total_count"] == 1
+    # Leaf job folders count direct assets.
+    assert by_path["2026/04/Job_A"]["direct_count"] == 2
+    assert by_path["2026/04/Job_A"]["total_count"] == 2
+    assert by_path["2026/04/Job_B"]["direct_count"] == 1
+
+
+def test_admin_catalog_prefix_filter_limits_to_subtree(tmp_path: Path) -> None:
+    store = InMemoryUploadStateStore()
+    _seed_folder_tree(store)
+    client = TestClient(
+        create_app(state_store=store, storage_root=tmp_path, bootstrap_token="bootstrap-123")
+    )
+
+    # Prefix filter is applied as a subtree match: assets in that folder or
+    # any descendant folder.
+    response = client.get(
+        "/v1/admin/catalog", params={"relative_path_prefix": "2026/04/Job_A"}
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    paths = sorted(item["relative_path"] for item in payload["items"])
+    assert paths == ["2026/04/Job_A/a1.jpg", "2026/04/Job_A/a2.jpg"]
+    assert payload["total"] == 2
+
+    # A higher-level prefix pulls in everything under that subtree.
+    broader = client.get(
+        "/v1/admin/catalog", params={"relative_path_prefix": "2026/04"}
+    )
+    assert broader.status_code == 200
+    assert broader.json()["total"] == 3
+
+    # Trailing slashes are tolerated.
+    with_trailing = client.get(
+        "/v1/admin/catalog", params={"relative_path_prefix": "2026/04/"}
+    )
+    assert with_trailing.status_code == 200
+    assert with_trailing.json()["total"] == 3
+
+
+def test_admin_catalog_prefix_filter_rejects_invalid_values(tmp_path: Path) -> None:
+    store = InMemoryUploadStateStore()
+    _seed_folder_tree(store)
+    client = TestClient(
+        create_app(state_store=store, storage_root=tmp_path, bootstrap_token="bootstrap-123")
+    )
+
+    for bad in ["/etc", "..", "2026/..", "\\system", "foo//bar"]:
+        response = client.get(
+            "/v1/admin/catalog", params={"relative_path_prefix": bad}
+        )
+        assert response.status_code == 400, f"expected 400 for prefix {bad!r}"
+
+
+# ---------------------------------------------------------------------------
+# Phase 3.A: Exposure-metadata EXIF extraction coverage.
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_exif_rational_handles_common_exif_shapes() -> None:
+    # IFDRational-like objects (anything with __float__) including float/int.
+    assert app_module._normalize_exif_rational(2.8) == 2.8
+    assert app_module._normalize_exif_rational(200) == 200.0
+    # Tuples: (numerator, denominator) — shutter speeds.
+    assert app_module._normalize_exif_rational((1, 200)) == 1 / 200
+    assert app_module._normalize_exif_rational((0, 0)) is None
+    # String forms written by some cameras.
+    assert app_module._normalize_exif_rational("1/200") == 1 / 200
+    assert app_module._normalize_exif_rational("2.8") == 2.8
+    assert app_module._normalize_exif_rational("") is None
+    assert app_module._normalize_exif_rational("abc") is None
+    assert app_module._normalize_exif_rational(None) is None
+    # Booleans are excluded so a stray `True` doesn't turn into 1.0.
+    assert app_module._normalize_exif_rational(True) is None
+
+
+def test_normalize_exif_iso_speed_handles_tuples_and_scalars() -> None:
+    assert app_module._normalize_exif_iso_speed(400) == 400
+    assert app_module._normalize_exif_iso_speed((400,)) == 400
+    assert app_module._normalize_exif_iso_speed((0, 800)) == 800
+    assert app_module._normalize_exif_iso_speed("1600") == 1600
+    assert app_module._normalize_exif_iso_speed(None) is None
+    assert app_module._normalize_exif_iso_speed(True) is None
+    assert app_module._normalize_exif_iso_speed(-10) is None
+
+
+def test_extract_media_metadata_returns_exposure_fields(tmp_path: Path) -> None:
+    content = _jpeg_with_exif_bytes(
+        exposure_time=(1, 200),
+        f_number=(28, 10),
+        iso_speed=400,
+        focal_length_mm=(50, 1),
+        focal_length_35mm=75,
+    )
+    file_path = tmp_path / "photo.jpg"
+    file_path.write_bytes(content)
+    metadata = app_module._extract_media_metadata(file_path)
+    assert metadata["exposure_time_s"] == 1 / 200
+    assert metadata["f_number"] == 2.8
+    assert metadata["iso_speed"] == 400
+    assert metadata["focal_length_mm"] == 50.0
+    assert metadata["focal_length_35mm_mm"] == 75
+
+
+def test_upload_verify_populates_exposure_fields_on_catalog(tmp_path: Path) -> None:
+    store = InMemoryUploadStateStore()
+    content = _jpeg_with_exif_bytes(
+        exposure_time=(1, 125),
+        f_number=(40, 10),
+        iso_speed=800,
+        focal_length_mm=(35, 1),
+        focal_length_35mm=52,
+    )
+    sha256_hex = hashlib.sha256(content).hexdigest()
+    client = TestClient(
+        create_app(
+            state_store=store, storage_root=tmp_path, bootstrap_token="bootstrap-123"
+        )
+    )
+    auth_headers = _approve_upload_client(client)
+
+    upload_response = client.put(
+        f"/v1/upload/content/{sha256_hex}",
+        content=content,
+        headers=_with_auth_headers(
+            _upload_headers(
+                size_bytes=len(content),
+                job_name="Exposure Upload",
+                original_filename="IMG_9999.JPG",
+            ),
+            auth_headers,
+        ),
+    )
+    assert upload_response.status_code == 200
+    verify_response = client.post(
+        "/v1/upload/verify",
+        headers=auth_headers,
+        json={"sha256_hex": sha256_hex, "size_bytes": len(content)},
+    )
+    assert verify_response.status_code == 200
+
+    item = client.get("/v1/admin/catalog").json()["items"][0]
+    assert item["extraction_status"] == "succeeded"
+    assert item["exposure_time_s"] == 1 / 125
+    assert item["f_number"] == 4.0
+    assert item["iso_speed"] == 800
+    assert item["focal_length_mm"] == 35.0
+    assert item["focal_length_35mm_mm"] == 52
+
+    # Inspect-detail endpoint surfaces the same fields.
+    asset_item = client.get(
+        "/v1/admin/catalog/asset",
+        params={"relative_path": item["relative_path"]},
+    ).json()["item"]
+    assert asset_item["exposure_time_s"] == 1 / 125
+    assert asset_item["f_number"] == 4.0
+    assert asset_item["iso_speed"] == 800
+    assert asset_item["focal_length_mm"] == 35.0
+    assert asset_item["focal_length_35mm_mm"] == 52
+
+
+def test_upload_verify_handles_missing_exposure_fields_gracefully(tmp_path: Path) -> None:
+    # When EXIF exposure tags are absent the pipeline must succeed but emit
+    # None for every new field rather than failing extraction.
+    store = InMemoryUploadStateStore()
+    content = _jpeg_with_exif_bytes()  # no exposure tags requested
+    sha256_hex = hashlib.sha256(content).hexdigest()
+    client = TestClient(
+        create_app(
+            state_store=store, storage_root=tmp_path, bootstrap_token="bootstrap-123"
+        )
+    )
+    auth_headers = _approve_upload_client(client)
+    client.put(
+        f"/v1/upload/content/{sha256_hex}",
+        content=content,
+        headers=_with_auth_headers(
+            _upload_headers(
+                size_bytes=len(content),
+                job_name="No-exposure",
+                original_filename="IMG_5555.JPG",
+            ),
+            auth_headers,
+        ),
+    )
+    verify_response = client.post(
+        "/v1/upload/verify",
+        headers=auth_headers,
+        json={"sha256_hex": sha256_hex, "size_bytes": len(content)},
+    )
+    assert verify_response.status_code == 200
+
+    item = client.get("/v1/admin/catalog").json()["items"][0]
+    assert item["extraction_status"] == "succeeded"
+    assert item["exposure_time_s"] is None
+    assert item["f_number"] is None
+    assert item["iso_speed"] is None
+    assert item["focal_length_mm"] is None
+    assert item["focal_length_35mm_mm"] is None

@@ -1,0 +1,103 @@
+{% from "macros.html" import status_badge %}
+{# Renders a single catalog asset card.
+   Context: asset (dict), page (int/str), return_query (str, url-encoded query string without leading ?).
+   Safe to render standalone for HTMX swaps. #}
+<article class="card asset-card" id="asset-card-{{ asset.card_id }}">
+  <div class="card-body">
+    <div class="row g-3 align-items-start">
+      <div class="col-lg-auto">
+        <div class="preview-frame">
+          {% if asset.preview_status == "succeeded" %}
+          <img src="/catalog/preview?relative_path={{ asset.relative_path | urlencode }}" alt="Preview for {{ asset.relative_path }}">
+          {% else %}
+          <div class="text-center text-secondary small px-3">{{ asset.preview_summary }}</div>
+          {% endif %}
+        </div>
+      </div>
+      <div class="col">
+        <div class="d-flex flex-column flex-xl-row justify-content-between gap-3">
+          <div class="asset-card-main">
+            <div class="d-flex align-items-center gap-2 flex-wrap">
+              <h2 class="h5 mb-0 asset-filename">{{ asset.filename }}</h2>
+              {# Status chips, compact row #}
+              {% set _extraction = asset.extraction_status or 'unknown' %}
+              {% set _preview = asset.preview_status or 'unknown' %}
+              {{ status_badge(asset.media_type) }}
+              {{ status_badge(_extraction, 'extraction ' + _extraction) }}
+              {{ status_badge(_preview, 'preview ' + _preview) }}
+              {{ status_badge(asset.origin_kind) }}
+              {% if asset.is_favorite %}{{ status_badge('favorite') }}{% endif %}
+              {% if asset.is_archived %}{{ status_badge('archived') }}{% endif %}
+            </div>
+            <div class="asset-path text-secondary small mt-1">{{ asset.relative_path }}</div>
+            <div class="asset-summary small text-secondary mt-2">
+              {% if asset.metadata_summary %}
+                <span>{{ asset.metadata_summary }}</span>
+              {% else %}
+                <span class="fst-italic">No extraction metadata yet.</span>
+              {% endif %}
+              <span class="mx-2">·</span>
+              <span>{{ asset.size_human }}</span>
+              <span class="mx-2">·</span>
+              <span>Job {{ asset.provenance_job_name or "n/a" }}</span>
+              <span class="mx-2">·</span>
+              <span>Cataloged {{ asset.last_cataloged_at_utc }}</span>
+            </div>
+          </div>
+          <div class="asset-actions d-flex flex-wrap gap-2 align-items-start justify-content-xl-end">
+            {# Favorite toggle — HTMX swaps this card in place. #}
+            <form
+              method="post"
+              action="/catalog/actions/favorite/toggle"
+              class="inline-form"
+              hx-post="/catalog/actions/favorite/toggle"
+              hx-target="#asset-card-{{ asset.card_id }}"
+              hx-swap="outerHTML"
+            >
+              <input type="hidden" name="relative_path" value="{{ asset.relative_path }}">
+              <input type="hidden" name="currently_favorite" value="{{ 'true' if asset.is_favorite else 'false' }}">
+              <input type="hidden" name="page" value="{{ page }}">
+              <input type="hidden" name="return_query" value="{{ return_query }}">
+              <button
+                class="btn btn-sm {{ 'btn-warning' if asset.is_favorite else 'btn-outline-secondary' }} asset-icon-btn"
+                type="submit"
+                aria-label="{{ 'Unfavorite' if asset.is_favorite else 'Favorite' }}"
+                title="{{ 'Unfavorite' if asset.is_favorite else 'Favorite' }}"
+              >
+                <span aria-hidden="true">{{ '★' if asset.is_favorite else '☆' }}</span>
+              </button>
+            </form>
+            {# Archive toggle — HTMX swaps this card in place. #}
+            <form
+              method="post"
+              action="/catalog/actions/archive/toggle"
+              class="inline-form"
+              hx-post="/catalog/actions/archive/toggle"
+              hx-target="#asset-card-{{ asset.card_id }}"
+              hx-swap="outerHTML"
+            >
+              <input type="hidden" name="relative_path" value="{{ asset.relative_path }}">
+              <input type="hidden" name="currently_archived" value="{{ 'true' if asset.is_archived else 'false' }}">
+              <input type="hidden" name="page" value="{{ page }}">
+              <input type="hidden" name="return_query" value="{{ return_query }}">
+              <button
+                class="btn btn-sm {{ 'btn-dark' if asset.is_archived else 'btn-outline-secondary' }} asset-icon-btn"
+                type="submit"
+                aria-label="{{ 'Unarchive' if asset.is_archived else 'Archive' }}"
+                title="{{ 'Unarchive' if asset.is_archived else 'Archive' }}"
+              >
+                <span aria-hidden="true">{{ '📦' if asset.is_archived else '🗃' }}</span>
+              </button>
+            </form>
+            <a
+              class="btn btn-primary btn-sm"
+              href="/catalog/asset?relative_path={{ asset.relative_path | urlencode }}&page={{ page }}{% if return_query %}&{{ return_query | safe }}{% endif %}"
+            >
+              Inspect Asset
+            </a>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</article>

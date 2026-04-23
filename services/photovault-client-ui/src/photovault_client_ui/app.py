@@ -1284,6 +1284,29 @@ def create_app(
         )
         return render_template("network.html", **context)
 
+    def _portal_recheck_notice(snapshot_payload: object, connectivity_check: object) -> str:
+        status = ""
+        if isinstance(snapshot_payload, dict):
+            status = str(snapshot_payload.get("upstream_status", "")).strip()
+        check_label = str(connectivity_check or "unknown").strip() or "unknown"
+        if status == "internet_reachable":
+            return (
+                "Rechecked upstream connectivity: Internet is reachable now. "
+                f"NetworkManager check={check_label}."
+            )
+        if status == "captive_portal_likely":
+            return (
+                "Rechecked upstream connectivity: captive portal still likely. "
+                "Finish upstream login in an external browser, then recheck again. "
+                f"NetworkManager check={check_label}."
+            )
+        if status == "no_usable_internet":
+            return (
+                "Rechecked upstream connectivity: upstream Wi-Fi is connected but Internet remains unusable. "
+                f"NetworkManager check={check_label}."
+            )
+        return f"Rechecked upstream connectivity. NetworkManager check={check_label}."
+
     def _render_block_devices(
         *,
         block_device_error: str | None = None,
@@ -1612,6 +1635,21 @@ def create_app(
         except httpx.HTTPError as exc:
             return _render_network(network_error=f"Failed to scan Wi-Fi: {_describe_http_error(exc)}")
         return redirect(url_for("network_page"))
+
+    @app.post("/network/upstream-recheck")
+    def recheck_upstream_status() -> str:
+        try:
+            outcome = daemon_post(daemon_base_url, "/network/upstream-recheck", {})
+        except httpx.HTTPError as exc:
+            return _render_network(
+                network_error=f"Failed to recheck upstream connectivity: {_describe_http_error(exc)}"
+            )
+        return _render_network(
+            network_notice=_portal_recheck_notice(
+                outcome.get("snapshot"),
+                outcome.get("connectivity_check"),
+            )
+        )
 
     @app.post("/network/ap-config")
     def update_ap_config() -> str:

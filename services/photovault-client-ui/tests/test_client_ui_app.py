@@ -38,6 +38,9 @@ def _network_snapshot() -> dict[str, object]:
         "sta_device_names": ["wlan0"],
         "sta_connection_names": ["studio-wifi"],
         "local_ap_ready": True,
+        "upstream_connectivity": "full",
+        "upstream_status": "internet_reachable",
+        "upstream_no_usable_internet": False,
         "upstream_internet_reachable": True,
         "captive_portal_detected": False,
         "next_operator_action": "Local AP is available and upstream Internet is reachable.",
@@ -310,6 +313,9 @@ def _overview_payloads(
                 "sta_device_names": ["wlan0"],
                 "sta_connection_names": ["studio-wifi"],
                 "local_ap_ready": True,
+                "upstream_connectivity": "full",
+                "upstream_status": "internet_reachable",
+                "upstream_no_usable_internet": False,
                 "upstream_internet_reachable": True,
                 "captive_portal_detected": False,
                 "next_operator_action": (
@@ -904,7 +910,10 @@ def test_network_page_and_errors_render() -> None:
     assert 'class="active">Network<' in page
     assert "Update AP config" in page
     assert "Join upstream Wi-Fi" in page
+    assert "Recheck upstream status" in page
     assert "Visible Wi-Fi Networks" in page
+    assert "Upstream STA connectivity: full" in page
+    assert "Upstream status: internet_reachable" in page
     assert "Local AP ready: yes" in page
     assert "Upstream Internet reachable: yes" in page
     assert "Next action:" in page
@@ -935,6 +944,45 @@ def test_network_page_and_errors_render() -> None:
     )
     scan_error_body = app_with_scan_error.test_client().post("/network/scan").get_data(as_text=True)
     assert "Failed to scan Wi-Fi: daemon API returned HTTP 503" in scan_error_body
+
+
+def test_network_page_renders_captive_portal_guidance() -> None:
+    payloads = _overview_payloads()
+    network_status = dict(payloads["/network/status"])
+    snapshot = dict(network_status["snapshot"])
+    snapshot.update(
+        {
+            "general": {
+                "state": "connected",
+                "connectivity": "portal",
+                "wifi": "enabled",
+            },
+            "sta_connection_names": ["cpa-test"],
+            "upstream_connectivity": "portal",
+            "upstream_status": "captive_portal_likely",
+            "upstream_no_usable_internet": True,
+            "upstream_internet_reachable": False,
+            "captive_portal_detected": True,
+            "next_operator_action": (
+                "Local AP remains available. Upstream Wi-Fi likely requires captive-portal login."
+            ),
+        }
+    )
+    network_status["snapshot"] = snapshot
+    payloads["/network/status"] = network_status
+
+    def fake_daemon_get(_: str, path: str) -> object:
+        return payloads[path]
+
+    app = create_app(
+        daemon_get=fake_daemon_get,
+        dependency_snapshot_get=_dependency_snapshot,
+    )
+    page = app.test_client().get("/network").get_data(as_text=True)
+    assert "Captive portal login likely required." in page
+    assert "http://neverssl.com" in page
+    assert "cpa-test" in page
+    assert "Upstream status: captive_portal_likely" in page
 
 
 def test_network_ap_update_success_and_error_render() -> None:
@@ -1044,3 +1092,51 @@ def test_network_sta_connect_success_and_error_render() -> None:
         data={"sta_ssid": "studio-wifi", "sta_password": "badpass"},
     ).get_data(as_text=True)
     assert "Failed to connect upstream Wi-Fi: daemon API returned HTTP 503" in error_body
+
+
+def test_network_upstream_recheck_success_and_error_render() -> None:
+    payloads = _overview_payloads()
+
+    def fake_daemon_get(_: str, path: str) -> object:
+        return payloads[path]
+
+    def success_daemon_post(_: str, path: str, payload: dict[str, object]) -> object:
+        assert path == "/network/upstream-recheck"
+        return {
+            "connectivity_check": "full",
+            "snapshot": {
+                "upstream_status": "internet_reachable",
+            },
+        }
+
+    app = create_app(
+        daemon_get=fake_daemon_get,
+        daemon_post=success_daemon_post,
+        dependency_snapshot_get=_dependency_snapshot,
+    )
+    success_body = app.test_client().post("/network/upstream-recheck").get_data(as_text=True)
+    assert "Rechecked upstream connectivity: Internet is reachable now." in success_body
+    assert "NetworkManager check=full." in success_body
+
+    def failing_daemon_post(_: str, path: str, payload: dict[str, object]) -> object:
+        assert path == "/network/upstream-recheck"
+        request = httpx.Request("POST", "http://127.0.0.1:9101/network/upstream-recheck")
+        response = httpx.Response(
+            status_code=503,
+            json={
+                "detail": {
+                    "code": "NM_COMMAND_FAILED",
+                    "message": "Failed to recheck upstream internet connectivity: nmcli command failed.",
+                }
+            },
+            request=request,
+        )
+        raise httpx.HTTPStatusError("bad gateway", request=request, response=response)
+
+    app_with_error = create_app(
+        daemon_get=fake_daemon_get,
+        daemon_post=failing_daemon_post,
+        dependency_snapshot_get=_dependency_snapshot,
+    )
+    error_body = app_with_error.test_client().post("/network/upstream-recheck").get_data(as_text=True)
+    assert "Failed to recheck upstream connectivity: daemon API returned HTTP 503" in error_body

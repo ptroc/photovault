@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "macros.html" import pager, status_badge %}
+{% from "macros.html" import pager %}
 {% set title = "Library" %}
 {% block content %}
 <section class="page-hero">
@@ -22,6 +22,28 @@
   </div>
 </section>
 
+{# Active filters chip bar — one dismissible chip per applied filter. #}
+{% if active_filters %}
+<section class="active-filters-bar mb-3" aria-label="Active filters">
+  <div class="d-flex flex-wrap align-items-center gap-2">
+    <span class="small text-secondary text-uppercase fw-semibold me-1">Active</span>
+    {% for chip in active_filters %}
+      <a
+        class="badge rounded-pill filter-chip text-decoration-none"
+        href="{{ chip.remove_url }}"
+        aria-label="Remove filter {{ chip.label }} {{ chip.value }}"
+        title="Remove filter"
+      >
+        <span class="filter-chip-label">{{ chip.label }}</span>
+        <span class="filter-chip-value">{{ chip.value }}</span>
+        <span class="filter-chip-x" aria-hidden="true">×</span>
+      </a>
+    {% endfor %}
+    <a class="small ms-2" href="/catalog">Clear all</a>
+  </div>
+</section>
+{% endif %}
+
 <section class="card surface-card filter-card mb-4">
   <div class="collapse d-lg-block" id="catalogFilters">
     <div class="card-body">
@@ -32,7 +54,8 @@
         </div>
       </div>
       <form method="get" action="/catalog" class="row g-2 align-items-end">
-        <div class="col-sm-6 col-xl-2">
+        {# Primary filters — visible by default. #}
+        <div class="col-sm-6 col-xl-3">
           <label class="form-label" for="extraction_status">Extraction</label>
           <select id="extraction_status" class="form-select" name="extraction_status">
             <option value="" {% if not extraction_status_filter %}selected{% endif %}>All</option>
@@ -41,7 +64,7 @@
             <option value="failed" {% if extraction_status_filter == "failed" %}selected{% endif %}>failed</option>
           </select>
         </div>
-        <div class="col-sm-6 col-xl-2">
+        <div class="col-sm-6 col-xl-3">
           <label class="form-label" for="preview_status">Preview</label>
           <select id="preview_status" class="form-select" name="preview_status">
             <option value="" {% if not preview_status_filter %}selected{% endif %}>All</option>
@@ -50,15 +73,7 @@
             <option value="failed" {% if preview_status_filter == "failed" %}selected{% endif %}>failed</option>
           </select>
         </div>
-        <div class="col-sm-6 col-xl-2">
-          <label class="form-label" for="origin_kind">Origin</label>
-          <select id="origin_kind" class="form-select" name="origin_kind">
-            <option value="" {% if not origin_kind_filter %}selected{% endif %}>All</option>
-            <option value="uploaded" {% if origin_kind_filter == "uploaded" %}selected{% endif %}>uploaded</option>
-            <option value="indexed" {% if origin_kind_filter == "indexed" %}selected{% endif %}>indexed</option>
-          </select>
-        </div>
-        <div class="col-sm-6 col-xl-2">
+        <div class="col-sm-6 col-xl-3">
           <label class="form-label" for="media_type">Media Type</label>
           <select id="media_type" class="form-select" name="media_type">
             <option value="" {% if not media_type_filter %}selected{% endif %}>All</option>
@@ -70,15 +85,7 @@
             <option value="other" {% if media_type_filter == "other" %}selected{% endif %}>other</option>
           </select>
         </div>
-        <div class="col-sm-6 col-xl-2">
-          <label class="form-label" for="preview_capability">Preview Capability</label>
-          <select id="preview_capability" class="form-select" name="preview_capability">
-            <option value="" {% if not preview_capability_filter %}selected{% endif %}>All</option>
-            <option value="previewable" {% if preview_capability_filter == "previewable" %}selected{% endif %}>previewable</option>
-            <option value="not_previewable" {% if preview_capability_filter == "not_previewable" %}selected{% endif %}>not_previewable</option>
-          </select>
-        </div>
-        <div class="col-sm-6 col-xl-2">
+        <div class="col-sm-6 col-xl-3">
           <label class="form-label" for="is_favorite">Favorite</label>
           <select id="is_favorite" class="form-select" name="is_favorite">
             <option value="" {% if not is_favorite_filter %}selected{% endif %}>All</option>
@@ -86,23 +93,52 @@
             <option value="false" {% if is_favorite_filter == "false" %}selected{% endif %}>not favorite</option>
           </select>
         </div>
-        <div class="col-sm-6 col-xl-2">
-          <label class="form-label" for="is_archived">Archived</label>
-          <select id="is_archived" class="form-select" name="is_archived">
-            <option value="" {% if not is_archived_filter %}selected{% endif %}>All</option>
-            <option value="true" {% if is_archived_filter == "true" %}selected{% endif %}>archived only</option>
-            <option value="false" {% if is_archived_filter == "false" %}selected{% endif %}>visible only</option>
-          </select>
+
+        {# Advanced filters — collapsed by default. Uses native <details> so it
+           works without JavaScript and keeps the SSR-first posture. #}
+        <div class="col-12">
+          <details class="advanced-filters mt-2" {% if origin_kind_filter or preview_capability_filter or is_archived_filter or cataloged_since_filter or cataloged_before_filter %}open{% endif %}>
+            <summary class="small text-secondary text-uppercase fw-semibold py-1">Advanced filters</summary>
+            <div class="row g-2 align-items-end pt-3">
+              <div class="col-sm-6 col-xl-3">
+                <label class="form-label" for="origin_kind">Origin</label>
+                <select id="origin_kind" class="form-select" name="origin_kind">
+                  <option value="" {% if not origin_kind_filter %}selected{% endif %}>All</option>
+                  <option value="uploaded" {% if origin_kind_filter == "uploaded" %}selected{% endif %}>uploaded</option>
+                  <option value="indexed" {% if origin_kind_filter == "indexed" %}selected{% endif %}>indexed</option>
+                </select>
+              </div>
+              <div class="col-sm-6 col-xl-3">
+                <label class="form-label" for="preview_capability">Preview Capability</label>
+                <select id="preview_capability" class="form-select" name="preview_capability">
+                  <option value="" {% if not preview_capability_filter %}selected{% endif %}>All</option>
+                  <option value="previewable" {% if preview_capability_filter == "previewable" %}selected{% endif %}>previewable</option>
+                  <option value="not_previewable" {% if preview_capability_filter == "not_previewable" %}selected{% endif %}>not_previewable</option>
+                </select>
+              </div>
+              <div class="col-sm-6 col-xl-3">
+                <label class="form-label" for="is_archived">Archived</label>
+                <select id="is_archived" class="form-select" name="is_archived">
+                  <option value="" {% if not is_archived_filter %}selected{% endif %}>All</option>
+                  <option value="true" {% if is_archived_filter == "true" %}selected{% endif %}>archived only</option>
+                  <option value="false" {% if is_archived_filter == "false" %}selected{% endif %}>visible only</option>
+                </select>
+              </div>
+              <div class="col-sm-6 col-xl-3">
+                <label class="form-label" for="cataloged_since_local">Cataloged Since (local)</label>
+                <input id="cataloged_since_local" class="form-control" type="datetime-local" name="cataloged_since_local" value="{{ cataloged_since_local }}">
+                <div class="form-text small">Stored as UTC: {{ cataloged_since_filter or '—' }}</div>
+              </div>
+              <div class="col-sm-6 col-xl-3">
+                <label class="form-label" for="cataloged_before_local">Cataloged Before (local)</label>
+                <input id="cataloged_before_local" class="form-control" type="datetime-local" name="cataloged_before_local" value="{{ cataloged_before_local }}">
+                <div class="form-text small">Stored as UTC: {{ cataloged_before_filter or '—' }}</div>
+              </div>
+            </div>
+          </details>
         </div>
-        <div class="col-sm-6 col-xl-3">
-          <label class="form-label" for="cataloged_since_utc">Cataloged Since (UTC)</label>
-          <input id="cataloged_since_utc" class="form-control" type="text" name="cataloged_since_utc" placeholder="2026-04-22T10:00:00+00:00" value="{{ cataloged_since_filter }}">
-        </div>
-        <div class="col-sm-6 col-xl-3">
-          <label class="form-label" for="cataloged_before_utc">Cataloged Before (UTC)</label>
-          <input id="cataloged_before_utc" class="form-control" type="text" name="cataloged_before_utc" placeholder="2026-04-22T12:00:00+00:00" value="{{ cataloged_before_filter }}">
-        </div>
-        <div class="col-xl-6 d-flex flex-wrap gap-2">
+
+        <div class="col-12 d-flex flex-wrap gap-2 mt-3">
           <button class="btn btn-primary" type="submit">Apply</button>
           <a class="btn btn-outline-secondary" href="/catalog">Clear</a>
         </div>
@@ -134,13 +170,7 @@
           <form method="post" action="/catalog/actions/backfill" class="row g-2 align-items-end mb-3">
             <input type="hidden" name="page" value="{{ page }}">
             <input type="hidden" name="backfill_kind" value="extraction">
-            <input type="hidden" name="extraction_status" value="{{ extraction_status_filter }}">
-            <input type="hidden" name="preview_status" value="{{ preview_status_filter }}">
-            <input type="hidden" name="origin_kind" value="{{ origin_kind_filter }}">
-            <input type="hidden" name="media_type" value="{{ media_type_filter }}">
-            <input type="hidden" name="preview_capability" value="{{ preview_capability_filter }}">
-            <input type="hidden" name="cataloged_since_utc" value="{{ cataloged_since_filter }}">
-            <input type="hidden" name="cataloged_before_utc" value="{{ cataloged_before_filter }}">
+            <input type="hidden" name="return_query" value="{{ return_query }}">
             <div class="col-12">
               <label class="form-label mb-1">Statuses</label>
               <div class="d-flex gap-3">
@@ -174,13 +204,7 @@
           <form method="post" action="/catalog/actions/backfill" class="row g-2 align-items-end mb-3">
             <input type="hidden" name="page" value="{{ page }}">
             <input type="hidden" name="backfill_kind" value="preview">
-            <input type="hidden" name="extraction_status" value="{{ extraction_status_filter }}">
-            <input type="hidden" name="preview_status" value="{{ preview_status_filter }}">
-            <input type="hidden" name="origin_kind" value="{{ origin_kind_filter }}">
-            <input type="hidden" name="media_type" value="{{ media_type_filter }}">
-            <input type="hidden" name="preview_capability" value="{{ preview_capability_filter }}">
-            <input type="hidden" name="cataloged_since_utc" value="{{ cataloged_since_filter }}">
-            <input type="hidden" name="cataloged_before_utc" value="{{ cataloged_before_filter }}">
+            <input type="hidden" name="return_query" value="{{ return_query }}">
             <div class="col-12">
               <label class="form-label mb-1">Statuses</label>
               <div class="d-flex gap-3">
@@ -215,107 +239,7 @@
 <section class="asset-list">
   {% if assets %}
   {% for asset in assets %}
-  <article class="card asset-card">
-    <div class="card-body">
-      <div class="row g-3 g-lg-4 align-items-start">
-        <div class="col-lg-auto">
-          <div class="preview-frame">
-            {% if asset.preview_status == "succeeded" %}
-            <img src="/catalog/preview?relative_path={{ asset.relative_path | urlencode }}" alt="Preview for {{ asset.relative_path }}">
-            {% else %}
-            <div class="text-center text-secondary small px-3">{{ asset.preview_summary }}</div>
-            {% endif %}
-          </div>
-        </div>
-        <div class="col">
-          <div class="d-flex flex-column flex-xl-row justify-content-between gap-3">
-            <div>
-              <h2 class="h4 mb-1">{{ asset.filename }}</h2>
-              <div class="asset-path text-secondary">{{ asset.relative_path }}</div>
-              <div class="d-flex flex-wrap gap-2 mt-3">
-                {{ status_badge(asset.media_type) }}
-                {{ status_badge(asset.preview_capability) }}
-                {{ status_badge(asset.origin_kind) }}
-                {{ status_badge(asset.extraction_status) }}
-                {{ status_badge(asset.preview_status) }}
-                {{ status_badge('favorite' if asset.is_favorite else 'not favorite', 'favorite' if asset.is_favorite else 'not favorite') }}
-                {{ status_badge('archived' if asset.is_archived else 'visible', 'archived' if asset.is_archived else 'visible') }}
-              </div>
-            </div>
-            <div class="asset-actions d-flex flex-column align-items-xl-end gap-2">
-              <a
-                class="btn btn-primary btn-sm"
-                href="/catalog/asset?relative_path={{ asset.relative_path | urlencode }}&page={{ page }}&extraction_status={{ extraction_status_filter | urlencode }}&preview_status={{ preview_status_filter | urlencode }}&origin_kind={{ origin_kind_filter | urlencode }}&media_type={{ media_type_filter | urlencode }}&preview_capability={{ preview_capability_filter | urlencode }}&is_favorite={{ is_favorite_filter | urlencode }}&is_archived={{ is_archived_filter | urlencode }}&cataloged_since_utc={{ cataloged_since_filter | urlencode }}&cataloged_before_utc={{ cataloged_before_filter | urlencode }}"
-              >
-                Inspect Asset
-              </a>
-              <div class="d-flex flex-wrap gap-2 justify-content-xl-end">
-                <form method="post" action="{% if asset.is_favorite %}/catalog/actions/favorite/unmark{% else %}/catalog/actions/favorite/mark{% endif %}" class="inline-form">
-                  <input type="hidden" name="relative_path" value="{{ asset.relative_path }}">
-                  <input type="hidden" name="page" value="{{ page }}">
-                  <input type="hidden" name="return_to" value="catalog">
-                  <input type="hidden" name="extraction_status" value="{{ extraction_status_filter }}">
-                  <input type="hidden" name="preview_status" value="{{ preview_status_filter }}">
-                  <input type="hidden" name="origin_kind" value="{{ origin_kind_filter }}">
-                  <input type="hidden" name="media_type" value="{{ media_type_filter }}">
-                  <input type="hidden" name="preview_capability" value="{{ preview_capability_filter }}">
-                  <input type="hidden" name="is_favorite" value="{{ is_favorite_filter }}">
-                  <input type="hidden" name="is_archived" value="{{ is_archived_filter }}">
-                  <input type="hidden" name="cataloged_since_utc" value="{{ cataloged_since_filter }}">
-                  <input type="hidden" name="cataloged_before_utc" value="{{ cataloged_before_filter }}">
-                  <button class="btn btn-outline-secondary btn-sm" type="submit">{% if asset.is_favorite %}Unfavorite{% else %}Favorite{% endif %}</button>
-                </form>
-                <form method="post" action="{% if asset.is_archived %}/catalog/actions/archive/unmark{% else %}/catalog/actions/archive/mark{% endif %}" class="inline-form">
-                  <input type="hidden" name="relative_path" value="{{ asset.relative_path }}">
-                  <input type="hidden" name="page" value="{{ page }}">
-                  <input type="hidden" name="return_to" value="catalog">
-                  <input type="hidden" name="extraction_status" value="{{ extraction_status_filter }}">
-                  <input type="hidden" name="preview_status" value="{{ preview_status_filter }}">
-                  <input type="hidden" name="origin_kind" value="{{ origin_kind_filter }}">
-                  <input type="hidden" name="media_type" value="{{ media_type_filter }}">
-                  <input type="hidden" name="preview_capability" value="{{ preview_capability_filter }}">
-                  <input type="hidden" name="is_favorite" value="{{ is_favorite_filter }}">
-                  <input type="hidden" name="is_archived" value="{{ is_archived_filter }}">
-                  <input type="hidden" name="cataloged_since_utc" value="{{ cataloged_since_filter }}">
-                  <input type="hidden" name="cataloged_before_utc" value="{{ cataloged_before_filter }}">
-                  <button class="btn btn-outline-secondary btn-sm" type="submit">{% if asset.is_archived %}Unarchive{% else %}Archive{% endif %}</button>
-                </form>
-              </div>
-            </div>
-          </div>
-          <div class="row g-3 mt-1">
-            <div class="col-lg-5">
-              <div class="summary-chip rounded-4 p-3 h-100">
-                <div class="small text-secondary text-uppercase fw-semibold mb-2">Metadata</div>
-                {% if asset.metadata_summary %}
-                <div class="small">{{ asset.metadata_summary }}</div>
-                {% else %}
-                <div class="text-secondary small">No extraction metadata yet.</div>
-                {% endif %}
-              </div>
-            </div>
-            <div class="col-lg-4">
-              <div class="summary-chip rounded-4 p-3 h-100">
-                <div class="small text-secondary text-uppercase fw-semibold mb-2">Provenance</div>
-                <div class="small">{{ asset.origin_kind }}</div>
-                <div class="small text-secondary">Job {{ asset.provenance_job_name or "n/a" }}</div>
-                <div class="small text-secondary">File {{ asset.provenance_original_filename or "n/a" }}</div>
-              </div>
-            </div>
-            <div class="col-lg-3">
-              <div class="summary-chip rounded-4 p-3 h-100">
-                <div class="small text-secondary text-uppercase fw-semibold mb-2">Cataloged</div>
-                <div class="small text-secondary">First</div>
-                <div class="mono mb-2">{{ asset.first_cataloged_at_utc }}</div>
-                <div class="small text-secondary">Last</div>
-                <div class="mono">{{ asset.last_cataloged_at_utc }}</div>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-  </article>
+    {% include "_asset_card.html" %}
   {% endfor %}
   {{ pager(previous_url, next_url, page) }}
   {% else %}

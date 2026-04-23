@@ -66,6 +66,9 @@ class NetworkStatusSnapshot:
     sta_device_names: list[str]
     sta_connection_names: list[str]
     local_ap_ready: bool
+    upstream_connectivity: str
+    upstream_status: str
+    upstream_no_usable_internet: bool
     upstream_internet_reachable: bool
     captive_portal_detected: bool
     next_operator_action: str
@@ -138,6 +141,15 @@ def _normalize_failure(action: str, exc: Exception) -> NetworkManagerError:
                     suggestion="Verify Wi-Fi password/security settings and retry.",
                 )
             )
+        if "802-11-wireless-security.key-mgmt: property is missing" in detail_lower:
+            return NetworkManagerError(
+                OperatorError(
+                    code="NM_WIFI_PROFILE_INVALID",
+                    message=f"Failed to {action}: existing Wi-Fi profile is missing security settings.",
+                    detail=detail,
+                    suggestion="Retry connect with password to let photovault refresh the STA profile.",
+                )
+            )
         return NetworkManagerError(
             OperatorError(
                 code="NM_COMMAND_FAILED",
@@ -189,8 +201,18 @@ def parse_nmcli_multiline(output: str) -> list[dict[str, str]]:
 
 
 class NetworkManagerAdapter:
-    def __init__(self, command_runner: Callable[[list[str]], str] = _run_nmcli) -> None:
+    def __init__(
+        self,
+        command_runner: Callable[[list[str]], str] = _run_nmcli,
+        connectivity_probe: Callable[[str], str] | None = None,
+    ) -> None:
         self._command_runner = command_runner
+        if connectivity_probe is not None:
+            self._connectivity_probe = connectivity_probe
+        elif command_runner is _run_nmcli:
+            self._connectivity_probe = _probe_sta_interface_connectivity
+        else:
+            self._connectivity_probe = lambda _device_name: "unknown"
 
     def _run(self, args: list[str], *, action: str) -> str:
         try:
@@ -279,6 +301,16 @@ class NetworkManagerAdapter:
         )
         names = {line.strip() for line in output.splitlines() if line.strip()}
         return names
+
+    def _device_ipv4_connectivity(self, device_name: str) -> str:
+        output = self._run(
+            ["-m", "multiline", "-f", "GENERAL.IP4-CONNECTIVITY", "device", "show", device_name],
+            action=f"load upstream connectivity for device {device_name}",
+        )
+        records = parse_nmcli_multiline(output)
+        row = records[0] if records else {}
+        raw = row.get("GENERAL.IP4-CONNECTIVITY", "")
+        return _normalize_connectivity_value(raw)
 
     def get_ap_profile(self, profile_name: str = DEFAULT_AP_PROFILE_NAME) -> AccessPointProfile:
         exists = profile_name in self._connection_names()
@@ -378,6 +410,16 @@ class NetworkManagerAdapter:
     def trigger_wifi_scan(self) -> None:
         self._run(["device", "wifi", "rescan"], action="trigger Wi-Fi scan")
 
+    def trigger_connectivity_recheck(self) -> str:
+        output = self._run(
+            ["networking", "connectivity", "check"],
+            action="recheck upstream internet connectivity",
+        )
+        normalized = output.strip().lower()
+        if not normalized:
+            return "unknown"
+        return normalized.splitlines()[-1].strip() or "unknown"
+
     def connect_sta_network(
         self,
         *,
@@ -422,14 +464,71 @@ class NetworkManagerAdapter:
             )
 
         target_device = non_ap_devices[0].device
-        command = ["device", "wifi", "connect", normalized_ssid, "ifname", target_device]
-        if password is not None and password.strip():
-            command.extend(["password", password])
-        self._run(command, action=f"connect upstream Wi-Fi SSID {normalized_ssid}")
+        normalized_password = (password or "").strip()
+        if normalized_password:
+            profile_name = _sta_profile_name(normalized_ssid)
+            names = self._connection_names()
+            if profile_name not in names:
+                self._run(
+                    [
+                        "connection",
+                        "add",
+                        "type",
+                        "wifi",
+                        "ifname",
+                        target_device,
+                        "con-name",
+                        profile_name,
+                        "ssid",
+                        normalized_ssid,
+                    ],
+                    action=f"prepare managed STA profile for SSID {normalized_ssid}",
+                )
+            self._run(
+                [
+                    "connection",
+                    "modify",
+                    profile_name,
+                    "connection.interface-name",
+                    target_device,
+                    "connection.autoconnect",
+                    "yes",
+                    "802-11-wireless.ssid",
+                    normalized_ssid,
+                    "802-11-wireless.mode",
+                    "infrastructure",
+                    "802-11-wireless-security.key-mgmt",
+                    "wpa-psk",
+                    "802-11-wireless-security.psk",
+                    normalized_password,
+                    "ipv4.method",
+                    "auto",
+                    "ipv6.method",
+                    "ignore",
+                ],
+                action=f"prepare managed STA profile for SSID {normalized_ssid}",
+            )
+            self._run(
+                ["connection", "up", profile_name, "ifname", target_device],
+                action=f"connect upstream Wi-Fi SSID {normalized_ssid}",
+            )
+        else:
+            self._run(
+                ["device", "wifi", "connect", normalized_ssid, "ifname", target_device],
+                action=f"connect upstream Wi-Fi SSID {normalized_ssid}",
+            )
         snapshot = self.status_snapshot(ap_profile_name)
         return {
             "ssid": normalized_ssid,
             "target_device": target_device,
+            "snapshot": snapshot.to_dict(),
+        }
+
+    def recheck_upstream_status(self, profile_name: str = DEFAULT_AP_PROFILE_NAME) -> dict[str, Any]:
+        connectivity_check = self.trigger_connectivity_recheck()
+        snapshot = self.status_snapshot(profile_name)
+        return {
+            "connectivity_check": connectivity_check,
             "snapshot": snapshot.to_dict(),
         }
 
@@ -461,10 +560,30 @@ class NetworkManagerAdapter:
             ):
                 sta_connection_names.append(device.connection)
 
+        sta_connectivity_states: list[str] = []
+        for device in sta_devices:
+            normalized_state = _normalize_connectivity_value(
+                self._device_ipv4_connectivity(device.device)
+            )
+            if normalized_state and normalized_state not in sta_connectivity_states:
+                sta_connectivity_states.append(normalized_state)
+
         local_ap_ready = ap_profile.exists and ap_profile.active and len(ap_device_names) > 0
-        connectivity = general.connectivity.lower()
-        upstream_internet_reachable = sta_connected and connectivity == "full"
-        captive_portal_detected = sta_connected and connectivity in {"portal", "limited"}
+        connectivity = _normalize_connectivity_value(general.connectivity)
+        upstream_connectivity = _select_sta_connectivity(sta_connectivity_states, fallback=connectivity)
+        if sta_devices:
+            probe_state = _normalize_connectivity_value(self._connectivity_probe(sta_devices[0].device))
+            upstream_connectivity = _apply_sta_probe_override(
+                connectivity=upstream_connectivity,
+                probe_state=probe_state,
+            )
+        upstream_status = _classify_upstream_status(
+            sta_connected=sta_connected,
+            connectivity=upstream_connectivity,
+        )
+        upstream_internet_reachable = upstream_status == "internet_reachable"
+        captive_portal_detected = upstream_status == "captive_portal_likely"
+        upstream_no_usable_internet = sta_connected and not upstream_internet_reachable
         if not ap_profile.exists:
             next_action = "AP profile missing. Update AP config to apply baseline."
         elif general.wifi.lower() == "disabled":
@@ -475,8 +594,13 @@ class NetworkManagerAdapter:
             next_action = "Local AP is available and upstream Internet is reachable."
         elif captive_portal_detected:
             next_action = (
-                "Local AP is available. Upstream Wi-Fi is linked but Internet is limited; "
-                "complete captive portal login if required."
+                "Local AP remains available. Upstream Wi-Fi likely requires captive-portal login. "
+                "Complete login on a phone/laptop using the upstream SSID, then run Recheck upstream status."
+            )
+        elif upstream_no_usable_internet:
+            next_action = (
+                "Local AP remains available. Upstream Wi-Fi is connected but Internet is not yet usable. "
+                "Confirm upstream link quality, then run Recheck upstream status."
             )
         else:
             next_action = "Local AP is available, but upstream Wi-Fi is not connected. Join upstream Wi-Fi."
@@ -491,6 +615,9 @@ class NetworkManagerAdapter:
             sta_device_names=sta_device_names,
             sta_connection_names=sta_connection_names,
             local_ap_ready=local_ap_ready,
+            upstream_connectivity=upstream_connectivity,
+            upstream_status=upstream_status,
+            upstream_no_usable_internet=upstream_no_usable_internet,
             upstream_internet_reachable=upstream_internet_reachable,
             captive_portal_detected=captive_portal_detected,
             next_operator_action=next_action,
@@ -505,3 +632,112 @@ def _safe_signal_value(signal: str) -> int:
         return int(raw)
     except ValueError:
         return -1
+
+
+def _classify_upstream_status(*, sta_connected: bool, connectivity: str) -> str:
+    normalized = connectivity.strip().lower()
+    if not sta_connected:
+        return "disconnected"
+    if normalized == "full":
+        return "internet_reachable"
+    if normalized == "portal":
+        return "captive_portal_likely"
+    return "no_usable_internet"
+
+
+def _normalize_connectivity_value(raw: str) -> str:
+    value = raw.strip().lower()
+    if not value:
+        return "unknown"
+    if "(" in value and ")" in value:
+        start = value.rfind("(")
+        end = value.find(")", start + 1)
+        if start != -1 and end != -1 and end > start + 1:
+            return value[start + 1 : end].strip()
+    return value
+
+
+def _select_sta_connectivity(states: list[str], *, fallback: str) -> str:
+    if not states:
+        return fallback
+    if "full" in states:
+        return "full"
+    if "portal" in states:
+        return "portal"
+    if "limited" in states:
+        return "limited"
+    if "none" in states:
+        return "none"
+    if "unknown" in states:
+        return "unknown"
+    return states[0]
+
+
+def _apply_sta_probe_override(*, connectivity: str, probe_state: str) -> str:
+    normalized_connectivity = connectivity.strip().lower()
+    normalized_probe = probe_state.strip().lower()
+    if normalized_probe in {"portal", "limited", "none"}:
+        return normalized_probe
+    if normalized_connectivity == "unknown" and normalized_probe in {"full"}:
+        return normalized_probe
+    return normalized_connectivity
+
+
+def _probe_sta_interface_connectivity(device_name: str) -> str:
+    probe_target = "http://connectivity-check.ubuntu.com/"
+    try:
+        completed = subprocess.run(
+            [
+                "curl",
+                "-sS",
+                "-I",
+                "--max-time",
+                "4",
+                "--interface",
+                device_name,
+                probe_target,
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError:
+        return "unknown"
+    except subprocess.CalledProcessError:
+        return "unknown"
+
+    status_code = _extract_http_status_code(completed.stdout)
+    if status_code in {301, 302, 303, 307, 308, 511}:
+        return "portal"
+    if status_code in {200, 204}:
+        return "full"
+    if status_code in {400, 401, 403, 407}:
+        return "limited"
+    if status_code is None:
+        return "unknown"
+    return "none"
+
+
+def _extract_http_status_code(headers_output: str) -> int | None:
+    for raw_line in headers_output.splitlines():
+        line = raw_line.strip()
+        if not line.lower().startswith("http/"):
+            continue
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        status = parts[1].strip()
+        if status.isdigit():
+            return int(status)
+    return None
+
+
+def _sta_profile_name(ssid: str) -> str:
+    normalized = "".join(
+        character if character.isalnum() or character in {"-", "_", "."} else "_"
+        for character in ssid.strip()
+    )
+    trimmed = normalized.strip("._-")
+    if not trimmed:
+        trimmed = "ssid"
+    return f"photovault-sta-{trimmed}"[:96]

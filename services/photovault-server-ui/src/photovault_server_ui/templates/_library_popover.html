@@ -1,0 +1,65 @@
+{% from "macros.html" import status_badge %}
+{# Hover/focus popover fragment. Swapped into .library-tile-popover by HTMX.
+   Keep it short: identity, dimensions, capture metadata, plus quick actions. #}
+<div class="library-popover-inner">
+  <div class="library-popover-header">
+    <strong class="library-popover-name">{{ asset.filename }}</strong>
+    <div class="library-popover-path text-secondary small">{{ asset.relative_path }}</div>
+  </div>
+  <div class="library-popover-badges mt-2">
+    {{ status_badge(asset.media_type) }}
+    {{ status_badge(asset.extraction_status or 'unknown', 'extraction ' + (asset.extraction_status or 'unknown')) }}
+    {{ status_badge(asset.preview_status or 'unknown', 'preview ' + (asset.preview_status or 'unknown')) }}
+    {% if asset.is_favorite %}{{ status_badge('favorite') }}{% endif %}
+    {% if asset.is_archived %}{{ status_badge('archived') }}{% endif %}
+  </div>
+  <dl class="library-popover-dl small mt-2 mb-2">
+    <dt>Size</dt><dd>{{ asset.size_human }}</dd>
+    {% if asset.capture_timestamp_utc %}
+      <dt>Captured</dt><dd>{{ asset.capture_timestamp_utc }}</dd>
+    {% endif %}
+    {% if asset.image_width and asset.image_height %}
+      <dt>Dimensions</dt><dd>{{ asset.image_width }} × {{ asset.image_height }}</dd>
+    {% endif %}
+    {% if asset.exposure_summary %}
+      <dt>Exposure</dt><dd>{{ asset.exposure_summary }}</dd>
+    {% endif %}
+    {% if asset.camera_make or asset.camera_model %}
+      <dt>Camera</dt><dd>{{ (asset.camera_make or '') }} {{ (asset.camera_model or '') }}</dd>
+    {% endif %}
+    {% if asset.lens_model %}
+      <dt>Lens</dt><dd>{{ asset.lens_model }}</dd>
+    {% endif %}
+    <dt>Cataloged</dt><dd>{{ asset.last_cataloged_at_utc }}</dd>
+  </dl>
+  <div class="library-popover-actions d-flex gap-2 flex-wrap">
+    <a
+      class="btn btn-sm btn-primary"
+      href="/catalog/asset?relative_path={{ asset.relative_path | urlencode }}"
+    >Inspect</a>
+    <form
+      method="post"
+      action="/catalog/actions/favorite/toggle"
+      class="inline-form"
+    >
+      <input type="hidden" name="relative_path" value="{{ asset.relative_path }}">
+      <input type="hidden" name="currently_favorite" value="{{ 'true' if asset.is_favorite else 'false' }}">
+      <input type="hidden" name="return_query" value="">
+      <button class="btn btn-sm {{ 'btn-warning' if asset.is_favorite else 'btn-outline-secondary' }}" type="submit">
+        {{ '★ Unfavorite' if asset.is_favorite else '☆ Favorite' }}
+      </button>
+    </form>
+    <form
+      method="post"
+      action="/catalog/actions/archive/toggle"
+      class="inline-form"
+    >
+      <input type="hidden" name="relative_path" value="{{ asset.relative_path }}">
+      <input type="hidden" name="currently_archived" value="{{ 'true' if asset.is_archived else 'false' }}">
+      <input type="hidden" name="return_query" value="">
+      <button class="btn btn-sm {{ 'btn-dark' if asset.is_archived else 'btn-outline-secondary' }}" type="submit">
+        {{ '📦 Unarchive' if asset.is_archived else '🗃 Archive' }}
+      </button>
+    </form>
+  </div>
+</div>

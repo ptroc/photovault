@@ -2,6 +2,7 @@
 
 import hashlib
 import io
+import math
 import os
 import re
 import secrets
@@ -133,6 +134,11 @@ class AdminCatalogItem(BaseModel):
     image_height: int | None
     orientation: int | None
     lens_model: str | None
+    exposure_time_s: float | None = None
+    f_number: float | None = None
+    iso_speed: int | None = None
+    focal_length_mm: float | None = None
+    focal_length_35mm_mm: int | None = None
     is_favorite: bool = False
     is_archived: bool = False
 
@@ -162,6 +168,28 @@ class AdminRetryPreviewResponse(BaseModel):
 
 class AdminCatalogAssetResponse(BaseModel):
     item: AdminCatalogItem
+
+
+class AdminCatalogFolderItem(BaseModel):
+    """One folder in the catalog folder index.
+
+    `path` is the forward-slash-joined directory portion of the asset's
+    relative_path, e.g. ``2026/04/Job_A`` for an asset at
+    ``2026/04/Job_A/IMG_0001.jpg``. `depth` is the number of path
+    segments (``2026`` → 1, ``2026/04`` → 2, ``2026/04/Job_A`` → 3).
+    `direct_count` is the number of assets whose folder exactly equals
+    ``path``; `total_count` includes assets in subfolders. Clients use
+    this to render a folder tree and show counts at every depth.
+    """
+
+    path: str
+    depth: int
+    direct_count: int
+    total_count: int
+
+
+class AdminCatalogFoldersResponse(BaseModel):
+    folders: list[AdminCatalogFolderItem]
 
 
 class AdminCatalogOrganizationRequest(BaseModel):
@@ -461,6 +489,99 @@ def _normalize_exif_int(value: object) -> int | None:
     return None
 
 
+def _normalize_exif_rational(value: object) -> float | None:
+    """Coerce EXIF numeric-ish values (int/float/IFDRational/str) to float.
+
+    Pillow returns IFDRational for EXIF rational tags. It supports float()
+    conversion but guards against zero denominators by raising. We handle
+    that defensively so a corrupt tag never aborts extraction.
+    """
+    if isinstance(value, bool):  # bool is an int subclass — exclude explicitly
+        return None
+    if isinstance(value, (int, float)):
+        result = float(value)
+        if math.isfinite(result):
+            return result
+        return None
+    # Pillow IFDRational + anything with __float__ (duck-typed to stay
+    # resilient to library changes).
+    if hasattr(value, "__float__"):
+        try:
+            result = float(value)
+        except (ZeroDivisionError, ValueError, TypeError):
+            return None
+        if math.isfinite(result):
+            return result
+        return None
+    if isinstance(value, tuple) and len(value) == 2:
+        numerator, denominator = value
+        try:
+            numerator_f = float(numerator)
+            denominator_f = float(denominator)
+        except (TypeError, ValueError):
+            return None
+        if denominator_f == 0:
+            return None
+        result = numerator_f / denominator_f
+        if math.isfinite(result):
+            return result
+        return None
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return None
+        # Accept "1/200", "0.005", "2.8", etc.
+        if "/" in stripped:
+            parts = stripped.split("/", 1)
+            try:
+                numerator_f = float(parts[0])
+                denominator_f = float(parts[1])
+            except ValueError:
+                return None
+            if denominator_f == 0:
+                return None
+            result = numerator_f / denominator_f
+        else:
+            try:
+                result = float(stripped)
+            except ValueError:
+                return None
+        if math.isfinite(result):
+            return result
+        return None
+    return None
+
+
+def _normalize_exif_iso_speed(value: object) -> int | None:
+    """EXIF ISOSpeedRatings (tag 34855) is often a tuple like (400,) or a
+    scalar int. This normalizes both to a single integer, picking the first
+    positive entry for tuples/lists.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value > 0 else None
+    if isinstance(value, (tuple, list)):
+        for candidate in value:
+            if isinstance(candidate, bool):
+                continue
+            if isinstance(candidate, int) and candidate > 0:
+                return candidate
+            if isinstance(candidate, str):
+                stripped = candidate.strip()
+                if stripped.isdigit():
+                    parsed = int(stripped)
+                    if parsed > 0:
+                        return parsed
+        return None
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.isdigit():
+            parsed = int(stripped)
+            return parsed if parsed > 0 else None
+    return None
+
+
 def _extract_capture_timestamp_utc(exif_map: object) -> str | None:
     if not hasattr(exif_map, "get"):
         return None
@@ -488,7 +609,7 @@ def _extract_capture_timestamp_utc(exif_map: object) -> str | None:
     return parsed.replace(tzinfo=UTC).isoformat()
 
 
-def _extract_media_metadata(path: Path) -> dict[str, str | int | None]:
+def _extract_media_metadata(path: Path) -> dict[str, str | int | float | None]:
     file_suffix = path.suffix.lower()
     if file_suffix not in {".png", ".jpg", ".jpeg"}:
         raise ValueError(f"unsupported media format for extraction: {file_suffix or 'unknown'}")
@@ -501,6 +622,10 @@ def _extract_media_metadata(path: Path) -> dict[str, str | int | None]:
     except (UnidentifiedImageError, OSError, SyntaxError, ValueError) as exc:
         raise ValueError(f"invalid media content for extraction: {exc}") from exc
 
+    # Exposure-related EXIF tags. See Phase 3.A plan in
+    # docs/proposals/server_ui_catalog_improvements.md §9 for rationale
+    # (ExposureTime preferred over ShutterSpeedValue; ISOSpeedRatings may
+    # be a tuple; 35mm equivalent focal length is a plain integer).
     return {
         "capture_timestamp_utc": _extract_capture_timestamp_utc(exif_map),
         "camera_make": _normalize_exif_text(exif_map.get(271)),
@@ -509,6 +634,11 @@ def _extract_media_metadata(path: Path) -> dict[str, str | int | None]:
         "image_height": int(height),
         "orientation": _normalize_exif_int(exif_map.get(274)),
         "lens_model": _normalize_exif_text(exif_map.get(42036)),
+        "exposure_time_s": _normalize_exif_rational(exif_map.get(33434)),
+        "f_number": _normalize_exif_rational(exif_map.get(33437)),
+        "iso_speed": _normalize_exif_iso_speed(exif_map.get(34855)),
+        "focal_length_mm": _normalize_exif_rational(exif_map.get(37386)),
+        "focal_length_35mm_mm": _normalize_exif_int(exif_map.get(41989)),
     }
 
 
@@ -680,9 +810,20 @@ def _attempt_media_extraction(
             image_height=None,
             orientation=None,
             lens_model=None,
+            exposure_time_s=None,
+            f_number=None,
+            iso_speed=None,
+            focal_length_mm=None,
+            focal_length_35mm_mm=None,
             recorded_at_utc=now,
         )
         return
+
+    exposure_time_raw = metadata["exposure_time_s"]
+    f_number_raw = metadata["f_number"]
+    iso_raw = metadata["iso_speed"]
+    focal_length_raw = metadata["focal_length_mm"]
+    focal_length_35mm_raw = metadata["focal_length_35mm_mm"]
 
     store.upsert_media_asset_extraction(
         relative_path=relative_path,
@@ -702,6 +843,19 @@ def _attempt_media_extraction(
         image_height=int(metadata["image_height"]) if metadata["image_height"] is not None else None,
         orientation=int(metadata["orientation"]) if metadata["orientation"] is not None else None,
         lens_model=str(metadata["lens_model"]) if metadata["lens_model"] is not None else None,
+        exposure_time_s=(
+            float(exposure_time_raw) if isinstance(exposure_time_raw, (int, float)) else None
+        ),
+        f_number=float(f_number_raw) if isinstance(f_number_raw, (int, float)) else None,
+        iso_speed=int(iso_raw) if isinstance(iso_raw, int) and not isinstance(iso_raw, bool) else None,
+        focal_length_mm=(
+            float(focal_length_raw) if isinstance(focal_length_raw, (int, float)) else None
+        ),
+        focal_length_35mm_mm=(
+            int(focal_length_35mm_raw)
+            if isinstance(focal_length_35mm_raw, int) and not isinstance(focal_length_35mm_raw, bool)
+            else None
+        ),
         recorded_at_utc=now,
     )
 
@@ -834,6 +988,31 @@ def _to_admin_catalog_item(record: object) -> AdminCatalogItem:
         image_height=int(record.image_height) if record.image_height is not None else None,
         orientation=int(record.orientation) if record.orientation is not None else None,
         lens_model=str(record.lens_model) if record.lens_model is not None else None,
+        exposure_time_s=(
+            float(getattr(record, "exposure_time_s", None))
+            if getattr(record, "exposure_time_s", None) is not None
+            else None
+        ),
+        f_number=(
+            float(getattr(record, "f_number", None))
+            if getattr(record, "f_number", None) is not None
+            else None
+        ),
+        iso_speed=(
+            int(getattr(record, "iso_speed", None))
+            if getattr(record, "iso_speed", None) is not None
+            else None
+        ),
+        focal_length_mm=(
+            float(getattr(record, "focal_length_mm", None))
+            if getattr(record, "focal_length_mm", None) is not None
+            else None
+        ),
+        focal_length_35mm_mm=(
+            int(getattr(record, "focal_length_35mm_mm", None))
+            if getattr(record, "focal_length_35mm_mm", None) is not None
+            else None
+        ),
         is_favorite=bool(getattr(record, "is_favorite", False)),
         is_archived=bool(getattr(record, "is_archived", False)),
     )
@@ -850,6 +1029,32 @@ def _parse_boolean_filter(raw_value: str | None, *, field_name: str) -> bool | N
     if lowered == "false":
         return False
     raise HTTPException(status_code=400, detail=f"invalid {field_name} filter")
+
+
+def _normalize_catalog_folder_prefix(raw_value: str | None) -> str | None:
+    """Validate and normalize a catalog folder prefix.
+
+    Accepts a forward-slash separated path (e.g. ``"2024/08"``) and returns
+    it stripped of surrounding whitespace and trailing slashes. Rejects
+    absolute paths, empty segments, ``..`` segments, and backslashes so the
+    filter cannot be abused to reach outside of the managed catalog.
+    """
+
+    if raw_value is None:
+        return None
+    value = raw_value.strip()
+    if value == "":
+        return None
+    if value.startswith("/") or "\\" in value:
+        raise HTTPException(status_code=400, detail="invalid relative_path_prefix")
+    trimmed = value.strip("/")
+    if trimmed == "":
+        raise HTTPException(status_code=400, detail="invalid relative_path_prefix")
+    segments = trimmed.split("/")
+    for segment in segments:
+        if segment == "" or segment == "." or segment == "..":
+            raise HTTPException(status_code=400, detail="invalid relative_path_prefix")
+    return trimmed
 
 
 def _validate_catalog_filter_selection(
@@ -1557,6 +1762,7 @@ def create_app(
         is_archived: str | None = Query(default=None),
         cataloged_since_utc: str | None = Query(default=None),
         cataloged_before_utc: str | None = Query(default=None),
+        relative_path_prefix: str | None = Query(default=None),
     ) -> AdminCatalogListResponse:
         _validate_catalog_filter_selection(
             extraction_status=extraction_status,
@@ -1567,6 +1773,7 @@ def create_app(
         )
         is_favorite_filter = _parse_boolean_filter(is_favorite, field_name="is_favorite")
         is_archived_filter = _parse_boolean_filter(is_archived, field_name="is_archived")
+        normalized_prefix = _normalize_catalog_folder_prefix(relative_path_prefix)
 
         store: UploadStateStore = app.state.upload_state_store
         total, records = store.list_media_assets(
@@ -1581,12 +1788,32 @@ def create_app(
             is_archived=is_archived_filter,
             cataloged_since_utc=cataloged_since_utc,
             cataloged_before_utc=cataloged_before_utc,
+            relative_path_prefix=normalized_prefix,
         )
         return AdminCatalogListResponse(
             total=total,
             limit=limit,
             offset=offset,
             items=[_to_admin_catalog_item(record) for record in records],
+        )
+
+    @app.get(
+        "/v1/admin/catalog/folders",
+        response_model=AdminCatalogFoldersResponse,
+    )
+    def admin_catalog_folders() -> AdminCatalogFoldersResponse:
+        store: UploadStateStore = app.state.upload_state_store
+        rows = store.list_media_asset_folders()
+        return AdminCatalogFoldersResponse(
+            folders=[
+                AdminCatalogFolderItem(
+                    path=path,
+                    depth=depth,
+                    direct_count=direct_count,
+                    total_count=total_count,
+                )
+                for (path, depth, direct_count, total_count) in rows
+            ]
         )
 
     @app.get("/v1/admin/catalog/asset", response_model=AdminCatalogAssetResponse)

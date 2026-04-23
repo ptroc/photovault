@@ -103,9 +103,352 @@ body.server-shell {
   position: relative;
 }
 
+/* Active filters chip bar — each chip is a link that drops just that filter. */
+.active-filters-bar .filter-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  background: rgba(13, 110, 253, 0.08);
+  color: var(--bs-primary);
+  border: 1px solid rgba(13, 110, 253, 0.25);
+  padding: 0.25rem 0.7rem;
+  font-weight: 500;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+
+.active-filters-bar .filter-chip:hover,
+.active-filters-bar .filter-chip:focus {
+  background: rgba(13, 110, 253, 0.16);
+  border-color: rgba(13, 110, 253, 0.45);
+}
+
+.active-filters-bar .filter-chip-label {
+  text-transform: uppercase;
+  font-size: 0.68rem;
+  letter-spacing: 0.06em;
+  color: var(--bs-secondary-color);
+}
+
+.active-filters-bar .filter-chip-value {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.78rem;
+}
+
+.active-filters-bar .filter-chip-x {
+  font-size: 0.9rem;
+  line-height: 1;
+  opacity: 0.7;
+}
+
+/* Native <details> advanced-filters disclosure — subtle, keyboard-friendly. */
+.advanced-filters > summary {
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+
+.advanced-filters > summary::-webkit-details-marker {
+  display: none;
+}
+
+.advanced-filters > summary::before {
+  content: "▸ ";
+  display: inline-block;
+  margin-right: 0.25rem;
+  transition: transform 120ms ease;
+}
+
+.advanced-filters[open] > summary::before {
+  content: "▾ ";
+}
+
+/* Compact asset card layout. */
+.asset-card .asset-filename {
+  letter-spacing: -0.01em;
+  word-break: break-word;
+}
+
+.asset-card .asset-summary > * + * {
+  white-space: nowrap;
+}
+
+.asset-card .asset-icon-btn {
+  min-width: 2.25rem;
+  min-height: 2.25rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1rem;
+  line-height: 1;
+}
+
+.asset-card .asset-icon-btn span {
+  line-height: 1;
+}
+
+/* HTMX request visual feedback. */
+.htmx-request.asset-icon-btn {
+  opacity: 0.6;
+  cursor: progress;
+}
+
 @media (max-width: 991.98px) {
   .preview-frame {
     width: 100%;
     height: 180px;
   }
+  .asset-card .asset-summary > * + * {
+    white-space: normal;
+  }
+}
+
+/* -----------------------------------------------------------------------
+ * Library (grid view) layout
+ *
+ * The Library is a visual counterpart to /catalog. It pairs a folder tree
+ * on the left with a thumbnail grid on the right. Hovering or focusing a
+ * tile reveals an overflow button (…) that opens an HTMX-loaded popover
+ * with metadata and quick actions; clicking the tile opens a Bootstrap
+ * modal whose body is also HTMX-loaded.
+ * ----------------------------------------------------------------------- */
+
+.library-layout {
+  margin-top: 0.5rem;
+}
+
+.library-folder-tree .folder-tree-list {
+  max-height: 60vh;
+  overflow-y: auto;
+}
+
+.library-folder-tree .folder-tree-entry {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.25rem 0.5rem;
+  border-radius: 0.375rem;
+  text-decoration: none;
+  color: inherit;
+  /* Indent deeper folders via the --folder-depth custom property the
+     template sets inline. Each level is 0.75rem of extra padding. */
+  padding-left: calc(0.5rem + (var(--folder-depth, 0) - 1) * 0.75rem);
+}
+
+.library-folder-tree .folder-tree-entry:hover {
+  background: rgba(15, 23, 42, 0.05);
+}
+
+.library-folder-tree .folder-tree-entry.is-selected {
+  background: rgba(21, 101, 192, 0.12);
+  color: #0b4a91;
+  font-weight: 600;
+}
+
+.library-folder-tree .folder-tree-entry.is-ancestor {
+  color: #0b4a91;
+}
+
+.library-folder-tree .folder-tree-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.library-folder-tree .folder-tree-count {
+  font-size: 0.75rem;
+  color: var(--bs-secondary-color);
+  background: rgba(15, 23, 42, 0.06);
+  border-radius: 999px;
+  padding: 0.05rem 0.5rem;
+  flex-shrink: 0;
+}
+
+/* --- Grid --- */
+.library-grid {
+  display: grid;
+  gap: 0.75rem;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+}
+
+.library-tile {
+  position: relative;
+  background: #fff;
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  border-radius: 0.5rem;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  transition: box-shadow 0.15s ease;
+}
+
+.library-tile:hover,
+.library-tile:focus-within {
+  box-shadow: 0 0.5rem 1.25rem rgba(15, 23, 42, 0.12);
+}
+
+.library-tile-link {
+  display: block;
+  text-decoration: none;
+  color: inherit;
+}
+
+.library-tile-frame {
+  aspect-ratio: 1 / 1;
+  background: #f1f4f8;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.library-tile-frame img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.library-tile-placeholder {
+  color: var(--bs-secondary-color);
+  text-align: center;
+  padding: 0.5rem;
+}
+
+.library-tile-caption {
+  padding: 0.5rem 0.6rem 0.6rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.library-tile-name {
+  font-size: 0.875rem;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.library-tile-badges {
+  display: flex;
+  gap: 0.25rem;
+  flex-wrap: wrap;
+}
+
+/* "…" overflow button; only visible on hover/focus. */
+.library-tile-more {
+  position: absolute;
+  top: 0.4rem;
+  right: 0.4rem;
+  width: 1.75rem;
+  height: 1.75rem;
+  border-radius: 999px;
+  border: none;
+  background: rgba(15, 23, 42, 0.55);
+  color: #fff;
+  font-size: 1rem;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.library-tile:hover .library-tile-more,
+.library-tile:focus-within .library-tile-more,
+.library-tile-more:focus {
+  opacity: 1;
+}
+
+/* Popover — empty until HTMX swaps content in, then absolutely positioned
+   above the tile. */
+.library-tile-popover {
+  position: absolute;
+  top: 2.25rem;
+  right: 0.4rem;
+  width: min(280px, calc(100% - 0.8rem));
+  background: #fff;
+  border: 1px solid rgba(15, 23, 42, 0.1);
+  border-radius: 0.5rem;
+  box-shadow: 0 0.75rem 1.75rem rgba(15, 23, 42, 0.18);
+  padding: 0.6rem 0.75rem;
+  font-size: 0.85rem;
+  z-index: 5;
+  display: none;
+}
+
+.library-tile-popover:not(:empty) {
+  display: block;
+}
+
+.library-popover-dl {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.2rem 0.6rem;
+  margin-bottom: 0;
+}
+
+.library-popover-dl dt {
+  font-weight: 500;
+  color: var(--bs-secondary-color);
+}
+
+.library-popover-dl dd {
+  margin: 0;
+  word-break: break-word;
+}
+
+/* Lightbox body layout. */
+.library-lightbox-root {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+}
+
+@media (max-width: 767.98px) {
+  .library-lightbox-root {
+    grid-template-columns: 1fr;
+  }
+}
+
+.library-lightbox-preview {
+  background: #0b1020;
+  border-radius: 0.5rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 240px;
+  max-height: 70vh;
+  overflow: hidden;
+}
+
+.library-lightbox-preview img {
+  max-width: 100%;
+  max-height: 70vh;
+  object-fit: contain;
+  display: block;
+}
+
+.library-lightbox-placeholder {
+  color: #cfd6e4;
+  padding: 2rem;
+  text-align: center;
+}
+
+.library-lightbox-dl {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.25rem 0.75rem;
+}
+
+.library-lightbox-dl dt {
+  font-weight: 500;
+  color: var(--bs-secondary-color);
+}
+
+.library-lightbox-dl dd {
+  margin: 0;
+  word-break: break-word;
 }

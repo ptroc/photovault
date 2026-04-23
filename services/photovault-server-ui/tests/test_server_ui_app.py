@@ -1055,3 +1055,355 @@ def test_catalog_archive_action_redirects_back_to_detail() -> None:
     assert observed["path"] == "/v1/admin/catalog/archive/unmark"
     assert observed["payload"] == {"relative_path": "2026/04/Job_A/a.jpg"}
     assert "Unarchived asset: 2026/04/Job_A/a.jpg." in response.get_data(as_text=True)
+
+
+# --- Library (grid view) ---------------------------------------------------
+
+def _library_catalog_item(relative_path: str, **overrides) -> dict:
+    """Build a minimal catalog item suitable for library tests.
+
+    The server-UI's _decorate_catalog_item only relies on a handful of keys,
+    so tests default the rest to "None" / "pending" to keep them readable.
+    Overrides let individual tests flip interesting fields.
+    """
+    base = {
+        "relative_path": relative_path,
+        "sha256_hex": "c" * 64,
+        "size_bytes": 1024,
+        "media_type": "jpeg",
+        "preview_capability": "previewable",
+        "origin_kind": "uploaded",
+        "last_observed_origin_kind": "uploaded",
+        "provenance_job_name": "Job_A",
+        "provenance_original_filename": relative_path.rsplit("/", 1)[-1],
+        "first_cataloged_at_utc": "2026-04-22T10:00:00+00:00",
+        "last_cataloged_at_utc": "2026-04-22T10:00:00+00:00",
+        "extraction_status": "succeeded",
+        "extraction_last_attempted_at_utc": "2026-04-22T10:01:00+00:00",
+        "extraction_last_succeeded_at_utc": "2026-04-22T10:01:00+00:00",
+        "extraction_last_failed_at_utc": None,
+        "extraction_failure_detail": None,
+        "preview_status": "succeeded",
+        "preview_relative_path": f"{relative_path}.preview.jpg",
+        "preview_last_attempted_at_utc": "2026-04-22T10:02:00+00:00",
+        "preview_last_succeeded_at_utc": "2026-04-22T10:02:00+00:00",
+        "preview_last_failed_at_utc": None,
+        "preview_failure_detail": None,
+        "is_favorite": False,
+        "is_archived": False,
+        "capture_timestamp_utc": "2026-04-22T09:30:00+00:00",
+        "camera_make": "Canon",
+        "camera_model": "EOS R6",
+        "image_width": 6000,
+        "image_height": 4000,
+        "orientation": 1,
+        "lens_model": "RF 24-70mm",
+    }
+    base.update(overrides)
+    return base
+
+
+def test_library_page_renders_tree_and_grid() -> None:
+    def _fetcher(path: str, query: dict[str, str]) -> dict:
+        if path == "/v1/admin/catalog/folders":
+            assert query == {}
+            return {
+                "folders": [
+                    {"path": "2026", "depth": 1, "direct_count": 0, "total_count": 4},
+                    {"path": "2026/04", "depth": 2, "direct_count": 0, "total_count": 4},
+                    {
+                        "path": "2026/04/Job_A",
+                        "depth": 3,
+                        "direct_count": 2,
+                        "total_count": 2,
+                    },
+                    {
+                        "path": "2026/04/Job_B",
+                        "depth": 3,
+                        "direct_count": 2,
+                        "total_count": 2,
+                    },
+                ]
+            }
+        assert path == "/v1/admin/catalog"
+        # Default view has no prefix filter.
+        assert query == {"limit": "60", "offset": "0"}
+        return {
+            "total": 2,
+            "limit": 60,
+            "offset": 0,
+            "items": [
+                _library_catalog_item("2026/04/Job_A/a.jpg", sha256_hex="a" * 64),
+                _library_catalog_item("2026/04/Job_B/b.jpg", sha256_hex="b" * 64),
+            ],
+        }
+
+    app = create_app(api_fetcher=_fetcher)
+    response = app.test_client().get("/library")
+    assert response.status_code == 200
+    html = response.get_data(as_text=True)
+    assert "Media Library" in html
+    # Folder tree entries render.
+    assert "2026" in html
+    assert "Job_A" in html
+    assert "Job_B" in html
+    # Root "All folders" entry is present and selected by default.
+    assert 'href="/library"' in html
+    assert "All folders" in html
+    # Thumbnails render with lazy loading and previews proxied via server-UI.
+    assert 'src="/catalog/preview?relative_path=2026/04/Job_A/a.jpg"' in html
+    assert 'loading="lazy"' in html
+    # Lightbox modal shell is present.
+    assert 'id="libraryLightbox"' in html
+    # SHA must not leak.
+    assert ("a" * 64) not in html
+    assert ("b" * 64) not in html
+
+
+def test_library_page_filters_by_selected_folder() -> None:
+    def _fetcher(path: str, query: dict[str, str]) -> dict:
+        if path == "/v1/admin/catalog/folders":
+            return {
+                "folders": [
+                    {"path": "2026", "depth": 1, "direct_count": 0, "total_count": 2},
+                    {"path": "2026/04", "depth": 2, "direct_count": 0, "total_count": 2},
+                    {
+                        "path": "2026/04/Job_A",
+                        "depth": 3,
+                        "direct_count": 2,
+                        "total_count": 2,
+                    },
+                ]
+            }
+        assert path == "/v1/admin/catalog"
+        # The selected folder must be forwarded to the API as the prefix filter.
+        assert query == {
+            "limit": "60",
+            "offset": "0",
+            "relative_path_prefix": "2026/04/Job_A",
+        }
+        return {
+            "total": 1,
+            "limit": 60,
+            "offset": 0,
+            "items": [
+                _library_catalog_item("2026/04/Job_A/a.jpg", sha256_hex="a" * 64),
+            ],
+        }
+
+    app = create_app(api_fetcher=_fetcher)
+    response = app.test_client().get("/library?folder=2026/04/Job_A")
+    assert response.status_code == 200
+    html = response.get_data(as_text=True)
+    # The selected folder is surfaced in the header line.
+    assert "2026/04/Job_A" in html
+    # Paginator uses the folder filter.
+    assert "Next" not in html or "folder=2026" in html
+
+
+def test_library_page_rejects_path_traversal_in_folder_arg() -> None:
+    # Malicious or malformed folder values must not be forwarded; the page
+    # should fall back to the unfiltered view.
+    forwarded: dict[str, dict[str, str]] = {}
+
+    def _fetcher(path: str, query: dict[str, str]) -> dict:
+        if path == "/v1/admin/catalog/folders":
+            return {"folders": []}
+        forwarded["query"] = dict(query)
+        return {"total": 0, "limit": 60, "offset": 0, "items": []}
+
+    app = create_app(api_fetcher=_fetcher)
+    response = app.test_client().get("/library?folder=../escape")
+    assert response.status_code == 200
+    assert forwarded["query"] == {"limit": "60", "offset": "0"}
+
+
+def test_library_popover_renders_asset_details() -> None:
+    def _fetcher(path: str, query: dict[str, str]) -> dict:
+        assert path == "/v1/admin/catalog/asset"
+        assert query == {"relative_path": "2026/04/Job_A/a.jpg"}
+        return {
+            "item": _library_catalog_item(
+                "2026/04/Job_A/a.jpg",
+                sha256_hex="a" * 64,
+                is_favorite=True,
+            )
+        }
+
+    app = create_app(api_fetcher=_fetcher)
+    response = app.test_client().get(
+        "/library/popover?relative_path=2026/04/Job_A/a.jpg"
+    )
+    assert response.status_code == 200
+    html = response.get_data(as_text=True)
+    # Identity + a couple of metadata bits surface in the popover.
+    assert "a.jpg" in html
+    assert "6000" in html
+    assert "Inspect" in html
+    # Popover must not leak the full SHA256.
+    assert ("a" * 64) not in html
+
+
+def test_library_lightbox_renders_preview_and_nav_buttons() -> None:
+    def _fetcher(path: str, query: dict[str, str]) -> dict:
+        assert path == "/v1/admin/catalog/asset"
+        return {"item": _library_catalog_item("2026/04/Job_A/a.jpg")}
+
+    app = create_app(api_fetcher=_fetcher)
+    response = app.test_client().get(
+        "/library/lightbox?relative_path=2026/04/Job_A/a.jpg&index=2&total=5&folder=2026/04"
+    )
+    assert response.status_code == 200
+    html = response.get_data(as_text=True)
+    assert 'src="/catalog/preview?relative_path=2026/04/Job_A/a.jpg"' in html
+    assert "Previous" in html
+    assert "Next" in html
+    assert "3 of 5 on this page" in html
+
+
+# ---------------------------------------------------------------------------
+# Phase 3.A: Exposure-metadata formatters and display surface.
+# ---------------------------------------------------------------------------
+
+
+def test_format_shutter_speed_renders_human_readable_values() -> None:
+    from photovault_server_ui.app import _format_shutter_speed
+
+    assert _format_shutter_speed(1 / 200) == "1/200 s"
+    assert _format_shutter_speed(1 / 60) == "1/60 s"
+    assert _format_shutter_speed(0.5) == "1/2 s"
+    assert _format_shutter_speed(1.0) == "1 s"
+    assert _format_shutter_speed(2.0) == "2 s"
+    assert _format_shutter_speed(None) is None
+    assert _format_shutter_speed(0) is None
+    assert _format_shutter_speed(-1.0) is None
+
+
+def test_format_exposure_summary_joins_available_fields() -> None:
+    from photovault_server_ui.app import _format_exposure_summary
+
+    full = _format_exposure_summary(
+        {
+            "exposure_time_s": 1 / 200,
+            "f_number": 2.8,
+            "iso_speed": 400,
+            "focal_length_mm": 50,
+            "focal_length_35mm_mm": 75,
+        }
+    )
+    # Uses middle dot as separator, renders focal length with 35mm equivalent
+    # in parentheses when both are present.
+    assert full == "1/200 s \u00b7 f/2.8 \u00b7 ISO 400 \u00b7 50 mm (75 mm eq.)"
+
+    partial = _format_exposure_summary({"f_number": 4.0, "iso_speed": 800})
+    assert partial == "f/4 \u00b7 ISO 800"
+
+    empty = _format_exposure_summary(
+        {
+            "exposure_time_s": None,
+            "f_number": None,
+            "iso_speed": None,
+            "focal_length_mm": None,
+            "focal_length_35mm_mm": None,
+        }
+    )
+    assert empty == ""
+
+
+def test_library_lightbox_renders_exposure_details() -> None:
+    item = _library_catalog_item(
+        "2026/04/Job_A/a.jpg",
+        exposure_time_s=1 / 125,
+        f_number=4.0,
+        iso_speed=800,
+        focal_length_mm=35.0,
+        focal_length_35mm_mm=52,
+    )
+
+    def _fetcher(path: str, query: dict[str, str]) -> dict:
+        assert path == "/v1/admin/catalog/asset"
+        return {"item": item}
+
+    app = create_app(api_fetcher=_fetcher)
+    response = app.test_client().get(
+        "/library/lightbox?relative_path=2026/04/Job_A/a.jpg&index=0&total=1"
+    )
+    assert response.status_code == 200
+    html = response.get_data(as_text=True)
+    # Exposure summary and each individual dl row render.
+    assert "1/125 s" in html
+    assert "f/4" in html
+    assert "ISO" in html
+    assert "800" in html
+    assert "35 mm" in html
+    assert "52 mm eq." in html
+
+
+def test_library_lightbox_omits_exposure_when_unavailable() -> None:
+    item = _library_catalog_item(
+        "2026/04/Job_A/a.jpg",
+        exposure_time_s=None,
+        f_number=None,
+        iso_speed=None,
+        focal_length_mm=None,
+        focal_length_35mm_mm=None,
+    )
+
+    def _fetcher(path: str, query: dict[str, str]) -> dict:
+        assert path == "/v1/admin/catalog/asset"
+        return {"item": item}
+
+    app = create_app(api_fetcher=_fetcher)
+    response = app.test_client().get(
+        "/library/lightbox?relative_path=2026/04/Job_A/a.jpg&index=0&total=1"
+    )
+    assert response.status_code == 200
+    html = response.get_data(as_text=True)
+    # When no exposure fields are present, no shutter/f-stop/ISO labels
+    # should appear in the dl list.
+    assert "<dt>Shutter</dt>" not in html
+    assert "<dt>Aperture</dt>" not in html
+    assert "<dt>ISO</dt>" not in html
+
+
+def test_library_popover_includes_exposure_summary_when_available() -> None:
+    item = _library_catalog_item(
+        "2026/04/Job_A/a.jpg",
+        exposure_time_s=1 / 60,
+        f_number=2.8,
+        iso_speed=100,
+    )
+
+    def _fetcher(path: str, query: dict[str, str]) -> dict:
+        assert path == "/v1/admin/catalog/asset"
+        return {"item": item}
+
+    app = create_app(api_fetcher=_fetcher)
+    response = app.test_client().get(
+        "/library/popover?relative_path=2026/04/Job_A/a.jpg"
+    )
+    assert response.status_code == 200
+    html = response.get_data(as_text=True)
+    assert "1/60 s" in html
+    assert "f/2.8" in html
+    assert "ISO 100" in html
+
+
+def test_library_page_emits_lightbox_nav_script() -> None:
+    def _fetcher(path: str, query: dict[str, str]) -> dict:
+        if path == "/v1/admin/catalog/folders":
+            return {"folders": []}
+        return {"total": 0, "limit": 60, "offset": 0, "items": []}
+
+    app = create_app(api_fetcher=_fetcher)
+    response = app.test_client().get("/library")
+    assert response.status_code == 200
+    html = response.get_data(as_text=True)
+    # The inline nav script must be present so arrow keys and prev/next
+    # buttons have something to bind to. We check a stable signature rather
+    # than an exact match so the script can evolve.
+    assert "libraryLightboxBody" in html
+    assert "ArrowLeft" in html
+    assert "ArrowRight" in html
+    assert "library-lightbox-prev" in html
+    assert "library-lightbox-next" in html

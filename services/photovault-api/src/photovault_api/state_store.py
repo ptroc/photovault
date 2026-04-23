@@ -85,6 +85,11 @@ class MediaAssetRecord:
     image_height: int | None
     orientation: int | None
     lens_model: str | None
+    exposure_time_s: float | None = None
+    f_number: float | None = None
+    iso_speed: int | None = None
+    focal_length_mm: float | None = None
+    focal_length_35mm_mm: int | None = None
     is_favorite: bool = False
     is_archived: bool = False
 
@@ -104,6 +109,11 @@ class MediaExtractionRecord:
     image_height: int | None
     orientation: int | None
     lens_model: str | None
+    exposure_time_s: float | None = None
+    f_number: float | None = None
+    iso_speed: int | None = None
+    focal_length_mm: float | None = None
+    focal_length_35mm_mm: int | None = None
 
 
 @dataclass(frozen=True)
@@ -277,7 +287,10 @@ class UploadStateStore(Protocol):
         is_archived: bool | None = None,
         cataloged_since_utc: str | None = None,
         cataloged_before_utc: str | None = None,
+        relative_path_prefix: str | None = None,
     ) -> tuple[int, list[MediaAssetRecord]]: ...
+
+    def list_media_asset_folders(self) -> list[tuple[str, int, int, int]]: ...
 
     def get_media_asset_by_path(self, relative_path: str) -> MediaAssetRecord | None: ...
 
@@ -331,6 +344,11 @@ class UploadStateStore(Protocol):
         image_height: int | None,
         orientation: int | None,
         lens_model: str | None,
+        exposure_time_s: float | None = None,
+        f_number: float | None = None,
+        iso_speed: int | None = None,
+        focal_length_mm: float | None = None,
+        focal_length_35mm_mm: int | None = None,
         recorded_at_utc: str,
     ) -> None: ...
 
@@ -635,6 +653,7 @@ class InMemoryUploadStateStore:
         is_archived: bool | None = None,
         cataloged_since_utc: str | None = None,
         cataloged_before_utc: str | None = None,
+        relative_path_prefix: str | None = None,
     ) -> tuple[int, list[MediaAssetRecord]]:
         with self._lock:
             ordered = sorted(self.media_assets.values(), key=lambda item: item.relative_path)
@@ -663,8 +682,40 @@ class InMemoryUploadStateStore:
                 ordered = [item for item in ordered if item.last_cataloged_at_utc >= cataloged_since_utc]
             if cataloged_before_utc is not None:
                 ordered = [item for item in ordered if item.last_cataloged_at_utc <= cataloged_before_utc]
+            if relative_path_prefix:
+                # Match both direct folder (prefix/child) and the folder itself.
+                # We normalize by stripping trailing '/' so the operator can
+                # pass either form and get the same result.
+                normalized = relative_path_prefix.rstrip("/") + "/"
+                ordered = [
+                    item for item in ordered if item.relative_path.startswith(normalized)
+                ]
             total = len(ordered)
             return total, ordered[offset : offset + limit]
+
+    def list_media_asset_folders(self) -> list[tuple[str, int, int, int]]:
+        # Aggregate folders from the in-memory asset dict. "Folder" is the
+        # directory portion of relative_path; depth is the number of
+        # path segments. direct_count counts assets whose folder equals
+        # this path exactly; total_count includes assets in sub-folders.
+        with self._lock:
+            direct: dict[str, int] = {}
+            total: dict[str, int] = {}
+            for record in self.media_assets.values():
+                parts = record.relative_path.split("/")
+                if len(parts) <= 1:
+                    continue
+                folder_parts = parts[:-1]
+                direct_path = "/".join(folder_parts)
+                direct[direct_path] = direct.get(direct_path, 0) + 1
+                for depth in range(1, len(folder_parts) + 1):
+                    ancestor = "/".join(folder_parts[:depth])
+                    total[ancestor] = total.get(ancestor, 0) + 1
+            rows: list[tuple[str, int, int, int]] = []
+            for path in sorted(total.keys()):
+                depth = path.count("/") + 1
+                rows.append((path, depth, direct.get(path, 0), total[path]))
+            return rows
 
     def get_media_asset_by_path(self, relative_path: str) -> MediaAssetRecord | None:
         with self._lock:
@@ -706,6 +757,11 @@ class InMemoryUploadStateStore:
                 image_height=existing.image_height,
                 orientation=existing.orientation,
                 lens_model=existing.lens_model,
+                exposure_time_s=existing.exposure_time_s,
+                f_number=existing.f_number,
+                iso_speed=existing.iso_speed,
+                focal_length_mm=existing.focal_length_mm,
+                focal_length_35mm_mm=existing.focal_length_35mm_mm,
                 is_favorite=is_favorite,
                 is_archived=existing.is_archived,
             )
@@ -748,6 +804,11 @@ class InMemoryUploadStateStore:
                 image_height=existing.image_height,
                 orientation=existing.orientation,
                 lens_model=existing.lens_model,
+                exposure_time_s=existing.exposure_time_s,
+                f_number=existing.f_number,
+                iso_speed=existing.iso_speed,
+                focal_length_mm=existing.focal_length_mm,
+                focal_length_35mm_mm=existing.focal_length_35mm_mm,
                 is_favorite=existing.is_favorite,
                 is_archived=is_archived,
             )
@@ -879,6 +940,11 @@ class InMemoryUploadStateStore:
         image_height: int | None,
         orientation: int | None,
         lens_model: str | None,
+        exposure_time_s: float | None = None,
+        f_number: float | None = None,
+        iso_speed: int | None = None,
+        focal_length_mm: float | None = None,
+        focal_length_35mm_mm: int | None = None,
         recorded_at_utc: str,
     ) -> None:
         del recorded_at_utc
@@ -897,6 +963,11 @@ class InMemoryUploadStateStore:
                 image_height=image_height,
                 orientation=orientation,
                 lens_model=lens_model,
+                exposure_time_s=exposure_time_s,
+                f_number=f_number,
+                iso_speed=iso_speed,
+                focal_length_mm=focal_length_mm,
+                focal_length_35mm_mm=focal_length_35mm_mm,
             )
             existing_asset = self.media_assets.get(relative_path)
             if existing_asset is None:
@@ -929,6 +1000,13 @@ class InMemoryUploadStateStore:
                 image_height=image_height,
                 orientation=orientation,
                 lens_model=lens_model,
+                exposure_time_s=exposure_time_s,
+                f_number=f_number,
+                iso_speed=iso_speed,
+                focal_length_mm=focal_length_mm,
+                focal_length_35mm_mm=focal_length_35mm_mm,
+                is_favorite=existing_asset.is_favorite,
+                is_archived=existing_asset.is_archived,
             )
 
     def ensure_media_asset_preview_row(self, *, relative_path: str, recorded_at_utc: str) -> None:
@@ -1001,6 +1079,11 @@ class InMemoryUploadStateStore:
                 image_height=existing_asset.image_height,
                 orientation=existing_asset.orientation,
                 lens_model=existing_asset.lens_model,
+                exposure_time_s=existing_asset.exposure_time_s,
+                f_number=existing_asset.f_number,
+                iso_speed=existing_asset.iso_speed,
+                focal_length_mm=existing_asset.focal_length_mm,
+                focal_length_35mm_mm=existing_asset.focal_length_35mm_mm,
                 is_favorite=existing_asset.is_favorite,
                 is_archived=existing_asset.is_archived,
             )
@@ -1396,6 +1479,37 @@ class PostgresUploadStateStore:
                         lens_model TEXT,
                         updated_at_utc TEXT NOT NULL
                     );
+                    """
+                )
+                # Phase 3.A: additive exposure-metadata columns.
+                cur.execute(
+                    """
+                    ALTER TABLE api_media_asset_extractions
+                    ADD COLUMN IF NOT EXISTS exposure_time_s DOUBLE PRECISION;
+                    """
+                )
+                cur.execute(
+                    """
+                    ALTER TABLE api_media_asset_extractions
+                    ADD COLUMN IF NOT EXISTS f_number DOUBLE PRECISION;
+                    """
+                )
+                cur.execute(
+                    """
+                    ALTER TABLE api_media_asset_extractions
+                    ADD COLUMN IF NOT EXISTS iso_speed INTEGER;
+                    """
+                )
+                cur.execute(
+                    """
+                    ALTER TABLE api_media_asset_extractions
+                    ADD COLUMN IF NOT EXISTS focal_length_mm DOUBLE PRECISION;
+                    """
+                )
+                cur.execute(
+                    """
+                    ALTER TABLE api_media_asset_extractions
+                    ADD COLUMN IF NOT EXISTS focal_length_35mm_mm INTEGER;
                     """
                 )
                 cur.execute(
@@ -1797,6 +1911,7 @@ class PostgresUploadStateStore:
         is_archived: bool | None = None,
         cataloged_since_utc: str | None = None,
         cataloged_before_utc: str | None = None,
+        relative_path_prefix: str | None = None,
     ) -> tuple[int, list[MediaAssetRecord]]:
         where_clauses = []
         params: list[object] = []
@@ -1815,6 +1930,17 @@ class PostgresUploadStateStore:
         if is_archived is not None:
             where_clauses.append("ma.is_archived = %s")
             params.append(is_archived)
+        if relative_path_prefix:
+            normalized_prefix = relative_path_prefix.rstrip("/") + "/"
+            where_clauses.append("ma.relative_path LIKE %s")
+            # Escape SQL LIKE wildcards in the prefix so "%" and "_" in folder
+            # names cannot match unrelated paths.
+            escaped = (
+                normalized_prefix.replace("\\", "\\\\")
+                .replace("%", "\\%")
+                .replace("_", "\\_")
+            )
+            params.append(escaped + "%")
         if media_type is not None:
             media_type_suffixes = _MEDIA_TYPE_SUFFIXES.get(media_type)
             if media_type_suffixes is not None:
@@ -1893,7 +2019,12 @@ class PostgresUploadStateStore:
                         me.image_width,
                         me.image_height,
                         me.orientation,
-                        me.lens_model
+                        me.lens_model,
+                        me.exposure_time_s,
+                        me.f_number,
+                        me.iso_speed,
+                        me.focal_length_mm,
+                        me.focal_length_35mm_mm
                     FROM api_media_assets ma
                     LEFT JOIN api_media_asset_extractions me
                         ON me.relative_path = ma.relative_path
@@ -1938,10 +2069,55 @@ class PostgresUploadStateStore:
                         image_height=int(row[26]) if row[26] is not None else None,
                         orientation=int(row[27]) if row[27] is not None else None,
                         lens_model=str(row[28]) if row[28] is not None else None,
+                        exposure_time_s=float(row[29]) if row[29] is not None else None,
+                        f_number=float(row[30]) if row[30] is not None else None,
+                        iso_speed=int(row[31]) if row[31] is not None else None,
+                        focal_length_mm=float(row[32]) if row[32] is not None else None,
+                        focal_length_35mm_mm=int(row[33]) if row[33] is not None else None,
                     )
                     for row in rows
                 ]
                 return total, records
+
+    def list_media_asset_folders(self) -> list[tuple[str, int, int, int]]:
+        # Aggregate folder rows from api_media_assets. We compute direct and
+        # total counts per ancestor folder by expanding each asset's path into
+        # all of its ancestor folder prefixes (depth 1..N-1), then summing.
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    WITH path_parts AS (
+                        SELECT
+                            relative_path,
+                            string_to_array(relative_path, '/') AS parts
+                        FROM api_media_assets
+                    ),
+                    ancestors AS (
+                        SELECT
+                            relative_path,
+                            array_length(parts, 1) AS num_parts,
+                            d AS depth,
+                            array_to_string(parts[1:d], '/') AS folder_path
+                        FROM path_parts,
+                             generate_series(1, COALESCE(array_length(parts, 1), 1) - 1) AS d
+                        WHERE array_length(parts, 1) > 1
+                    )
+                    SELECT
+                        folder_path,
+                        depth,
+                        SUM(CASE WHEN depth = num_parts - 1 THEN 1 ELSE 0 END)::bigint AS direct_count,
+                        COUNT(*)::bigint AS total_count
+                    FROM ancestors
+                    GROUP BY folder_path, depth
+                    ORDER BY folder_path ASC;
+                    """
+                )
+                rows = cur.fetchall() or []
+                return [
+                    (str(row[0]), int(row[1]), int(row[2]), int(row[3]))
+                    for row in rows
+                ]
 
     def get_media_asset_by_path(self, relative_path: str) -> MediaAssetRecord | None:
         with self._connect() as conn:
@@ -1977,7 +2153,12 @@ class PostgresUploadStateStore:
                         me.image_width,
                         me.image_height,
                         me.orientation,
-                        me.lens_model
+                        me.lens_model,
+                        me.exposure_time_s,
+                        me.f_number,
+                        me.iso_speed,
+                        me.focal_length_mm,
+                        me.focal_length_35mm_mm
                     FROM api_media_assets ma
                     LEFT JOIN api_media_asset_extractions me
                         ON me.relative_path = ma.relative_path
@@ -2021,6 +2202,11 @@ class PostgresUploadStateStore:
                     image_height=int(row[26]) if row[26] is not None else None,
                     orientation=int(row[27]) if row[27] is not None else None,
                     lens_model=str(row[28]) if row[28] is not None else None,
+                    exposure_time_s=float(row[29]) if row[29] is not None else None,
+                    f_number=float(row[30]) if row[30] is not None else None,
+                    iso_speed=int(row[31]) if row[31] is not None else None,
+                    focal_length_mm=float(row[32]) if row[32] is not None else None,
+                    focal_length_35mm_mm=int(row[33]) if row[33] is not None else None,
                 )
 
     def set_media_asset_favorite(
@@ -2094,6 +2280,11 @@ class PostgresUploadStateStore:
             image_height=int(row[26]) if row[26] is not None else None,
             orientation=int(row[27]) if row[27] is not None else None,
             lens_model=str(row[28]) if row[28] is not None else None,
+            exposure_time_s=float(row[29]) if len(row) > 29 and row[29] is not None else None,
+            f_number=float(row[30]) if len(row) > 30 and row[30] is not None else None,
+            iso_speed=int(row[31]) if len(row) > 31 and row[31] is not None else None,
+            focal_length_mm=float(row[32]) if len(row) > 32 and row[32] is not None else None,
+            focal_length_35mm_mm=int(row[33]) if len(row) > 33 and row[33] is not None else None,
         )
 
     def _list_media_assets_for_backfill(
@@ -2178,7 +2369,12 @@ class PostgresUploadStateStore:
                         me.image_width,
                         me.image_height,
                         me.orientation,
-                        me.lens_model
+                        me.lens_model,
+                        me.exposure_time_s,
+                        me.f_number,
+                        me.iso_speed,
+                        me.focal_length_mm,
+                        me.focal_length_35mm_mm
                     FROM api_media_assets ma
                     LEFT JOIN api_media_asset_extractions me
                         ON me.relative_path = ma.relative_path
@@ -2270,6 +2466,11 @@ class PostgresUploadStateStore:
         image_height: int | None,
         orientation: int | None,
         lens_model: str | None,
+        exposure_time_s: float | None = None,
+        f_number: float | None = None,
+        iso_speed: int | None = None,
+        focal_length_mm: float | None = None,
+        focal_length_35mm_mm: int | None = None,
         recorded_at_utc: str,
     ) -> None:
         with self._connect() as conn:
@@ -2290,9 +2491,18 @@ class PostgresUploadStateStore:
                         image_height,
                         orientation,
                         lens_model,
+                        exposure_time_s,
+                        f_number,
+                        iso_speed,
+                        focal_length_mm,
+                        focal_length_35mm_mm,
                         updated_at_utc
                     )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    VALUES (
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s, %s,
+                        %s
+                    )
                     ON CONFLICT (relative_path) DO UPDATE
                     SET extraction_status = EXCLUDED.extraction_status,
                         last_attempted_at_utc = EXCLUDED.last_attempted_at_utc,
@@ -2306,6 +2516,11 @@ class PostgresUploadStateStore:
                         image_height = EXCLUDED.image_height,
                         orientation = EXCLUDED.orientation,
                         lens_model = EXCLUDED.lens_model,
+                        exposure_time_s = EXCLUDED.exposure_time_s,
+                        f_number = EXCLUDED.f_number,
+                        iso_speed = EXCLUDED.iso_speed,
+                        focal_length_mm = EXCLUDED.focal_length_mm,
+                        focal_length_35mm_mm = EXCLUDED.focal_length_35mm_mm,
                         updated_at_utc = EXCLUDED.updated_at_utc;
                     """,
                     (
@@ -2322,6 +2537,11 @@ class PostgresUploadStateStore:
                         image_height,
                         orientation,
                         lens_model,
+                        exposure_time_s,
+                        f_number,
+                        iso_speed,
+                        focal_length_mm,
+                        focal_length_35mm_mm,
                         recorded_at_utc,
                     ),
                 )

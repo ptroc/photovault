@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime, timezone
 from pathlib import PurePosixPath
 from typing import Any, Callable
 from urllib.error import URLError
-from urllib.parse import urlencode
+from urllib.parse import parse_qsl, urlencode
 from urllib.request import Request, urlopen
 
 from flask import Flask, Response, redirect, render_template, request, url_for
@@ -71,6 +72,79 @@ def _catalog_metadata_summary(item: dict[str, Any]) -> str:
     return " | ".join(metadata_bits)
 
 
+def _format_shutter_speed(exposure_time_s: float | None) -> str | None:
+    """Render an EXIF exposure time as a human-readable shutter speed.
+
+    Sub-second exposures are shown as 1/N (rounded to the nearest integer
+    denominator, which is what cameras actually record). One second and above
+    are shown as a trimmed float with an "s" suffix. Returns None if the
+    input is missing or non-positive.
+    """
+    if exposure_time_s is None:
+        return None
+    try:
+        value = float(exposure_time_s)
+    except (TypeError, ValueError):
+        return None
+    if not value or value <= 0:
+        return None
+    if value < 1.0:
+        denominator = round(1.0 / value)
+        if denominator < 1:
+            denominator = 1
+        return f"1/{denominator} s"
+    # 1.0s and up: trim trailing zeros for readability (e.g. "2 s" not "2.0 s").
+    rendered = f"{value:g}"
+    return f"{rendered} s"
+
+
+def _format_exposure_summary(item: dict[str, Any]) -> str:
+    """Build a compact "1/200 s · f/2.8 · ISO 400 · 50 mm" summary string."""
+    bits: list[str] = []
+    shutter = _format_shutter_speed(item.get("exposure_time_s"))
+    if shutter:
+        bits.append(shutter)
+    f_number = item.get("f_number")
+    if f_number is not None:
+        try:
+            f_val = float(f_number)
+        except (TypeError, ValueError):
+            f_val = None
+        if f_val and f_val > 0:
+            bits.append(f"f/{f_val:g}")
+    iso_speed = item.get("iso_speed")
+    if iso_speed is not None:
+        try:
+            iso_val = int(iso_speed)
+        except (TypeError, ValueError):
+            iso_val = None
+        if iso_val and iso_val > 0:
+            bits.append(f"ISO {iso_val}")
+    focal = item.get("focal_length_mm")
+    focal_35 = item.get("focal_length_35mm_mm")
+    focal_part: str | None = None
+    if focal is not None:
+        try:
+            focal_val = float(focal)
+        except (TypeError, ValueError):
+            focal_val = None
+        if focal_val and focal_val > 0:
+            focal_part = f"{focal_val:g} mm"
+    if focal_35 is not None:
+        try:
+            focal_35_val = int(focal_35)
+        except (TypeError, ValueError):
+            focal_35_val = None
+        if focal_35_val and focal_35_val > 0:
+            if focal_part:
+                focal_part = f"{focal_part} ({focal_35_val} mm eq.)"
+            else:
+                focal_part = f"{focal_35_val} mm eq."
+    if focal_part:
+        bits.append(focal_part)
+    return " \u00b7 ".join(bits)
+
+
 def _format_sha_for_display(value: str | None, chunk_size: int = 8) -> str:
     if not value:
         return "n/a"
@@ -113,8 +187,78 @@ def _catalog_query_state_from_args() -> dict[str, str]:
 
 
 def _catalog_query_state_from_form() -> dict[str, str]:
+    # If the client sent a single consolidated `return_query` field (new form
+    # pattern), prefer it over reconstructing from the individual filter keys.
+    # This keeps action templates slim while remaining compatible with callers
+    # that still post the individual keys.
+    return_query = request.form.get("return_query", "").strip()
+    if return_query:
+        parsed = dict(parse_qsl(return_query, keep_blank_values=False))
+        return _catalog_query_state_from_values(parsed)
     values = {key: request.form.get(key, "") for key in request.form.keys()}
     return _catalog_query_state_from_values(values)
+
+
+def _local_to_utc_iso(local_value: str) -> str:
+    """Convert a browser `datetime-local` string ("YYYY-MM-DDTHH:MM[:SS]") to
+    a UTC ISO-8601 string with an explicit offset. Returns empty string on
+    missing input; returns the input unchanged if it already carries a
+    timezone indicator (so bookmarked UTC URLs still work)."""
+    value = (local_value or "").strip()
+    if not value:
+        return ""
+    if value.endswith("Z") or "+" in value or "-" in value[10:]:
+        return value
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return value
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.isoformat()
+
+
+def _utc_iso_to_local(utc_value: str) -> str:
+    """Best-effort render a stored UTC ISO-8601 string as a value suitable for
+    `<input type="datetime-local">` (i.e., "YYYY-MM-DDTHH:MM"). Returns empty
+    string on missing or unparseable input."""
+    value = (utc_value or "").strip()
+    if not value:
+        return ""
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return ""
+    return parsed.strftime("%Y-%m-%dT%H:%M")
+
+
+def _decorate_catalog_item(item: dict[str, Any]) -> dict[str, Any]:
+    """Add derived display fields used by the catalog templates."""
+    size_bytes = int(item.get("size_bytes", 0))
+    item["size_human"] = _format_size_bytes(size_bytes)
+    item["metadata_summary"] = _catalog_metadata_summary(item)
+    item["exposure_summary"] = _format_exposure_summary(item)
+    shutter = _format_shutter_speed(item.get("exposure_time_s"))
+    item["shutter_speed_display"] = shutter or ""
+    preview_status = str(item.get("preview_status") or "pending")
+    if preview_status == "succeeded":
+        item["preview_summary"] = "Preview available"
+    elif preview_status == "failed":
+        item["preview_summary"] = "Preview failed"
+    else:
+        item["preview_summary"] = "Preview pending"
+    item["filename"] = PurePosixPath(str(item.get("relative_path", ""))).name
+    sha_hex = str(item.get("sha256_hex") or "")
+    item["sha256_display"] = _format_sha_for_display(sha_hex)
+    # Stable, short, DOM-id-safe handle for HTMX swap targets. Using the
+    # first 16 hex chars keeps the full SHA256 out of the HTML while still
+    # being collision-free within any realistic catalog page.
+    if sha_hex:
+        item["card_id"] = sha_hex[:16]
+    else:
+        fallback_name = PurePosixPath(str(item.get("relative_path", ""))).name
+        item["card_id"] = fallback_name.replace(".", "-")
+    return item
 
 
 def create_app(*, api_fetcher: ApiFetcher | None = None, api_poster: ApiPoster | None = None) -> Flask:
@@ -448,8 +592,20 @@ def create_app(*, api_fetcher: ApiFetcher | None = None, api_poster: ApiPoster |
         preview_status_filter = request.args.get("preview_status", "").strip()
         is_favorite_filter = request.args.get("is_favorite", "").strip()
         is_archived_filter = request.args.get("is_archived", "").strip()
+        # Accept both the canonical ?cataloged_since_utc=... (ISO 8601 with
+        # offset, how the API expects it) and a newer ?cataloged_since_local=...
+        # emitted by <input type="datetime-local">. The canonical form wins if
+        # both are present.
         cataloged_since_filter = request.args.get("cataloged_since_utc", "").strip()
         cataloged_before_filter = request.args.get("cataloged_before_utc", "").strip()
+        if not cataloged_since_filter:
+            cataloged_since_filter = _local_to_utc_iso(
+                request.args.get("cataloged_since_local", "")
+            )
+        if not cataloged_before_filter:
+            cataloged_before_filter = _local_to_utc_iso(
+                request.args.get("cataloged_before_local", "")
+            )
         action_message = request.args.get("action_message")
         action_error = request.args.get("action_error")
         error_message: str | None = None
@@ -492,22 +648,40 @@ def create_app(*, api_fetcher: ApiFetcher | None = None, api_poster: ApiPoster |
         end_index = offset + len(items)
 
         for item in items:
-            size_bytes = int(item.get("size_bytes", 0))
-            item["size_human"] = _format_size_bytes(size_bytes)
-            item["metadata_summary"] = _catalog_metadata_summary(item)
-            preview_status = str(item.get("preview_status") or "pending")
-            if preview_status == "succeeded":
-                item["preview_summary"] = "Preview available"
-            elif preview_status == "failed":
-                item["preview_summary"] = "Preview failed"
-            else:
-                item["preview_summary"] = "Preview pending"
-            item["filename"] = PurePosixPath(str(item.get("relative_path", ""))).name
-            item["sha256_display"] = _format_sha_for_display(str(item.get("sha256_hex") or ""))
+            _decorate_catalog_item(item)
 
         filter_query = _catalog_query_state_from_args()
+        return_query = urlencode(filter_query)
         previous_url = url_for("catalog", page=page - 1, **filter_query) if has_previous else None
         next_url = url_for("catalog", page=page + 1, **filter_query) if has_next else None
+
+        # Precompute the subset of active filters the chip-bar should display.
+        # Centralizing this here keeps the template presentation-only.
+        filter_chip_labels = {
+            "extraction_status": "Extraction",
+            "preview_status": "Preview",
+            "origin_kind": "Origin",
+            "media_type": "Media type",
+            "preview_capability": "Previewable",
+            "is_favorite": "Favorite",
+            "is_archived": "Archived",
+            "cataloged_since_utc": "Since",
+            "cataloged_before_utc": "Before",
+        }
+        active_filters: list[dict[str, str]] = []
+        for key, label in filter_chip_labels.items():
+            value = filter_query.get(key, "")
+            if not value:
+                continue
+            remaining = {k: v for k, v in filter_query.items() if k != key}
+            active_filters.append(
+                {
+                    "key": key,
+                    "label": label,
+                    "value": value,
+                    "remove_url": url_for("catalog", **remaining),
+                }
+            )
 
         return render_template(
             "catalog.html",
@@ -531,7 +705,11 @@ def create_app(*, api_fetcher: ApiFetcher | None = None, api_poster: ApiPoster |
             is_archived_filter=is_archived_filter,
             cataloged_since_filter=cataloged_since_filter,
             cataloged_before_filter=cataloged_before_filter,
+            cataloged_since_local=_utc_iso_to_local(cataloged_since_filter),
+            cataloged_before_local=_utc_iso_to_local(cataloged_before_filter),
             catalog_query_state=filter_query,
+            return_query=return_query,
+            active_filters=active_filters,
             latest_backfill_runs=latest_backfill_runs,
             previous_url=previous_url,
             next_url=next_url,
@@ -721,6 +899,75 @@ def create_app(*, api_fetcher: ApiFetcher | None = None, api_poster: ApiPoster |
             action_message=f"Unarchived asset: {relative_path}.",
         )
 
+    @app.post("/catalog/actions/favorite/toggle")
+    def catalog_favorite_toggle_action():
+        """HTMX-friendly favorite toggle. Calls mark or unmark based on the
+        currently_favorite form hint, then returns the freshly rendered asset
+        card so the client can swap it in place. Falls back to a redirect if
+        the request does not look like an HTMX invocation."""
+        return _catalog_inline_toggle(kind="favorite")
+
+    @app.post("/catalog/actions/archive/toggle")
+    def catalog_archive_toggle_action():
+        """HTMX-friendly archive toggle. See favorite toggle docstring."""
+        return _catalog_inline_toggle(kind="archive")
+
+    def _catalog_inline_toggle(*, kind: str):
+        assert kind in {"favorite", "archive"}
+        relative_path = request.form.get("relative_path", "").strip()
+        page = request.form.get("page", "1").strip() or "1"
+        return_query = request.form.get("return_query", "").strip()
+        currently_flag = request.form.get(
+            "currently_favorite" if kind == "favorite" else "currently_archived",
+            "false",
+        ).strip().lower() == "true"
+
+        if not relative_path:
+            return _catalog_inline_toggle_fallback(
+                action_error=f"Missing catalog relative path for {kind} toggle.",
+                return_query=return_query,
+            )
+
+        target_action = "unmark" if currently_flag else "mark"
+        endpoint = f"/v1/admin/catalog/{kind}/{target_action}"
+        try:
+            poster(endpoint, {"relative_path": relative_path})
+        except (URLError, TimeoutError, ValueError):
+            return _catalog_inline_toggle_fallback(
+                action_error=f"Failed to {target_action} {kind} for {relative_path}.",
+                return_query=return_query,
+            )
+
+        try:
+            fresh = fetcher("/v1/admin/catalog/asset", {"relative_path": relative_path})
+            fresh_item = fresh.get("item")
+        except (URLError, TimeoutError, ValueError):
+            fresh_item = None
+
+        if request.headers.get("HX-Request", "").lower() == "true" and fresh_item:
+            _decorate_catalog_item(fresh_item)
+            return render_template(
+                "_asset_card.html",
+                asset=fresh_item,
+                page=page,
+                return_query=return_query,
+            )
+
+        # Non-HTMX fallback: redirect back to the catalog preserving filters.
+        target = "/catalog"
+        if return_query:
+            target = f"{target}?{return_query}"
+        return redirect(target)
+
+    def _catalog_inline_toggle_fallback(*, action_error: str, return_query: str):
+        # Consistent fallback for missing data or API errors in the HTMX path.
+        target = "/catalog"
+        query_parts: list[str] = []
+        if return_query:
+            query_parts.append(return_query)
+        query_parts.append(urlencode({"action_error": action_error}))
+        return redirect(target + "?" + "&".join(query_parts))
+
     @app.post("/catalog/actions/backfill")
     def catalog_backfill_action():
         page = request.form.get("page", "1").strip() or "1"
@@ -816,6 +1063,227 @@ def create_app(*, api_fetcher: ApiFetcher | None = None, api_poster: ApiPoster |
                 return Response(content, status=200, mimetype=content_type)
         except (URLError, TimeoutError, ValueError):
             return Response("preview unavailable", status=404, mimetype="text/plain")
+
+    # --- Library (grid view) ----------------------------------------------
+    # The library page is a visual counterpart to /catalog: a folder tree on
+    # the left, a thumbnail grid on the right. It reuses the existing
+    # /v1/admin/catalog endpoint (with the new relative_path_prefix filter)
+    # plus /v1/admin/catalog/folders to render the tree. It is intentionally
+    # a distinct page rather than a mode on /catalog so we can iterate on
+    # media-centric interactions (hover popover, lightbox) without disturbing
+    # the data-dense admin table used for moderation work.
+
+    def _sanitize_library_prefix(raw_value: str) -> str:
+        """Return a normalized folder prefix, or ``""`` if invalid/empty.
+
+        The server-UI accepts the same grammar the API expects: forward
+        slashes, no leading slash, no empty/``.``/``..`` segments. On any
+        violation we simply drop back to the root rather than surfacing an
+        error — the grid should always render *something*.
+        """
+        value = (raw_value or "").strip()
+        if value == "" or value.startswith("/") or "\\" in value:
+            return ""
+        trimmed = value.strip("/")
+        if trimmed == "":
+            return ""
+        for segment in trimmed.split("/"):
+            if segment in ("", ".", ".."):
+                return ""
+        return trimmed
+
+    def _build_library_folder_tree(
+        folders: list[dict[str, Any]], selected_prefix: str
+    ) -> list[dict[str, Any]]:
+        """Shape folder rows from the API into a tree-friendly list.
+
+        Each returned entry is flat but annotated with ``depth``, an
+        indentation-friendly ``display_name`` (the last path segment), plus
+        ``is_selected`` and ``is_ancestor_of_selected`` flags so the template
+        can expand the path to the selected folder and highlight it.
+        """
+        normalized_selected = selected_prefix.strip("/")
+        selected_ancestors: set[str] = set()
+        if normalized_selected:
+            parts = normalized_selected.split("/")
+            for index in range(1, len(parts) + 1):
+                selected_ancestors.add("/".join(parts[:index]))
+        entries: list[dict[str, Any]] = []
+        for folder in folders:
+            path = str(folder.get("path", ""))
+            if not path:
+                continue
+            display_name = path.rsplit("/", 1)[-1]
+            entries.append(
+                {
+                    "path": path,
+                    "depth": int(folder.get("depth", 0)),
+                    "direct_count": int(folder.get("direct_count", 0)),
+                    "total_count": int(folder.get("total_count", 0)),
+                    "display_name": display_name,
+                    "is_selected": path == normalized_selected,
+                    "is_ancestor_of_selected": path in selected_ancestors
+                    and path != normalized_selected,
+                }
+            )
+        return entries
+
+    @app.get("/library")
+    def library() -> str:
+        selected_prefix = _sanitize_library_prefix(
+            request.args.get("folder", "")
+        )
+        raw_page = request.args.get("page", "1")
+        try:
+            page = max(1, int(raw_page))
+        except ValueError:
+            page = 1
+        # Grid view shows a denser page than the moderation list; 60 plays
+        # nicely with 3/4/5-column responsive grids.
+        library_page_size = 60
+        offset = (page - 1) * library_page_size
+        query: dict[str, str] = {
+            "limit": str(library_page_size),
+            "offset": str(offset),
+        }
+        if selected_prefix:
+            query["relative_path_prefix"] = selected_prefix
+
+        error_message: str | None = None
+        try:
+            payload = fetcher("/v1/admin/catalog", query)
+        except (URLError, TimeoutError, ValueError):
+            payload = {
+                "total": 0,
+                "limit": library_page_size,
+                "offset": offset,
+                "items": [],
+            }
+            error_message = "Unable to reach photovault-api catalog endpoint."
+
+        folders_payload: dict[str, Any]
+        try:
+            folders_payload = fetcher("/v1/admin/catalog/folders", {})
+        except (URLError, TimeoutError, ValueError):
+            folders_payload = {"folders": []}
+            if error_message is None:
+                error_message = (
+                    "Unable to reach photovault-api catalog folders endpoint."
+                )
+
+        total = int(payload.get("total", 0))
+        items = list(payload.get("items", []))
+        for item in items:
+            _decorate_catalog_item(item)
+
+        has_previous = page > 1
+        has_next = offset + len(items) < total
+        start_index = offset + 1 if total > 0 and items else 0
+        end_index = offset + len(items)
+
+        folder_entries = _build_library_folder_tree(
+            list(folders_payload.get("folders", [])), selected_prefix
+        )
+
+        nav_query: dict[str, str] = {}
+        if selected_prefix:
+            nav_query["folder"] = selected_prefix
+        previous_url = (
+            url_for("library", page=page - 1, **nav_query) if has_previous else None
+        )
+        next_url = (
+            url_for("library", page=page + 1, **nav_query) if has_next else None
+        )
+
+        return render_template(
+            "library.html",
+            assets=items,
+            folders=folder_entries,
+            selected_folder=selected_prefix,
+            page=page,
+            page_size=library_page_size,
+            total=total,
+            has_previous=has_previous,
+            has_next=has_next,
+            start_index=start_index,
+            end_index=end_index,
+            previous_url=previous_url,
+            next_url=next_url,
+            error_message=error_message,
+            active_page="library",
+        )
+
+    @app.get("/library/popover")
+    def library_popover() -> str:
+        """HTMX fragment: metadata + quick actions for a single asset.
+
+        Used by the grid-tile hover/focus overlay. The surrounding tile knows
+        the relative_path; we re-fetch the authoritative record so the
+        popover is always current (e.g. if the asset was just re-extracted).
+        """
+        relative_path = request.args.get("relative_path", "").strip()
+        if not relative_path:
+            return "<div class=\"small text-danger\">Missing relative_path.</div>"
+        try:
+            payload = fetcher(
+                "/v1/admin/catalog/asset", {"relative_path": relative_path}
+            )
+        except (URLError, TimeoutError, ValueError):
+            return (
+                "<div class=\"small text-danger\">Unable to load asset details."
+                "</div>"
+            )
+        item = dict(payload.get("item") or {})
+        if not item:
+            return "<div class=\"small text-danger\">Asset not found.</div>"
+        _decorate_catalog_item(item)
+        return render_template("_library_popover.html", asset=item)
+
+    @app.get("/library/lightbox")
+    def library_lightbox() -> str:
+        """HTMX fragment: the expanded-preview modal body.
+
+        The grid renders tiles linearly; the lightbox accepts an index-based
+        position within the currently filtered folder so prev/next buttons
+        can walk through the page without a round-trip to compute a global
+        ordering.
+        """
+        relative_path = request.args.get("relative_path", "").strip()
+        if not relative_path:
+            return "<div class=\"small text-danger\">Missing relative_path.</div>"
+        selected_prefix = _sanitize_library_prefix(
+            request.args.get("folder", "")
+        )
+        try:
+            index = max(0, int(request.args.get("index", "0")))
+        except ValueError:
+            index = 0
+        try:
+            total = max(1, int(request.args.get("total", "1")))
+        except ValueError:
+            total = 1
+
+        # Fetch the single asset so we can render rich metadata in the frame.
+        try:
+            payload = fetcher(
+                "/v1/admin/catalog/asset", {"relative_path": relative_path}
+            )
+        except (URLError, TimeoutError, ValueError):
+            return (
+                "<div class=\"small text-danger\">Unable to load asset."
+                "</div>"
+            )
+        item = dict(payload.get("item") or {})
+        if not item:
+            return "<div class=\"small text-danger\">Asset not found.</div>"
+        _decorate_catalog_item(item)
+        return render_template(
+            "_library_lightbox.html",
+            asset=item,
+            selected_folder=selected_prefix,
+            index=index,
+            total=total,
+        )
 
 
     return app
