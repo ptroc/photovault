@@ -287,6 +287,14 @@ body.server-shell {
   box-shadow: 0 0.5rem 1.25rem rgba(15, 23, 42, 0.12);
 }
 
+/* Phase 3.B: rejected-state outline. Kept subtle so the reviewer can still
+   see the thumbnail clearly; the red tint is reinforced by the "Rejected"
+   pill inside the caption. */
+.library-tile--rejected {
+  border-color: rgba(220, 53, 69, 0.65);
+  box-shadow: 0 0 0 1px rgba(220, 53, 69, 0.35) inset;
+}
+
 .library-tile-link {
   display: block;
   text-decoration: none;

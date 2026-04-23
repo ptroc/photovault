@@ -26,6 +26,9 @@
       {{ status_badge(asset.preview_status or 'unknown', 'preview ' + (asset.preview_status or 'unknown')) }}
       {% if asset.is_favorite %}{{ status_badge('favorite') }}{% endif %}
       {% if asset.is_archived %}{{ status_badge('archived') }}{% endif %}
+      {% if asset.is_rejected %}
+        <span class="badge rounded-pill text-bg-danger">Marked for deletion</span>
+      {% endif %}
     </div>
     {% if asset.metadata_summary %}
       <p class="small text-secondary mb-2">{{ asset.metadata_summary }}</p>
@@ -74,6 +77,39 @@
         class="btn btn-primary btn-sm"
         href="/catalog/asset?relative_path={{ asset.relative_path | urlencode }}"
       >Inspect</a>
+      {#
+        Reject/Unreject toggle.
+        The X keyboard shortcut in library.html submits this same form so
+        keyboard and button paths share one code path. The hidden inputs
+        carry the current lightbox position (folder/index/total) so the
+        response lightbox fragment can render the correct prev/next state.
+      #}
+      <form
+        class="inline-form library-lightbox-reject-form"
+        method="post"
+        action="/library/actions/reject/toggle"
+        hx-post="/library/actions/reject/toggle"
+        hx-target="#libraryLightboxBody"
+        hx-swap="innerHTML"
+      >
+        <input type="hidden" name="relative_path" value="{{ asset.relative_path }}">
+        <input type="hidden" name="folder" value="{{ selected_folder or '' }}">
+        <input type="hidden" name="index" value="{{ index }}">
+        <input type="hidden" name="total" value="{{ total }}">
+        <input
+          type="hidden"
+          name="currently_rejected"
+          value="{{ 'true' if asset.is_rejected else 'false' }}"
+        >
+        <button
+          class="btn btn-sm {{ 'btn-outline-danger' if asset.is_rejected else 'btn-danger' }} library-lightbox-reject-btn"
+          type="submit"
+          title="Mark / unmark for deletion (X)"
+          aria-pressed="{{ 'true' if asset.is_rejected else 'false' }}"
+        >
+          {{ '↺ Restore' if asset.is_rejected else '✕ Reject' }}
+        </button>
+      </form>
       {% if index > 0 %}
         <button
           class="btn btn-outline-secondary btn-sm library-lightbox-prev"

@@ -141,6 +141,7 @@ class AdminCatalogItem(BaseModel):
     focal_length_35mm_mm: int | None = None
     is_favorite: bool = False
     is_archived: bool = False
+    is_rejected: bool = False
 
 
 class AdminCatalogListResponse(BaseModel):
@@ -198,6 +199,49 @@ class AdminCatalogOrganizationRequest(BaseModel):
 
 class AdminCatalogOrganizationResponse(BaseModel):
     item: AdminCatalogItem
+
+
+# ----- Phase 3.B: reject queue models -------------------------------------
+class AdminCatalogRejectRequest(BaseModel):
+    relative_path: str = Field(min_length=1)
+    marked_reason: str | None = Field(default=None, max_length=500)
+
+
+class AdminCatalogRejectResponse(BaseModel):
+    relative_path: str
+    sha256_hex: str
+    marked_at_utc: str
+    marked_reason: str | None = None
+    is_rejected: bool = True
+
+
+class AdminCatalogRejectUnmarkResponse(BaseModel):
+    relative_path: str
+    is_rejected: bool = False
+
+
+class AdminCatalogRejectQueueItem(BaseModel):
+    """A reject-queue row plus the matching catalog item.
+
+    The UI needs thumbnails + filenames to let the reviewer restore specific
+    items, so we always ship the catalog item in-band. If a catalog row has
+    disappeared under the queue (should not happen outside of a Phase 3.C
+    delete), the item is ``None`` and the UI falls back to the bare relative
+    path rendered from the queue row.
+    """
+
+    relative_path: str
+    sha256_hex: str
+    marked_at_utc: str
+    marked_reason: str | None = None
+    item: AdminCatalogItem | None = None
+
+
+class AdminCatalogRejectQueueResponse(BaseModel):
+    total: int
+    limit: int
+    offset: int
+    items: list[AdminCatalogRejectQueueItem]
 
 
 class AdminBackfillCatalogRequest(BaseModel):
@@ -921,7 +965,7 @@ def _attempt_preview_generation(
     )
 
 
-def _to_admin_catalog_item(record: object) -> AdminCatalogItem:
+def _to_admin_catalog_item(record: object, *, is_rejected: bool = False) -> AdminCatalogItem:
     return AdminCatalogItem(
         relative_path=str(record.relative_path),
         sha256_hex=str(record.sha256_hex),
@@ -1015,6 +1059,7 @@ def _to_admin_catalog_item(record: object) -> AdminCatalogItem:
         ),
         is_favorite=bool(getattr(record, "is_favorite", False)),
         is_archived=bool(getattr(record, "is_archived", False)),
+        is_rejected=bool(is_rejected),
     )
 
 
@@ -1790,11 +1835,23 @@ def create_app(
             cataloged_before_utc=cataloged_before_utc,
             relative_path_prefix=normalized_prefix,
         )
+        # Pull the reject queue in one call and intersect per-item so each
+        # row's ``is_rejected`` flag is populated without a per-row query.
+        # The queue is expected to be small (single-operator v1); the hard
+        # cap of 10_000 keeps this safe if the operator lets it grow.
+        _, reject_rows = store.list_catalog_rejects(limit=10_000, offset=0)
+        rejected_paths = frozenset(r.relative_path for r in reject_rows)
         return AdminCatalogListResponse(
             total=total,
             limit=limit,
             offset=offset,
-            items=[_to_admin_catalog_item(record) for record in records],
+            items=[
+                _to_admin_catalog_item(
+                    record,
+                    is_rejected=(record.relative_path in rejected_paths),
+                )
+                for record in records
+            ],
         )
 
     @app.get(
@@ -1824,7 +1881,10 @@ def create_app(
         record = store.get_media_asset_by_path(relative_path)
         if record is None:
             raise HTTPException(status_code=404, detail="catalog asset not found")
-        return AdminCatalogAssetResponse(item=_to_admin_catalog_item(record))
+        is_rejected = store.is_catalog_reject(relative_path)
+        return AdminCatalogAssetResponse(
+            item=_to_admin_catalog_item(record, is_rejected=is_rejected)
+        )
 
     @app.post(
         "/v1/admin/catalog/favorite/mark",
@@ -1893,6 +1953,99 @@ def create_app(
         if updated is None:
             raise HTTPException(status_code=404, detail="catalog asset not found")
         return AdminCatalogOrganizationResponse(item=_to_admin_catalog_item(updated))
+
+    # ---------- Phase 3.B: reject queue -------------------------------------
+
+    def _require_safe_relative_path(relative_path: str) -> str:
+        """Validate that ``relative_path`` is a catalog-safe forward-slash path.
+
+        Rejects leading slash, backslash, empty segments, and ``.``/``..`` segments.
+        Returns the trimmed path. Raises HTTP 400 otherwise.
+        """
+
+        value = (relative_path or "").strip()
+        if value == "" or value.startswith("/") or "\\" in value:
+            raise HTTPException(status_code=400, detail="invalid relative_path")
+        trimmed = value.strip("/")
+        if trimmed == "":
+            raise HTTPException(status_code=400, detail="invalid relative_path")
+        for segment in trimmed.split("/"):
+            if segment in ("", ".", ".."):
+                raise HTTPException(status_code=400, detail="invalid relative_path")
+        return trimmed
+
+    @app.post(
+        "/v1/admin/catalog/reject",
+        response_model=AdminCatalogRejectResponse,
+    )
+    def admin_mark_catalog_reject(
+        payload: AdminCatalogRejectRequest,
+    ) -> AdminCatalogRejectResponse:
+        store: UploadStateStore = app.state.upload_state_store
+        safe_path = _require_safe_relative_path(payload.relative_path)
+        record = store.add_catalog_reject(
+            relative_path=safe_path,
+            marked_at_utc=datetime.now(UTC).isoformat(),
+            marked_reason=payload.marked_reason,
+        )
+        if record is None:
+            raise HTTPException(status_code=404, detail="catalog asset not found")
+        return AdminCatalogRejectResponse(
+            relative_path=record.relative_path,
+            sha256_hex=record.sha256_hex,
+            marked_at_utc=record.marked_at_utc,
+            marked_reason=record.marked_reason,
+            is_rejected=True,
+        )
+
+    @app.post(
+        "/v1/admin/catalog/reject/unmark",
+        response_model=AdminCatalogRejectUnmarkResponse,
+    )
+    def admin_unmark_catalog_reject(
+        payload: AdminCatalogOrganizationRequest,
+    ) -> AdminCatalogRejectUnmarkResponse:
+        """Idempotent unmark. Returns ``is_rejected=False`` whether or not the
+        row was present. We intentionally do not 404 on a missing queue row —
+        a double-unmark from two concurrent reviewers should be a no-op, not
+        an error.
+        """
+
+        store: UploadStateStore = app.state.upload_state_store
+        safe_path = _require_safe_relative_path(payload.relative_path)
+        store.remove_catalog_reject(safe_path)
+        return AdminCatalogRejectUnmarkResponse(
+            relative_path=safe_path, is_rejected=False
+        )
+
+    @app.get(
+        "/v1/admin/catalog/rejects",
+        response_model=AdminCatalogRejectQueueResponse,
+    )
+    def admin_list_catalog_rejects(
+        limit: int = Query(default=50, ge=1, le=500),
+        offset: int = Query(default=0, ge=0),
+    ) -> AdminCatalogRejectQueueResponse:
+        store: UploadStateStore = app.state.upload_state_store
+        total, rejects = store.list_catalog_rejects(limit=limit, offset=offset)
+        items: list[AdminCatalogRejectQueueItem] = []
+        for rejected in rejects:
+            asset = store.get_media_asset_by_path(rejected.relative_path)
+            catalog_item = (
+                _to_admin_catalog_item(asset, is_rejected=True) if asset is not None else None
+            )
+            items.append(
+                AdminCatalogRejectQueueItem(
+                    relative_path=rejected.relative_path,
+                    sha256_hex=rejected.sha256_hex,
+                    marked_at_utc=rejected.marked_at_utc,
+                    marked_reason=rejected.marked_reason,
+                    item=catalog_item,
+                )
+            )
+        return AdminCatalogRejectQueueResponse(
+            total=total, limit=limit, offset=offset, items=items
+        )
 
     @app.post("/v1/admin/catalog/preview/retry", response_model=AdminRetryPreviewResponse)
     def admin_retry_catalog_preview(payload: AdminRetryPreviewRequest) -> AdminRetryPreviewResponse:

@@ -936,6 +936,11 @@ def test_postgres_upsert_media_asset_extraction_uses_conflict_update() -> None:
         None,
         None,
         None,
+        None,  # exposure_time_s
+        None,  # f_number
+        None,  # iso_speed
+        None,  # focal_length_mm
+        None,  # focal_length_35mm_mm
         "2026-04-20T12:15:00+00:00",
     )
     assert observed["committed"] is True
@@ -1123,6 +1128,11 @@ def test_postgres_get_media_asset_by_path_uses_joined_extraction_row() -> None:
                 None,
                 None,
                 None,
+                None,  # exposure_time_s
+                None,  # f_number
+                None,  # iso_speed
+                None,  # focal_length_mm
+                None,  # focal_length_35mm_mm
             )
 
     class _FakeConnection:
@@ -1413,6 +1423,11 @@ def test_postgres_list_media_assets_uses_bounded_filter_where_clause() -> None:
                     None,
                     None,
                     None,
+                    None,  # exposure_time_s
+                    None,  # f_number
+                    None,  # iso_speed
+                    None,  # focal_length_mm
+                    None,  # focal_length_35mm_mm
                 )
             ]
 

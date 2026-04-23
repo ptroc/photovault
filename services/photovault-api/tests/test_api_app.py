@@ -803,6 +803,7 @@ def test_upload_content_and_verify_writes_filesystem_and_promotes_sha(tmp_path: 
             "iso_speed": None,
             "focal_length_mm": None,
             "focal_length_35mm_mm": None,
+            "is_rejected": False,
         }
     ]
 
@@ -2110,6 +2111,7 @@ def test_admin_catalog_returns_paged_results(tmp_path: Path) -> None:
                 "iso_speed": None,
                 "focal_length_mm": None,
                 "focal_length_35mm_mm": None,
+                "is_rejected": False,
             }
         ],
     }
@@ -2703,3 +2705,200 @@ def test_upload_verify_handles_missing_exposure_fields_gracefully(tmp_path: Path
     assert item["iso_speed"] is None
     assert item["focal_length_mm"] is None
     assert item["focal_length_35mm_mm"] is None
+
+
+# ---------------------------------------------------------------------------
+# Phase 3.B: reject queue (mark/list/unmark + path validation + flag surfacing)
+# ---------------------------------------------------------------------------
+
+
+def _seed_reject_queue_store() -> InMemoryUploadStateStore:
+    store = InMemoryUploadStateStore()
+    seen_at = "2026-04-22T11:00:00+00:00"
+    store.upsert_stored_file(
+        relative_path="2026/04/Job_A/a.jpg",
+        sha256_hex="a" * 64,
+        size_bytes=100,
+        source_kind="upload_verify",
+        seen_at_utc=seen_at,
+    )
+    store.upsert_media_asset(
+        relative_path="2026/04/Job_A/a.jpg",
+        sha256_hex="a" * 64,
+        size_bytes=100,
+        origin_kind="uploaded",
+        observed_at_utc=seen_at,
+    )
+    store.upsert_stored_file(
+        relative_path="2026/04/Job_B/b.jpg",
+        sha256_hex="b" * 64,
+        size_bytes=200,
+        source_kind="upload_verify",
+        seen_at_utc=seen_at,
+    )
+    store.upsert_media_asset(
+        relative_path="2026/04/Job_B/b.jpg",
+        sha256_hex="b" * 64,
+        size_bytes=200,
+        origin_kind="uploaded",
+        observed_at_utc=seen_at,
+    )
+    return store
+
+
+def test_reject_queue_mark_list_unmark_round_trip(tmp_path: Path) -> None:
+    store = _seed_reject_queue_store()
+    client = TestClient(create_app(state_store=store, storage_root=tmp_path))
+
+    # Before marking, the queue is empty and the catalog shows is_rejected=False.
+    list_before = client.get("/v1/admin/catalog/rejects")
+    assert list_before.status_code == 200
+    assert list_before.json() == {"total": 0, "limit": 50, "offset": 0, "items": []}
+
+    mark = client.post(
+        "/v1/admin/catalog/reject",
+        json={"relative_path": "2026/04/Job_A/a.jpg", "marked_reason": "blurry"},
+    )
+    assert mark.status_code == 200
+    mark_body = mark.json()
+    assert mark_body["relative_path"] == "2026/04/Job_A/a.jpg"
+    assert mark_body["sha256_hex"] == "a" * 64
+    assert mark_body["is_rejected"] is True
+    assert mark_body["marked_reason"] == "blurry"
+    assert mark_body["marked_at_utc"]  # ISO string present
+
+    # Queue lists the marked row + embeds the catalog item flagged as rejected.
+    list_after = client.get("/v1/admin/catalog/rejects").json()
+    assert list_after["total"] == 1
+    assert len(list_after["items"]) == 1
+    row = list_after["items"][0]
+    assert row["relative_path"] == "2026/04/Job_A/a.jpg"
+    assert row["sha256_hex"] == "a" * 64
+    assert row["marked_reason"] == "blurry"
+    assert row["item"] is not None
+    assert row["item"]["is_rejected"] is True
+
+    # The catalog list surfaces is_rejected for the marked row and only that row.
+    catalog = client.get("/v1/admin/catalog").json()
+    flags = {item["relative_path"]: item["is_rejected"] for item in catalog["items"]}
+    assert flags["2026/04/Job_A/a.jpg"] is True
+    assert flags["2026/04/Job_B/b.jpg"] is False
+
+    # The per-asset endpoint mirrors the flag.
+    asset = client.get(
+        "/v1/admin/catalog/asset",
+        params={"relative_path": "2026/04/Job_A/a.jpg"},
+    ).json()
+    assert asset["item"]["is_rejected"] is True
+
+    unmark = client.post(
+        "/v1/admin/catalog/reject/unmark",
+        json={"relative_path": "2026/04/Job_A/a.jpg"},
+    )
+    assert unmark.status_code == 200
+    assert unmark.json() == {
+        "relative_path": "2026/04/Job_A/a.jpg",
+        "is_rejected": False,
+    }
+
+    list_restored = client.get("/v1/admin/catalog/rejects").json()
+    assert list_restored["total"] == 0
+    assert list_restored["items"] == []
+
+
+def test_reject_queue_mark_is_idempotent_and_preserves_first_marked(
+    tmp_path: Path,
+) -> None:
+    store = _seed_reject_queue_store()
+    client = TestClient(create_app(state_store=store, storage_root=tmp_path))
+
+    first = client.post(
+        "/v1/admin/catalog/reject",
+        json={"relative_path": "2026/04/Job_A/a.jpg", "marked_reason": "blurry"},
+    )
+    assert first.status_code == 200
+    first_body = first.json()
+
+    second = client.post(
+        "/v1/admin/catalog/reject",
+        json={"relative_path": "2026/04/Job_A/a.jpg", "marked_reason": "duplicate"},
+    )
+    assert second.status_code == 200
+    second_body = second.json()
+
+    # Idempotent: timestamp stays pinned to the first mark; reason can update.
+    assert second_body["marked_at_utc"] == first_body["marked_at_utc"]
+    assert second_body["marked_reason"] == "duplicate"
+    # Exactly one queue row for this path.
+    list_after = client.get("/v1/admin/catalog/rejects").json()
+    assert list_after["total"] == 1
+
+
+def test_reject_queue_mark_missing_asset_returns_404(tmp_path: Path) -> None:
+    store = InMemoryUploadStateStore()
+    client = TestClient(create_app(state_store=store, storage_root=tmp_path))
+
+    response = client.post(
+        "/v1/admin/catalog/reject",
+        json={"relative_path": "2026/04/nope/missing.jpg"},
+    )
+    assert response.status_code == 404
+    assert "catalog asset not found" in str(response.json().get("detail"))
+
+
+def test_reject_queue_unmark_is_idempotent_when_absent(tmp_path: Path) -> None:
+    # Unmarking a path that isn't in the queue must be a quiet 200 with
+    # is_rejected=False, not a 404 — two reviewers may race on the same triage.
+    store = _seed_reject_queue_store()
+    client = TestClient(create_app(state_store=store, storage_root=tmp_path))
+
+    response = client.post(
+        "/v1/admin/catalog/reject/unmark",
+        json={"relative_path": "2026/04/Job_A/a.jpg"},
+    )
+    assert response.status_code == 200
+    assert response.json() == {
+        "relative_path": "2026/04/Job_A/a.jpg",
+        "is_rejected": False,
+    }
+
+
+def test_reject_queue_rejects_unsafe_relative_paths(tmp_path: Path) -> None:
+    store = _seed_reject_queue_store()
+    client = TestClient(create_app(state_store=store, storage_root=tmp_path))
+
+    for unsafe in ["../escape", "/leading/slash.jpg", "bad\\segment.jpg", "a/./b.jpg", ""]:
+        response = client.post(
+            "/v1/admin/catalog/reject",
+            json={"relative_path": unsafe} if unsafe else {"relative_path": " "},
+        )
+        # Empty string triggers Pydantic min_length=1 (422); the other
+        # malicious shapes are rejected by _require_safe_relative_path (400).
+        assert response.status_code in (400, 422)
+
+
+def test_reject_queue_list_paginates(tmp_path: Path) -> None:
+    store = _seed_reject_queue_store()
+    client = TestClient(create_app(state_store=store, storage_root=tmp_path))
+
+    for path in ("2026/04/Job_A/a.jpg", "2026/04/Job_B/b.jpg"):
+        assert (
+            client.post(
+                "/v1/admin/catalog/reject",
+                json={"relative_path": path},
+            ).status_code
+            == 200
+        )
+
+    page_one = client.get("/v1/admin/catalog/rejects?limit=1&offset=0").json()
+    page_two = client.get("/v1/admin/catalog/rejects?limit=1&offset=1").json()
+    assert page_one["total"] == 2
+    assert page_two["total"] == 2
+    assert len(page_one["items"]) == 1
+    assert len(page_two["items"]) == 1
+    assert page_one["items"][0]["relative_path"] != page_two["items"][0]["relative_path"]
+
+    # limit bounds are enforced.
+    assert client.get("/v1/admin/catalog/rejects?limit=0").status_code == 422
+    assert client.get("/v1/admin/catalog/rejects?limit=1000").status_code == 422
+    assert client.get("/v1/admin/catalog/rejects?offset=-1").status_code == 422

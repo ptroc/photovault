@@ -1125,6 +1125,8 @@ def test_library_page_renders_tree_and_grid() -> None:
                     },
                 ]
             }
+        if path == "/v1/admin/catalog/rejects":
+            return {"total": 0, "limit": 1, "offset": 0, "items": []}
         assert path == "/v1/admin/catalog"
         # Default view has no prefix filter.
         assert query == {"limit": "60", "offset": "0"}
@@ -1175,6 +1177,8 @@ def test_library_page_filters_by_selected_folder() -> None:
                     },
                 ]
             }
+        if path == "/v1/admin/catalog/rejects":
+            return {"total": 0, "limit": 1, "offset": 0, "items": []}
         assert path == "/v1/admin/catalog"
         # The selected folder must be forwarded to the API as the prefix filter.
         assert query == {
@@ -1209,6 +1213,8 @@ def test_library_page_rejects_path_traversal_in_folder_arg() -> None:
     def _fetcher(path: str, query: dict[str, str]) -> dict:
         if path == "/v1/admin/catalog/folders":
             return {"folders": []}
+        if path == "/v1/admin/catalog/rejects":
+            return {"total": 0, "limit": 1, "offset": 0, "items": []}
         forwarded["query"] = dict(query)
         return {"total": 0, "limit": 60, "offset": 0, "items": []}
 
@@ -1393,6 +1399,8 @@ def test_library_page_emits_lightbox_nav_script() -> None:
     def _fetcher(path: str, query: dict[str, str]) -> dict:
         if path == "/v1/admin/catalog/folders":
             return {"folders": []}
+        if path == "/v1/admin/catalog/rejects":
+            return {"total": 0, "limit": 1, "offset": 0, "items": []}
         return {"total": 0, "limit": 60, "offset": 0, "items": []}
 
     app = create_app(api_fetcher=_fetcher)
@@ -1407,3 +1415,273 @@ def test_library_page_emits_lightbox_nav_script() -> None:
     assert "ArrowRight" in html
     assert "library-lightbox-prev" in html
     assert "library-lightbox-next" in html
+
+
+# ---------------------------------------------------------------------------
+# Phase 3.B: reject queue (lightbox X-key + header badge + /library/rejects)
+# ---------------------------------------------------------------------------
+
+
+def test_library_page_shows_reject_queue_badge_when_nonzero() -> None:
+    def _fetcher(path: str, query: dict[str, str]) -> dict:
+        if path == "/v1/admin/catalog/folders":
+            return {"folders": []}
+        if path == "/v1/admin/catalog/rejects":
+            # Library view only asks for the count via limit=1/offset=0.
+            assert query == {"limit": "1", "offset": "0"}
+            return {"total": 3, "limit": 1, "offset": 0, "items": []}
+        return {"total": 0, "limit": 60, "offset": 0, "items": []}
+
+    app = create_app(api_fetcher=_fetcher)
+    response = app.test_client().get("/library")
+    assert response.status_code == 200
+    html = response.get_data(as_text=True)
+    # Header pill links to /library/rejects and carries the count.
+    assert "3 marked for deletion" in html
+    assert 'href="/library/rejects"' in html
+    # Pill uses the danger style when the queue is non-empty.
+    assert "btn-danger" in html
+
+
+def test_library_page_reject_badge_is_muted_at_zero() -> None:
+    def _fetcher(path: str, query: dict[str, str]) -> dict:
+        if path == "/v1/admin/catalog/folders":
+            return {"folders": []}
+        if path == "/v1/admin/catalog/rejects":
+            return {"total": 0, "limit": 1, "offset": 0, "items": []}
+        return {"total": 0, "limit": 60, "offset": 0, "items": []}
+
+    app = create_app(api_fetcher=_fetcher)
+    response = app.test_client().get("/library")
+    assert response.status_code == 200
+    html = response.get_data(as_text=True)
+    assert "0 marked for deletion" in html
+    # Muted outline style when the queue is empty — never a scolding red.
+    assert "library-reject-queue-badge" in html
+
+
+def test_library_lightbox_renders_reject_button_and_no_badge_when_not_rejected() -> None:
+    def _fetcher(path: str, query: dict[str, str]) -> dict:
+        assert path == "/v1/admin/catalog/asset"
+        return {
+            "item": _library_catalog_item(
+                "2026/04/Job_A/a.jpg", is_rejected=False
+            )
+        }
+
+    app = create_app(api_fetcher=_fetcher)
+    response = app.test_client().get(
+        "/library/lightbox?relative_path=2026/04/Job_A/a.jpg&index=0&total=1"
+    )
+    assert response.status_code == 200
+    html = response.get_data(as_text=True)
+    # The reject form is present with a button labelled "✕ Reject".
+    assert "library-lightbox-reject-form" in html
+    assert "Reject" in html
+    # Hidden input carries currently_rejected=false; whitespace-tolerant check.
+    collapsed = " ".join(html.split())
+    assert 'name="currently_rejected"' in collapsed
+    assert 'value="false"' in collapsed
+    assert 'aria-pressed="false"' in html
+    # No "Marked for deletion" badge before the asset is rejected.
+    assert "Marked for deletion" not in html
+
+
+def test_library_lightbox_renders_restore_button_and_badge_when_rejected() -> None:
+    def _fetcher(path: str, query: dict[str, str]) -> dict:
+        assert path == "/v1/admin/catalog/asset"
+        return {
+            "item": _library_catalog_item(
+                "2026/04/Job_A/a.jpg", is_rejected=True
+            )
+        }
+
+    app = create_app(api_fetcher=_fetcher)
+    response = app.test_client().get(
+        "/library/lightbox?relative_path=2026/04/Job_A/a.jpg&index=0&total=1"
+    )
+    assert response.status_code == 200
+    html = response.get_data(as_text=True)
+    # Rejected state: restore button + danger pill badge.
+    assert "Restore" in html
+    collapsed = " ".join(html.split())
+    assert 'name="currently_rejected"' in collapsed
+    assert 'value="true"' in collapsed
+    assert 'aria-pressed="true"' in html
+    assert "Marked for deletion" in html
+
+
+def test_library_page_emits_x_key_reject_handler() -> None:
+    def _fetcher(path: str, query: dict[str, str]) -> dict:
+        if path == "/v1/admin/catalog/folders":
+            return {"folders": []}
+        if path == "/v1/admin/catalog/rejects":
+            return {"total": 0, "limit": 1, "offset": 0, "items": []}
+        return {"total": 0, "limit": 60, "offset": 0, "items": []}
+
+    app = create_app(api_fetcher=_fetcher)
+    response = app.test_client().get("/library")
+    assert response.status_code == 200
+    html = response.get_data(as_text=True)
+    # Stable signatures for the X-key handler installed in library.html.
+    assert "library-lightbox-reject-form" in html
+    # X handling key branch — the script tests the keydown letter X.
+    assert "'x'" in html or "'X'" in html
+    assert "htmx:afterSwap" in html
+
+
+def test_library_reject_toggle_marks_asset_and_returns_fragment() -> None:
+    observed: dict[str, object] = {}
+
+    def _fetcher(path: str, query: dict[str, str]) -> dict:
+        assert path == "/v1/admin/catalog/asset"
+        # Server-UI re-fetches the asset after the toggle to render the
+        # swapped-in fragment with the new is_rejected state.
+        return {
+            "item": _library_catalog_item(
+                "2026/04/Job_A/a.jpg", is_rejected=True
+            )
+        }
+
+    def _poster(path: str, payload: dict) -> dict:
+        observed["path"] = path
+        observed["payload"] = payload
+        return {"relative_path": payload["relative_path"], "is_rejected": True}
+
+    app = create_app(api_fetcher=_fetcher, api_poster=_poster)
+    response = app.test_client().post(
+        "/library/actions/reject/toggle",
+        data={
+            "relative_path": "2026/04/Job_A/a.jpg",
+            "folder": "",
+            "index": "0",
+            "total": "1",
+            "currently_rejected": "false",
+        },
+        headers={"HX-Request": "true"},
+    )
+    assert response.status_code == 200
+    assert observed["path"] == "/v1/admin/catalog/reject"
+    assert observed["payload"] == {"relative_path": "2026/04/Job_A/a.jpg"}
+    html = response.get_data(as_text=True)
+    # Returned fragment is the lightbox — with the flipped state surfaced.
+    assert "Restore" in html
+    assert "Marked for deletion" in html
+
+
+def test_library_reject_toggle_unmarks_when_currently_rejected() -> None:
+    observed: dict[str, object] = {}
+
+    def _fetcher(path: str, query: dict[str, str]) -> dict:
+        return {
+            "item": _library_catalog_item(
+                "2026/04/Job_A/a.jpg", is_rejected=False
+            )
+        }
+
+    def _poster(path: str, payload: dict) -> dict:
+        observed["path"] = path
+        observed["payload"] = payload
+        return {"relative_path": payload["relative_path"], "is_rejected": False}
+
+    app = create_app(api_fetcher=_fetcher, api_poster=_poster)
+    response = app.test_client().post(
+        "/library/actions/reject/toggle",
+        data={
+            "relative_path": "2026/04/Job_A/a.jpg",
+            "folder": "",
+            "index": "0",
+            "total": "1",
+            "currently_rejected": "true",
+        },
+        headers={"HX-Request": "true"},
+    )
+    assert response.status_code == 200
+    assert observed["path"] == "/v1/admin/catalog/reject/unmark"
+    assert observed["payload"] == {"relative_path": "2026/04/Job_A/a.jpg"}
+
+
+def test_library_rejects_page_renders_rows_and_disabled_delete_button() -> None:
+    def _fetcher(path: str, query: dict[str, str]) -> dict:
+        assert path == "/v1/admin/catalog/rejects"
+        assert query == {"limit": "60", "offset": "0"}
+        return {
+            "total": 2,
+            "limit": 60,
+            "offset": 0,
+            "items": [
+                {
+                    "relative_path": "2026/04/Job_A/a.jpg",
+                    "sha256_hex": "a" * 64,
+                    "marked_at_utc": "2026-04-23T05:00:00+00:00",
+                    "marked_reason": "blurry",
+                    "item": _library_catalog_item("2026/04/Job_A/a.jpg"),
+                },
+                {
+                    "relative_path": "2026/04/Job_B/b.jpg",
+                    "sha256_hex": "b" * 64,
+                    "marked_at_utc": "2026-04-23T05:05:00+00:00",
+                    "marked_reason": None,
+                    "item": _library_catalog_item("2026/04/Job_B/b.jpg"),
+                },
+            ],
+        }
+
+    app = create_app(api_fetcher=_fetcher)
+    response = app.test_client().get("/library/rejects")
+    assert response.status_code == 200
+    html = response.get_data(as_text=True)
+    assert "Reject queue" in html
+    # Grid renders both filenames with preview URLs.
+    assert "a.jpg" in html
+    assert "b.jpg" in html
+    assert 'src="/catalog/preview?relative_path=2026/04/Job_A/a.jpg"' in html
+    # Per-row Restore forms post to the unmark action.
+    assert 'action="/library/actions/reject/unmark"' in html
+    assert "Restore" in html
+    # Reason surfaces when present.
+    assert "blurry" in html
+    # Delete-rejected button is present but disabled for Phase 3.B.
+    assert "Delete rejected media" in html
+    assert "disabled" in html
+    # Back-link to library present.
+    assert "← Back to library" in html
+    # No SHA leaks.
+    assert ("a" * 64) not in html
+    assert ("b" * 64) not in html
+
+
+def test_library_rejects_page_renders_empty_state() -> None:
+    def _fetcher(path: str, query: dict[str, str]) -> dict:
+        assert path == "/v1/admin/catalog/rejects"
+        return {"total": 0, "limit": 60, "offset": 0, "items": []}
+
+    app = create_app(api_fetcher=_fetcher)
+    response = app.test_client().get("/library/rejects")
+    assert response.status_code == 200
+    html = response.get_data(as_text=True)
+    assert "The reject queue is empty" in html
+    # Delete button is still rendered (disabled) so the UI shape is stable.
+    assert "Delete rejected media (0)" in html
+
+
+def test_library_reject_unmark_action_posts_and_redirects() -> None:
+    observed: dict[str, object] = {}
+
+    def _fetcher(path: str, query: dict[str, str]) -> dict:
+        return {"total": 0, "limit": 60, "offset": 0, "items": []}
+
+    def _poster(path: str, payload: dict) -> dict:
+        observed["path"] = path
+        observed["payload"] = payload
+        return {"relative_path": payload["relative_path"], "is_rejected": False}
+
+    app = create_app(api_fetcher=_fetcher, api_poster=_poster)
+    response = app.test_client().post(
+        "/library/actions/reject/unmark",
+        data={"relative_path": "2026/04/Job_A/a.jpg", "page": "1"},
+    )
+    assert response.status_code in (301, 302, 303)
+    assert observed["path"] == "/v1/admin/catalog/reject/unmark"
+    assert observed["payload"] == {"relative_path": "2026/04/Job_A/a.jpg"}
+    assert "/library/rejects" in response.headers.get("Location", "")

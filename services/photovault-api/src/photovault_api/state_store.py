@@ -128,6 +128,21 @@ class MediaPreviewRecord:
 
 
 @dataclass(frozen=True)
+class RejectedAssetRecord:
+    """Catalog reject-queue row (Phase 3.B).
+
+    The reject queue is a global, single-operator list of assets slated for
+    deletion. ``sha256_hex`` is duplicated from ``api_media_assets`` so the
+    execute phase still has it after the source asset row is deleted.
+    """
+
+    relative_path: str
+    sha256_hex: str
+    marked_at_utc: str
+    marked_reason: str | None
+
+
+@dataclass(frozen=True)
 class DuplicateShaGroup:
     sha256_hex: str
     file_count: int
@@ -302,6 +317,29 @@ class UploadStateStore(Protocol):
         self, *, relative_path: str, is_archived: bool, updated_at_utc: str
     ) -> MediaAssetRecord | None: ...
 
+    # -------- Phase 3.B: reject queue -----------------------------------
+    def add_catalog_reject(
+        self,
+        *,
+        relative_path: str,
+        marked_at_utc: str,
+        marked_reason: str | None = None,
+    ) -> RejectedAssetRecord | None:
+        """Idempotent upsert; returns ``None`` when ``relative_path`` is not a
+        catalog asset. SHA is read from ``api_media_assets`` at insert time.
+        """
+        ...
+
+    def remove_catalog_reject(self, relative_path: str) -> bool: ...
+
+    def is_catalog_reject(self, relative_path: str) -> bool: ...
+
+    def count_catalog_rejects(self) -> int: ...
+
+    def list_catalog_rejects(
+        self, *, limit: int, offset: int
+    ) -> tuple[int, list[RejectedAssetRecord]]: ...
+
     def list_media_assets_for_extraction(
         self,
         *,
@@ -461,6 +499,7 @@ class InMemoryUploadStateStore:
     media_assets: dict[str, MediaAssetRecord] = field(default_factory=dict)
     media_asset_extractions: dict[str, MediaExtractionRecord] = field(default_factory=dict)
     media_asset_previews: dict[str, MediaPreviewRecord] = field(default_factory=dict)
+    media_asset_rejects: dict[str, RejectedAssetRecord] = field(default_factory=dict)
     clients: dict[str, ClientRecord] = field(default_factory=dict)
     client_heartbeats: dict[str, ClientHeartbeatRecord] = field(default_factory=dict)
     path_conflicts: list[PathConflictRecord] = field(default_factory=list)
@@ -814,6 +853,66 @@ class InMemoryUploadStateStore:
             )
             self.media_assets[relative_path] = updated
             return updated
+
+    # -------- Phase 3.B: reject queue -----------------------------------
+    def add_catalog_reject(
+        self,
+        *,
+        relative_path: str,
+        marked_at_utc: str,
+        marked_reason: str | None = None,
+    ) -> RejectedAssetRecord | None:
+        with self._lock:
+            asset = self.media_assets.get(relative_path)
+            if asset is None:
+                return None
+            existing = self.media_asset_rejects.get(relative_path)
+            # Idempotent: keep the first-marked timestamp on repeated adds so
+            # the UI can show "marked since". Allow reason to be refreshed.
+            first_marked = (
+                existing.marked_at_utc if existing is not None else marked_at_utc
+            )
+            if marked_reason is not None:
+                effective_reason: str | None = marked_reason
+            elif existing is not None:
+                effective_reason = existing.marked_reason
+            else:
+                effective_reason = None
+            record = RejectedAssetRecord(
+                relative_path=relative_path,
+                sha256_hex=asset.sha256_hex,
+                marked_at_utc=first_marked,
+                marked_reason=effective_reason,
+            )
+            self.media_asset_rejects[relative_path] = record
+            return record
+
+    def remove_catalog_reject(self, relative_path: str) -> bool:
+        with self._lock:
+            return self.media_asset_rejects.pop(relative_path, None) is not None
+
+    def is_catalog_reject(self, relative_path: str) -> bool:
+        with self._lock:
+            return relative_path in self.media_asset_rejects
+
+    def count_catalog_rejects(self) -> int:
+        with self._lock:
+            return len(self.media_asset_rejects)
+
+    def list_catalog_rejects(
+        self, *, limit: int, offset: int
+    ) -> tuple[int, list[RejectedAssetRecord]]:
+        with self._lock:
+            rows = sorted(
+                self.media_asset_rejects.values(),
+                key=lambda record: (record.marked_at_utc, record.relative_path),
+            )
+            total = len(rows)
+            if limit <= 0:
+                return total, []
+            if offset < 0:
+                offset = 0
+            return total, rows[offset : offset + limit]
 
     def _filter_assets_for_backfill(
         self,
@@ -1524,6 +1623,24 @@ class PostgresUploadStateStore:
                         last_failed_at_utc TEXT,
                         failure_detail TEXT,
                         updated_at_utc TEXT NOT NULL
+                    );
+                    """
+                )
+                # Phase 3.B: reject queue. SHA is duplicated from
+                # api_media_assets so the execute phase still has it after the
+                # source asset row is deleted. ON DELETE CASCADE on the FK
+                # keeps the queue consistent if an asset is otherwise removed
+                # through normal CRUD paths; Phase 3.C's delete path deletes
+                # the queue row before it removes the media asset row so the
+                # cascade is a belt-and-suspenders guard only.
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS api_catalog_reject_queue (
+                        relative_path TEXT PRIMARY KEY REFERENCES api_media_assets(relative_path)
+                            ON DELETE CASCADE,
+                        sha256_hex TEXT NOT NULL,
+                        marked_at_utc TEXT NOT NULL,
+                        marked_reason TEXT
                     );
                     """
                 )
@@ -2248,6 +2365,122 @@ class PostgresUploadStateStore:
                     return None
             conn.commit()
         return self.get_media_asset_by_path(relative_path)
+
+    # -------- Phase 3.B: reject queue -----------------------------------
+    def add_catalog_reject(
+        self,
+        *,
+        relative_path: str,
+        marked_at_utc: str,
+        marked_reason: str | None = None,
+    ) -> RejectedAssetRecord | None:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                # Idempotent upsert: keep the first-marked timestamp when the
+                # row already exists so "marked since" reflects the original
+                # reviewer action. SHA is read inline from api_media_assets.
+                cur.execute(
+                    """
+                    INSERT INTO api_catalog_reject_queue (
+                        relative_path, sha256_hex, marked_at_utc, marked_reason
+                    )
+                    SELECT ma.relative_path, ma.sha256_hex, %s, %s
+                    FROM api_media_assets ma
+                    WHERE ma.relative_path = %s
+                    ON CONFLICT (relative_path) DO UPDATE SET
+                        marked_reason = COALESCE(
+                            EXCLUDED.marked_reason,
+                            api_catalog_reject_queue.marked_reason
+                        );
+                    """,
+                    (marked_at_utc, marked_reason, relative_path),
+                )
+                if cur.rowcount <= 0:
+                    conn.commit()
+                    return None
+                cur.execute(
+                    """
+                    SELECT relative_path, sha256_hex, marked_at_utc, marked_reason
+                    FROM api_catalog_reject_queue
+                    WHERE relative_path = %s;
+                    """,
+                    (relative_path,),
+                )
+                row = cur.fetchone()
+            conn.commit()
+        if row is None:
+            return None
+        return RejectedAssetRecord(
+            relative_path=str(row[0]),
+            sha256_hex=str(row[1]),
+            marked_at_utc=str(row[2]),
+            marked_reason=str(row[3]) if row[3] is not None else None,
+        )
+
+    def remove_catalog_reject(self, relative_path: str) -> bool:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    DELETE FROM api_catalog_reject_queue WHERE relative_path = %s;
+                    """,
+                    (relative_path,),
+                )
+                removed = cur.rowcount > 0
+            conn.commit()
+        return removed
+
+    def is_catalog_reject(self, relative_path: str) -> bool:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT 1 FROM api_catalog_reject_queue WHERE relative_path = %s LIMIT 1;
+                    """,
+                    (relative_path,),
+                )
+                return cur.fetchone() is not None
+
+    def count_catalog_rejects(self) -> int:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) FROM api_catalog_reject_queue;")
+                row = cur.fetchone()
+                return int(row[0]) if row else 0
+
+    def list_catalog_rejects(
+        self, *, limit: int, offset: int
+    ) -> tuple[int, list[RejectedAssetRecord]]:
+        if limit <= 0:
+            total = self.count_catalog_rejects()
+            return total, []
+        if offset < 0:
+            offset = 0
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) FROM api_catalog_reject_queue;")
+                row = cur.fetchone()
+                total = int(row[0]) if row else 0
+                cur.execute(
+                    """
+                    SELECT relative_path, sha256_hex, marked_at_utc, marked_reason
+                    FROM api_catalog_reject_queue
+                    ORDER BY marked_at_utc ASC, relative_path ASC
+                    LIMIT %s OFFSET %s;
+                    """,
+                    (limit, offset),
+                )
+                rows = cur.fetchall()
+        items = [
+            RejectedAssetRecord(
+                relative_path=str(row[0]),
+                sha256_hex=str(row[1]),
+                marked_at_utc=str(row[2]),
+                marked_reason=str(row[3]) if row[3] is not None else None,
+            )
+            for row in rows
+        ]
+        return total, items
 
     def _row_to_media_asset_record(self, row: tuple[object, ...]) -> MediaAssetRecord:
         return MediaAssetRecord(
