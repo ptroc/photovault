@@ -1,5 +1,6 @@
 import hashlib
 import io
+import logging
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -3602,3 +3603,114 @@ def test_upload_verify_accepts_sha_again_after_restore(tmp_path: Path) -> None:
     )
     assert verify_after_restore.status_code == 200
     assert verify_after_restore.json()["status"] == "ALREADY_EXISTS"
+
+
+def test_unhandled_exception_returns_structured_500_detail(tmp_path: Path, monkeypatch) -> None:
+    client = TestClient(create_app(storage_root=tmp_path), raise_server_exceptions=False)
+
+    def _raise_unhandled(*_args, **_kwargs):
+        raise RuntimeError("forced unhandled api failure")
+
+    monkeypatch.setattr(app_module, "_require_approved_client", _raise_unhandled)
+    response = client.post(
+        "/v1/upload/metadata-handshake",
+        json={
+            "files": [
+                {
+                    "client_file_id": 1,
+                    "sha256_hex": "a" * 64,
+                    "size_bytes": 1,
+                }
+            ]
+        },
+    )
+    assert response.status_code == 500
+    detail = response.json()["detail"]
+    assert detail["request_id"]
+    assert detail["timestamp_utc"]
+    assert detail["message"] == "forced unhandled api failure"
+    assert isinstance(detail["traceback"], list)
+    assert any("forced unhandled api failure" in line for line in detail["traceback"])
+
+
+def test_admin_reject_execute_logs_start_finish_and_failure_reason(
+    tmp_path: Path, monkeypatch, caplog
+) -> None:
+    store = _seed_reject_queue_store()
+    client = TestClient(create_app(state_store=store, storage_root=tmp_path))
+    source_file = tmp_path / "2026" / "04" / "Job_A" / "a.jpg"
+    source_file.parent.mkdir(parents=True, exist_ok=True)
+    source_file.write_bytes(b"fake-image-data")
+
+    mark = client.post(
+        "/v1/admin/catalog/reject",
+        json={"relative_path": "2026/04/Job_A/a.jpg", "marked_reason": "log-check"},
+    )
+    assert mark.status_code == 200
+
+    caplog.set_level(logging.INFO, logger="photovault-api.app")
+    monkeypatch.setattr(app_module.os, "replace", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("forced replace failure")))
+    monkeypatch.setattr(
+        app_module.shutil,
+        "copy2",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("forced fallback failure")),
+    )
+
+    response = client.post(
+        "/v1/admin/catalog/rejects/execute",
+        json={"relative_paths": ["2026/04/Job_A/a.jpg"]},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["executed"] == []
+    assert payload["skipped"] == ["2026/04/Job_A/a.jpg"]
+
+    assert "admin_reject_execute_started" in caplog.text
+    assert "admin_reject_execute_item_failed" in caplog.text
+    assert "forced fallback failure" in caplog.text
+    assert "admin_reject_execute_finished" in caplog.text
+
+
+def test_backfill_workflows_log_counts_and_failure_details(tmp_path: Path, caplog) -> None:
+    unsupported_path = tmp_path / "2026" / "04" / "Job_A" / "notes.txt"
+    unsupported_path.parent.mkdir(parents=True, exist_ok=True)
+    unsupported_path.write_text("not previewable", encoding="utf-8")
+
+    client = TestClient(create_app(storage_root=tmp_path))
+    index_response = client.post("/v1/storage/index")
+    assert index_response.status_code == 200
+
+    caplog.set_level(logging.INFO, logger="photovault-api.app")
+
+    extraction_backfill = client.post(
+        "/v1/admin/catalog/extraction/backfill",
+        json={
+            "target_statuses": ["failed"],
+            "limit": 10,
+            "preview_capability": "not_previewable",
+        },
+    )
+    assert extraction_backfill.status_code == 200
+    extraction_run = extraction_backfill.json()["run"]
+    assert extraction_run["selected_count"] == 1
+    assert extraction_run["failed_count"] == 1
+
+    preview_backfill = client.post(
+        "/v1/admin/catalog/preview/backfill",
+        json={
+            "target_statuses": ["pending"],
+            "limit": 10,
+            "preview_capability": "not_previewable",
+        },
+    )
+    assert preview_backfill.status_code == 200
+    preview_run = preview_backfill.json()["run"]
+    assert preview_run["selected_count"] == 1
+    assert preview_run["failed_count"] == 1
+
+    assert "admin_extraction_backfill_started" in caplog.text
+    assert "admin_extraction_backfill_finished" in caplog.text
+    assert "unsupported media format for extraction" in caplog.text
+    assert "admin_preview_backfill_started" in caplog.text
+    assert "admin_preview_backfill_finished" in caplog.text
+    assert "unsupported media format for preview" in caplog.text

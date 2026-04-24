@@ -708,3 +708,22 @@ Verification: scripts/deploy_rpi.sh; /bin/zsh -lc "ANISBLE_HOST_KEY_CHECKING=Fal
   Summary: Updated Ansible bootstrap provisioning to install `dcraw` as part of baseline host packages so RAW preview fallback dependencies are present during host setup.
   Files: ansible/playbooks/bootstrap.yml; codex_log.md
   Verification: ansible-playbook --syntax-check ansible/playbooks/bootstrap.yml (failed: command not found in local environment)
+- UTC: 2026-04-24T15:26:16Z
+  Summary: Updated Docker server base image provisioning to install `dcraw` so RAW preview fallback dependencies are present in containerized deployments.
+  Files: deploy/docker/Dockerfile.server; codex_log.md
+  Verification: docker compose -f deploy/docker/docker-compose.server.yml config (failed: command not found in local environment)
+- UTC timestamp: 2026-04-24T20:01:01Z
+- Action summary: Implemented unified backend observability upgrade for `photovault-api` and `photovault-clientd`: request middleware logging with request IDs/timestamps, structured 5xx responses with traceback details, workflow/background action logs, daemon-event mirroring to process logs, timestamped uvicorn log config, and comprehensive regression tests.
+- Files created/modified:
+  - services/photovault-api/src/photovault_api/app.py
+  - services/photovault-api/src/photovault_api/main.py
+  - services/photovault-clientd/src/photovault_clientd/app.py
+  - services/photovault-clientd/src/photovault_clientd/db.py
+  - services/photovault-clientd/src/photovault_clientd/main.py
+  - services/photovault-api/tests/test_api_app.py
+  - services/photovault-clientd/tests/test_transitions_and_events.py
+  - services/photovault-clientd/tests/test_m2_handshake.py
+- Verification commands run:
+  - `source .venv/bin/activate && pytest -q services/photovault-api/tests/test_api_app.py -k "unhandled_exception_returns_structured_500_detail or admin_reject_execute_logs_start_finish_and_failure_reason or backfill_workflows_log_counts_and_failure_details"`
+  - `source .venv/bin/activate && pytest -q services/photovault-clientd/tests/test_transitions_and_events.py -k "create_ingest_logs_job_id_and_media_label or daemon_tick_unhandled_exception_returns_structured_500 or append_daemon_event_is_mirrored_to_process_logs"`
+  - `source .venv/bin/activate && pytest -q services/photovault-api/tests services/photovault-clientd/tests`

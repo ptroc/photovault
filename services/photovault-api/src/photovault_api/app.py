@@ -2,6 +2,7 @@
 
 import hashlib
 import io
+import logging
 import math
 import mimetypes
 import os
@@ -10,12 +11,14 @@ import secrets
 import shutil
 import subprocess
 import tempfile
+import time
+import traceback
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel, Field
 
@@ -29,6 +32,8 @@ from photovault_api.state_store import (
     StorageSummary,
     UploadStateStore,
 )
+
+APP_LOGGER = logging.getLogger("photovault-api.app")
 
 
 class HandshakeDecision(StrEnum):
@@ -1481,6 +1486,114 @@ def create_app(
     app.state.preview_placeholder_suffixes = resolved_preview_placeholder_suffixes
     app.state.bootstrap_token = bootstrap_token or os.getenv("PHOTOVAULT_API_BOOTSTRAP_TOKEN", "")
 
+    def _extract_error_message(detail: object) -> str:
+        if isinstance(detail, str):
+            return detail
+        if isinstance(detail, dict):
+            message = detail.get("message")
+            if isinstance(message, str) and message.strip():
+                return message
+        return str(detail)
+
+    def _request_id_from_request(request: Request) -> str:
+        request_id = getattr(request.state, "request_id", None)
+        if isinstance(request_id, str) and request_id.strip():
+            return request_id
+        return secrets.token_hex(8)
+
+    @app.middleware("http")
+    async def log_http_requests(request: Request, call_next):
+        request_id = secrets.token_hex(8)
+        request.state.request_id = request_id
+        started_at_utc = datetime.now(UTC).isoformat()
+        started_monotonic = time.perf_counter()
+        method = request.method
+        path = request.url.path
+        try:
+            response = await call_next(request)
+        except Exception as exc:
+            duration_ms = (time.perf_counter() - started_monotonic) * 1000.0
+            APP_LOGGER.exception(
+                "request timestamp=%s method=%s path=%s status_code=%s duration_ms=%.2f request_id=%s",
+                started_at_utc,
+                method,
+                path,
+                500,
+                duration_ms,
+                request_id,
+                exc_info=exc,
+            )
+            raise
+        duration_ms = (time.perf_counter() - started_monotonic) * 1000.0
+        APP_LOGGER.info(
+            "request timestamp=%s method=%s path=%s status_code=%s duration_ms=%.2f request_id=%s",
+            started_at_utc,
+            method,
+            path,
+            response.status_code,
+            duration_ms,
+            request_id,
+        )
+        response.headers["x-request-id"] = request_id
+        return response
+
+    @app.exception_handler(HTTPException)
+    async def handle_http_exception(request: Request, exc: HTTPException):
+        request_id = _request_id_from_request(request)
+        headers = dict(exc.headers) if exc.headers is not None else {}
+        headers["x-request-id"] = request_id
+        if exc.status_code < 500:
+            return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail}, headers=headers)
+
+        timestamp_utc = datetime.now(UTC).isoformat()
+        traceback_lines = traceback.format_exception(type(exc), exc, exc.__traceback__)
+        enriched_detail: dict[str, object] = {
+            "request_id": request_id,
+            "timestamp_utc": timestamp_utc,
+            "message": _extract_error_message(exc.detail),
+            "traceback": traceback_lines,
+        }
+        if isinstance(exc.detail, dict):
+            enriched_detail = {**exc.detail, **enriched_detail}
+        else:
+            enriched_detail["error_detail"] = exc.detail
+
+        APP_LOGGER.error(
+            "http_5xx timestamp=%s method=%s path=%s status_code=%s request_id=%s message=%s",
+            timestamp_utc,
+            request.method,
+            request.url.path,
+            exc.status_code,
+            request_id,
+            enriched_detail["message"],
+            exc_info=exc,
+        )
+        return JSONResponse(status_code=exc.status_code, content={"detail": enriched_detail}, headers=headers)
+
+    @app.exception_handler(Exception)
+    async def handle_unexpected_exception(request: Request, exc: Exception):
+        request_id = _request_id_from_request(request)
+        timestamp_utc = datetime.now(UTC).isoformat()
+        traceback_lines = traceback.format_exception(type(exc), exc, exc.__traceback__)
+        detail = {
+            "request_id": request_id,
+            "timestamp_utc": timestamp_utc,
+            "message": str(exc) or exc.__class__.__name__,
+            "traceback": traceback_lines,
+            "exception_type": exc.__class__.__name__,
+        }
+        APP_LOGGER.exception(
+            "unhandled_exception timestamp=%s method=%s path=%s status_code=%s request_id=%s message=%s",
+            timestamp_utc,
+            request.method,
+            request.url.path,
+            500,
+            request_id,
+            detail["message"],
+            exc_info=exc,
+        )
+        return JSONResponse(status_code=500, content={"detail": detail}, headers={"x-request-id": request_id})
+
     @app.get("/healthz")
     def healthz() -> dict[str, str]:
         return {"status": "ok"}
@@ -2236,6 +2349,7 @@ def create_app(
         store: UploadStateStore = app.state.upload_state_store
         executed: list[str] = []
         skipped: list[str] = []
+        started_at_utc = datetime.now(UTC).isoformat()
 
         # Determine which paths to execute: payload list or entire queue.
         if payload.relative_paths:
@@ -2243,6 +2357,12 @@ def create_app(
         else:
             _, all_rejected = store.list_catalog_rejects(limit=100000, offset=0)
             target_paths = [row.relative_path for row in all_rejected]
+        APP_LOGGER.info(
+            "admin_reject_execute_started timestamp=%s requested_paths=%s targets=%s",
+            started_at_utc,
+            len(payload.relative_paths or []),
+            len(target_paths),
+        )
 
         now = datetime.now(UTC).isoformat()
         for relative_path in target_paths:
@@ -2296,9 +2416,22 @@ def create_app(
                 if not store.delete_stored_file(safe_path):
                     store.delete_media_asset(safe_path)
                 executed.append(safe_path)
-            except OSError:
+            except OSError as exc:
+                APP_LOGGER.warning(
+                    "admin_reject_execute_item_failed timestamp=%s relative_path=%s reason=%s",
+                    datetime.now(UTC).isoformat(),
+                    safe_path,
+                    str(exc),
+                )
                 skipped.append(safe_path)
 
+        APP_LOGGER.info(
+            "admin_reject_execute_finished timestamp=%s executed=%s skipped=%s skipped_examples=%s",
+            datetime.now(UTC).isoformat(),
+            len(executed),
+            len(skipped),
+            skipped[:10],
+        )
         return ExecuteRejectsResponse(executed=executed, skipped=skipped)
 
     @app.post("/v1/client/tombstone-report", response_model=ClientTombstoneReportResponse)
@@ -2524,6 +2657,16 @@ def create_app(
     def admin_backfill_catalog_extraction(
         payload: AdminBackfillCatalogRequest,
     ) -> AdminBackfillCatalogResponse:
+        started_at_utc = datetime.now(UTC).isoformat()
+        APP_LOGGER.info(
+            "admin_extraction_backfill_started timestamp=%s target_statuses=%s limit=%s origin_kind=%s media_type=%s preview_capability=%s",
+            started_at_utc,
+            payload.target_statuses,
+            payload.limit,
+            payload.origin_kind,
+            payload.media_type,
+            payload.preview_capability,
+        )
         _validate_catalog_filter_selection(
             origin_kind=payload.origin_kind,
             media_type=payload.media_type,
@@ -2595,6 +2738,20 @@ def create_app(
             completed_at_utc=datetime.now(UTC).isoformat(),
         )
         store.record_catalog_backfill_run(run_record)
+        failed_details = [
+            f"{item.relative_path}: {item.extraction_failure_detail}"
+            for item in updated_items
+            if item.extraction_status == "failed" and item.extraction_failure_detail is not None
+        ]
+        APP_LOGGER.info(
+            "admin_extraction_backfill_finished timestamp=%s selected=%s processed=%s succeeded=%s failed=%s failure_examples=%s",
+            datetime.now(UTC).isoformat(),
+            len(candidates),
+            len(updated_items),
+            succeeded_count,
+            failed_count,
+            failed_details[:10],
+        )
         return AdminBackfillCatalogResponse(
             run=_to_backfill_run_summary(run_record),
             items=updated_items,
@@ -2604,6 +2761,16 @@ def create_app(
     def admin_backfill_catalog_preview(
         payload: AdminBackfillCatalogRequest,
     ) -> AdminBackfillCatalogResponse:
+        started_at_utc = datetime.now(UTC).isoformat()
+        APP_LOGGER.info(
+            "admin_preview_backfill_started timestamp=%s target_statuses=%s limit=%s origin_kind=%s media_type=%s preview_capability=%s",
+            started_at_utc,
+            payload.target_statuses,
+            payload.limit,
+            payload.origin_kind,
+            payload.media_type,
+            payload.preview_capability,
+        )
         effective_preview_capability = payload.preview_capability or "previewable"
         _validate_catalog_filter_selection(
             origin_kind=payload.origin_kind,
@@ -2680,6 +2847,20 @@ def create_app(
             completed_at_utc=datetime.now(UTC).isoformat(),
         )
         store.record_catalog_backfill_run(run_record)
+        failed_details = [
+            f"{item.relative_path}: {item.preview_failure_detail}"
+            for item in updated_items
+            if item.preview_status == "failed" and item.preview_failure_detail is not None
+        ]
+        APP_LOGGER.info(
+            "admin_preview_backfill_finished timestamp=%s selected=%s processed=%s succeeded=%s failed=%s failure_examples=%s",
+            datetime.now(UTC).isoformat(),
+            len(candidates),
+            len(updated_items),
+            succeeded_count,
+            failed_count,
+            failed_details[:10],
+        )
         return AdminBackfillCatalogResponse(
             run=_to_backfill_run_summary(run_record),
             items=updated_items,

@@ -988,9 +988,29 @@ def test_m4_end_to_end_acceptance_path_upload_finalize_index_and_admin_visibilit
     _write_source_file(source, b"uploaded-from-client")
 
     api_store = InMemoryUploadStateStore()
-    api_app = create_api_app(state_store=api_store, storage_root=server_storage_root)
+    api_app = create_api_app(
+        state_store=api_store,
+        storage_root=server_storage_root,
+        bootstrap_token="bootstrap-123",
+    )
 
     with TestClient(api_app) as api_client:
+        enroll_response = api_client.post(
+            "/v1/client/enroll/bootstrap",
+            json={
+                "client_id": "m4-e2e-client",
+                "display_name": "M4 E2E Client",
+                "bootstrap_token": "bootstrap-123",
+            },
+        )
+        assert enroll_response.status_code == 200
+        approve_response = api_client.post("/v1/admin/clients/m4-e2e-client/approve")
+        assert approve_response.status_code == 200
+        api_auth_headers = {
+            "x-photovault-client-id": "m4-e2e-client",
+            "x-photovault-client-token": str(approve_response.json()["item"]["auth_token"]),
+        }
+
         def _api_handshake(
             *, server_base_url: str, files: list[dict[str, object]], timeout_seconds: float = 5.0
         ) -> dict[int, str]:
@@ -1006,6 +1026,7 @@ def test_m4_end_to_end_acceptance_path_upload_finalize_index_and_admin_visibilit
                         for item in files
                     ]
                 },
+                headers=api_auth_headers,
             )
             assert response.status_code == 200
             return {
@@ -1030,6 +1051,7 @@ def test_m4_end_to_end_acceptance_path_upload_finalize_index_and_admin_visibilit
                     "x-size-bytes": str(size_bytes),
                     "x-job-name": job_name or "unknown-job",
                     "x-original-filename": original_filename or "unknown.bin",
+                    **api_auth_headers,
                 },
             )
             assert response.status_code == 200
@@ -1041,6 +1063,7 @@ def test_m4_end_to_end_acceptance_path_upload_finalize_index_and_admin_visibilit
             response = api_client.post(
                 "/v1/upload/verify",
                 json={"sha256_hex": sha256_hex, "size_bytes": size_bytes},
+                headers=api_auth_headers,
             )
             assert response.status_code == 200
             return str(response.json()["status"])
@@ -1111,6 +1134,7 @@ def test_m4_end_to_end_acceptance_path_upload_finalize_index_and_admin_visibilit
                         }
                     ]
                 },
+                headers=api_auth_headers,
             )
             assert uploaded_handshake.status_code == 200
             assert uploaded_handshake.json()["results"][0]["decision"] == "ALREADY_EXISTS"
@@ -1126,6 +1150,7 @@ def test_m4_end_to_end_acceptance_path_upload_finalize_index_and_admin_visibilit
                         }
                     ]
                 },
+                headers=api_auth_headers,
             )
             assert indexed_handshake.status_code == 200
             assert indexed_handshake.json()["results"][0]["decision"] == "ALREADY_EXISTS"

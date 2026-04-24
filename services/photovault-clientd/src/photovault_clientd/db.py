@@ -1,6 +1,7 @@
 """SQLite schema and persistence helpers for photovault-clientd."""
 
 import json
+import logging
 import sqlite3
 from pathlib import Path
 from typing import Callable, Sequence
@@ -8,6 +9,8 @@ from typing import Callable, Sequence
 from photovault_clientd.events import EventCategory, EventLevel
 from photovault_clientd.state_machine import ClientState, FileStatus
 from photovault_clientd.transitions import is_transition_allowed
+
+DAEMON_EVENT_LOGGER = logging.getLogger("photovault-clientd.daemon_events")
 
 BOOTSTRAP_RESUME_MAP: dict[FileStatus, ClientState] = {
     FileStatus.DISCOVERED: ClientState.STAGING_COPY,
@@ -424,6 +427,39 @@ def append_daemon_event(
             created_at_utc,
         ),
     )
+    log_message = (
+        "daemon_event timestamp=%s level=%s category=%s from_state=%s to_state=%s message=%s"
+    )
+    if str(level_value).upper() == EventLevel.ERROR.value:
+        DAEMON_EVENT_LOGGER.error(
+            log_message,
+            created_at_utc,
+            level_value,
+            category_value,
+            from_state.value if from_state is not None else None,
+            to_state.value if to_state is not None else None,
+            message,
+        )
+    elif str(level_value).upper() == EventLevel.WARN.value:
+        DAEMON_EVENT_LOGGER.warning(
+            log_message,
+            created_at_utc,
+            level_value,
+            category_value,
+            from_state.value if from_state is not None else None,
+            to_state.value if to_state is not None else None,
+            message,
+        )
+    else:
+        DAEMON_EVENT_LOGGER.info(
+            log_message,
+            created_at_utc,
+            level_value,
+            category_value,
+            from_state.value if from_state is not None else None,
+            to_state.value if to_state is not None else None,
+            message,
+        )
 
 
 def transition_daemon_state(

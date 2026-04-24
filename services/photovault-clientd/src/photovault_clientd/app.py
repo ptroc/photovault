@@ -2,15 +2,20 @@
 
 import asyncio
 import json
+import logging
 import os
+import secrets
 import socket
 import threading
+import time
+import traceback
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from photovault_clientd.block_devices import (
@@ -87,6 +92,7 @@ DEFAULT_STAGING_ROOT = Path("/var/lib/photovault-clientd/staging")
 DEFAULT_AUTO_PROGRESS_INTERVAL_SECONDS = 2.0
 DEFAULT_CLIENT_ID = socket.gethostname().strip() or "photovault-client"
 DEFAULT_CLIENT_DISPLAY_NAME = DEFAULT_CLIENT_ID
+APP_LOGGER = logging.getLogger("photovault-clientd.app")
 
 
 class IngestJobCreateRequest(BaseModel):
@@ -678,6 +684,114 @@ def create_app(
 
     app = FastAPI(title="photovault-clientd", version="0.1.0", lifespan=lifespan)
 
+    def _extract_error_message(detail: object) -> str:
+        if isinstance(detail, str):
+            return detail
+        if isinstance(detail, dict):
+            message = detail.get("message")
+            if isinstance(message, str) and message.strip():
+                return message
+        return str(detail)
+
+    def _request_id_from_request(request: Request) -> str:
+        request_id = getattr(request.state, "request_id", None)
+        if isinstance(request_id, str) and request_id.strip():
+            return request_id
+        return secrets.token_hex(8)
+
+    @app.middleware("http")
+    async def log_http_requests(request: Request, call_next):
+        request_id = secrets.token_hex(8)
+        request.state.request_id = request_id
+        started_at_utc = datetime.now(UTC).isoformat()
+        started_monotonic = time.perf_counter()
+        method = request.method
+        path = request.url.path
+        try:
+            response = await call_next(request)
+        except Exception as exc:
+            duration_ms = (time.perf_counter() - started_monotonic) * 1000.0
+            APP_LOGGER.exception(
+                "request timestamp=%s method=%s path=%s status_code=%s duration_ms=%.2f request_id=%s",
+                started_at_utc,
+                method,
+                path,
+                500,
+                duration_ms,
+                request_id,
+                exc_info=exc,
+            )
+            raise
+        duration_ms = (time.perf_counter() - started_monotonic) * 1000.0
+        APP_LOGGER.info(
+            "request timestamp=%s method=%s path=%s status_code=%s duration_ms=%.2f request_id=%s",
+            started_at_utc,
+            method,
+            path,
+            response.status_code,
+            duration_ms,
+            request_id,
+        )
+        response.headers["x-request-id"] = request_id
+        return response
+
+    @app.exception_handler(HTTPException)
+    async def handle_http_exception(request: Request, exc: HTTPException):
+        request_id = _request_id_from_request(request)
+        headers = dict(exc.headers) if exc.headers is not None else {}
+        headers["x-request-id"] = request_id
+        if exc.status_code < 500:
+            return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail}, headers=headers)
+
+        timestamp_utc = datetime.now(UTC).isoformat()
+        traceback_lines = traceback.format_exception(type(exc), exc, exc.__traceback__)
+        enriched_detail: dict[str, object] = {
+            "request_id": request_id,
+            "timestamp_utc": timestamp_utc,
+            "message": _extract_error_message(exc.detail),
+            "traceback": traceback_lines,
+        }
+        if isinstance(exc.detail, dict):
+            enriched_detail = {**exc.detail, **enriched_detail}
+        else:
+            enriched_detail["error_detail"] = exc.detail
+
+        APP_LOGGER.error(
+            "http_5xx timestamp=%s method=%s path=%s status_code=%s request_id=%s message=%s",
+            timestamp_utc,
+            request.method,
+            request.url.path,
+            exc.status_code,
+            request_id,
+            enriched_detail["message"],
+            exc_info=exc,
+        )
+        return JSONResponse(status_code=exc.status_code, content={"detail": enriched_detail}, headers=headers)
+
+    @app.exception_handler(Exception)
+    async def handle_unexpected_exception(request: Request, exc: Exception):
+        request_id = _request_id_from_request(request)
+        timestamp_utc = datetime.now(UTC).isoformat()
+        traceback_lines = traceback.format_exception(type(exc), exc, exc.__traceback__)
+        detail = {
+            "request_id": request_id,
+            "timestamp_utc": timestamp_utc,
+            "message": str(exc) or exc.__class__.__name__,
+            "traceback": traceback_lines,
+            "exception_type": exc.__class__.__name__,
+        }
+        APP_LOGGER.exception(
+            "unhandled_exception timestamp=%s method=%s path=%s status_code=%s request_id=%s message=%s",
+            timestamp_utc,
+            request.method,
+            request.url.path,
+            500,
+            request_id,
+            detail["message"],
+            exc_info=exc,
+        )
+        return JSONResponse(status_code=500, content={"detail": detail}, headers={"x-request-id": request_id})
+
     @app.get("/healthz")
     def healthz() -> dict[str, str]:
         return {"status": "ok"}
@@ -1117,17 +1231,26 @@ def create_app(
             progression_lock.release()
 
     @app.post("/ingest/jobs")
-    def create_ingest(request: IngestJobCreateRequest) -> dict[str, object]:
+    def create_ingest(payload: IngestJobCreateRequest, http_request: Request) -> dict[str, object]:
         conn = open_db(db_path)
         now = datetime.now(UTC).isoformat()
         try:
             outcome = _create_ingest_job_from_sources(
                 conn,
-                media_label=request.media_label,
-                source_paths=request.source_paths,
+                media_label=payload.media_label,
+                source_paths=payload.source_paths,
                 now_utc=now,
             )
             conn.commit()
+            APP_LOGGER.info(
+                "ingest_job_created timestamp=%s job_id=%s media_label=%s discovered_count=%s filtered_count=%s request_id=%s",
+                now,
+                outcome.get("job_id"),
+                payload.media_label,
+                outcome.get("discovered_count"),
+                outcome.get("filtered_count"),
+                getattr(http_request.state, "request_id", ""),
+            )
             return outcome
         finally:
             conn.close()

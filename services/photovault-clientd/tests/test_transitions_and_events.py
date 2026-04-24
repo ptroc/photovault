@@ -1,15 +1,19 @@
+import logging
 from datetime import UTC, datetime
 from pathlib import Path
 
+import photovault_clientd.app as app_module
 import pytest
 from fastapi.testclient import TestClient
 from photovault_clientd.app import create_app
 from photovault_clientd.db import (
+    append_daemon_event,
     fetch_recent_daemon_events,
     open_db,
     set_daemon_state,
     transition_daemon_state,
 )
+from photovault_clientd.events import EventCategory, EventLevel
 from photovault_clientd.state_machine import ClientState
 
 
@@ -191,3 +195,69 @@ def test_daemon_tick_hashing_failure_schedules_retry_and_classified_event(tmp_pa
             and event["message"].startswith("HASH_SOURCE_MISSING:")
             for event in events
         )
+
+
+def test_create_ingest_logs_job_id_and_media_label(tmp_path: Path, caplog) -> None:
+    db_path = tmp_path / "state.sqlite3"
+    staging_root = tmp_path / "staging"
+    source = tmp_path / "media" / "sd" / "ingest-log.jpg"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_bytes(b"log-data")
+    app = create_app(db_path=db_path, staging_root=staging_root)
+
+    caplog.set_level(logging.INFO, logger="photovault-clientd.app")
+    with TestClient(app) as client:
+        response = client.post(
+            "/ingest/jobs",
+            json={"media_label": "Card-A", "source_paths": [str(source)]},
+        )
+
+    assert response.status_code == 200
+    job_id = response.json()["job_id"]
+    assert "ingest_job_created" in caplog.text
+    assert f"job_id={job_id}" in caplog.text
+    assert "media_label=Card-A" in caplog.text
+
+
+def test_daemon_tick_unhandled_exception_returns_structured_500(
+    tmp_path: Path, monkeypatch
+) -> None:
+    db_path = tmp_path / "state.sqlite3"
+    app = create_app(db_path=db_path, staging_root=tmp_path / "staging")
+
+    def _raise_unhandled(*_args, **_kwargs):
+        raise RuntimeError("forced daemon tick failure")
+
+    monkeypatch.setattr(app_module, "run_daemon_tick", _raise_unhandled)
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.post("/daemon/tick")
+
+    assert response.status_code == 500
+    detail = response.json()["detail"]
+    assert detail["request_id"]
+    assert detail["timestamp_utc"]
+    assert detail["message"] == "forced daemon tick failure"
+    assert isinstance(detail["traceback"], list)
+    assert any("forced daemon tick failure" in line for line in detail["traceback"])
+
+
+def test_append_daemon_event_is_mirrored_to_process_logs(tmp_path: Path, caplog) -> None:
+    db_path = tmp_path / "state.sqlite3"
+    conn = open_db(db_path)
+    now = datetime.now(UTC).isoformat()
+    caplog.set_level(logging.INFO, logger="photovault-clientd.daemon_events")
+    append_daemon_event(
+        conn,
+        level=EventLevel.INFO,
+        category=EventCategory.TICK_NOOP,
+        message="mirror-check",
+        created_at_utc=now,
+        from_state=ClientState.IDLE,
+        to_state=ClientState.IDLE,
+    )
+    conn.close()
+
+    daemon_event_messages = [
+        record.message for record in caplog.records if record.name == "photovault-clientd.daemon_events"
+    ]
+    assert any("category=TICK_NOOP" in message and "message=mirror-check" in message for message in daemon_event_messages)
