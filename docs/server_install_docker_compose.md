@@ -63,6 +63,7 @@ sudo tee /opt/photovault/deploy/docker/.env >/dev/null <<'ENV'
 # External PostgreSQL connection for photovault-api.
 # If PostgreSQL runs on the Docker host, use host.docker.internal.
 PHOTOVAULT_API_DATABASE_URL=postgresql://photovault_api:change-me-strong-password@host.docker.internal:5432/photovault
+PHOTOVAULT_API_BOOTSTRAP_TOKEN=change-me-bootstrap-token
 PHOTOVAULT_STORAGE_HOST_ROOT=/storage/photovault
 PHOTOVAULT_STORAGE_CONTAINER_ROOT=/var/storage
 PHOTOVAULT_API_STORAGE_ROOT=/var/storage
@@ -75,6 +76,8 @@ ENV
 ```
 
 If your DB runs on another machine, replace `host.docker.internal` with that hostname/IP.
+`PHOTOVAULT_API_BOOTSTRAP_TOKEN` is required for `/v1/client/enroll/bootstrap`; if missing,
+the API returns `503 bootstrap enrollment is disabled`.
 `PHOTOVAULT_API_STORAGE_ROOT` must be inside the container path selected by
 `PHOTOVAULT_STORAGE_CONTAINER_ROOT`.
 `PHOTOVAULT_API_PREVIEW_MAX_LONG_EDGE` is optional and caps preview JPEGs on the

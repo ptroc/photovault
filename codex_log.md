@@ -696,3 +696,7 @@ Verification: scripts/deploy_rpi.sh; /bin/zsh -lc "ANISBLE_HOST_KEY_CHECKING=Fal
   Summary: Expanded Nginx client-routing rule from two explicit endpoints to a `/v1/client/` prefix pass-through so future client daemon endpoints remain reachable without additional proxy edits while preserving `/v1/admin/*` and UI basic-auth protection.
   Files: deploy/docker/nginx/nginx.conf; codex_log.md
   Verification: manual config review (`deploy/docker/nginx/nginx.conf`)
+- UTC: 2026-04-24T13:19:05Z
+  Summary: Diagnosed Docker API enrollment 503 and hardened server Compose/docs by making `PHOTOVAULT_API_BOOTSTRAP_TOKEN` a required env var for `photovault-api`; documented the required `.env` entry and explicit 503 behavior when missing.
+  Files: deploy/docker/docker-compose.server.yml; docs/server_install_docker_compose.md; codex_log.md
+  Verification: manual source validation of bootstrap guard in `services/photovault-api/src/photovault_api/app.py` (`/v1/client/enroll/bootstrap` returns 503 when token missing)
