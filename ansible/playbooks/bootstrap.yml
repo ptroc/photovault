@@ -21,6 +21,7 @@
           - python3-pip
           - sqlite3
           - sudo
+          - dcraw
         state: present
 
     - name: Ensure photovault group exists

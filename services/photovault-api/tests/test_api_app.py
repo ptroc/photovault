@@ -1592,6 +1592,47 @@ def test_admin_retry_preview_generates_cache_for_raw_via_embedded_preview(
     assert item["preview_failure_detail"] is None
 
 
+def test_admin_retry_preview_generates_cache_for_raw_via_dcraw_fallback_when_embedded_preview_missing(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    image_path = tmp_path / "2026" / "04" / "Job_A" / "raw.raf"
+    image_path.parent.mkdir(parents=True, exist_ok=True)
+    image_path.write_bytes(b"fake-raf-content")
+
+    converted_bytes = _jpeg_with_exif_bytes(width=24, height=16)
+
+    def _raise_missing_embedded_preview(path: Path) -> bytes:
+        raise ValueError("RAW embedded preview unavailable: no embedded preview data found")
+
+    def _fake_find_executable(name: str) -> str | None:
+        if name == "dcraw":
+            return "/usr/local/bin/dcraw"
+        return None
+
+    def _fake_run_external_command(command: list[str]):
+        assert command == ["/usr/local/bin/dcraw", "-c", "-w", str(image_path)]
+        return SimpleNamespace(returncode=0, stdout=converted_bytes, stderr=b"")
+
+    monkeypatch.setattr(app_module, "_extract_raw_embedded_preview_bytes", _raise_missing_embedded_preview)
+    monkeypatch.setattr(app_module, "_find_executable", _fake_find_executable)
+    monkeypatch.setattr(app_module, "_run_external_command", _fake_run_external_command)
+
+    client = TestClient(create_app(storage_root=tmp_path))
+    index_response = client.post("/v1/storage/index")
+    assert index_response.status_code == 200
+
+    retry_response = client.post(
+        "/v1/admin/catalog/preview/retry",
+        json={"relative_path": "2026/04/Job_A/raw.raf"},
+    )
+    assert retry_response.status_code == 200
+    item = retry_response.json()["item"]
+    assert item["preview_status"] == "succeeded"
+    assert item["preview_relative_path"] == "2026/04/Job_A/raw__" + item["sha256_hex"][:12] + "__w1024.jpg"
+    assert item["preview_failure_detail"] is None
+
+
 def test_admin_retry_preview_honors_configured_max_long_edge(tmp_path: Path) -> None:
     image_path = tmp_path / "2026" / "04" / "Job_A" / "large.jpg"
     image_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1692,6 +1733,7 @@ def test_admin_retry_preview_persists_failure_for_raw_embedded_preview_errors(
         raise ValueError("RAW embedded preview unavailable: no embedded preview data found")
 
     monkeypatch.setattr(app_module, "_extract_raw_embedded_preview_bytes", _raise_missing_embedded_preview)
+    monkeypatch.setattr(app_module, "_find_executable", lambda name: None)
 
     client = TestClient(create_app(storage_root=tmp_path))
     index_response = client.post("/v1/storage/index")
@@ -1706,6 +1748,7 @@ def test_admin_retry_preview_persists_failure_for_raw_embedded_preview_errors(
     assert item["preview_status"] == "failed"
     assert item["preview_last_failed_at_utc"] is not None
     assert "RAW embedded preview unavailable" in str(item["preview_failure_detail"])
+    assert "dcraw fallback unavailable" in str(item["preview_failure_detail"])
 
 
 def test_admin_retry_preview_persists_failure_for_unsupported_media(tmp_path: Path) -> None:

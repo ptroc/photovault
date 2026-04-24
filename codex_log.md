@@ -700,3 +700,11 @@ Verification: scripts/deploy_rpi.sh; /bin/zsh -lc "ANISBLE_HOST_KEY_CHECKING=Fal
   Summary: Diagnosed Docker API enrollment 503 and hardened server Compose/docs by making `PHOTOVAULT_API_BOOTSTRAP_TOKEN` a required env var for `photovault-api`; documented the required `.env` entry and explicit 503 behavior when missing.
   Files: deploy/docker/docker-compose.server.yml; docs/server_install_docker_compose.md; codex_log.md
   Verification: manual source validation of bootstrap guard in `services/photovault-api/src/photovault_api/app.py` (`/v1/client/enroll/bootstrap` returns 503 when token missing)
+- UTC: 2026-04-24T15:13:22Z
+  Summary: Added RAW preview converter fallback via `dcraw` in photovault-api. RAW preview generation now keeps embedded-preview extraction first (`exiftool`) and falls back to `dcraw -c -w` when embedded extraction is unavailable/invalid, while preserving explicit failure detail persistence. Added regression coverage for successful `dcraw` fallback and deterministic failure messaging when fallback is unavailable.
+  Files: services/photovault-api/src/photovault_api/app.py; services/photovault-api/tests/test_api_app.py; codex_log.md
+  Verification: source .venv/bin/activate && pytest services/photovault-api/tests/test_api_app.py -k 'raw_via_embedded_preview or dcraw_fallback_when_embedded_preview_missing or raw_embedded_preview_errors'; source .venv/bin/activate && ruff check services/photovault-api/src/photovault_api/app.py services/photovault-api/tests/test_api_app.py
+- UTC: 2026-04-24T15:22:42Z
+  Summary: Updated Ansible bootstrap provisioning to install `dcraw` as part of baseline host packages so RAW preview fallback dependencies are present during host setup.
+  Files: ansible/playbooks/bootstrap.yml; codex_log.md
+  Verification: ansible-playbook --syntax-check ansible/playbooks/bootstrap.yml (failed: command not found in local environment)
