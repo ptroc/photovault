@@ -5,9 +5,12 @@ ENV PYTHONDONTWRITEBYTECODE=1
 
 WORKDIR /opt/photovault
 
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends dcraw \
+    && rm -rf /var/lib/apt/lists/*
+
 # Copy repository content into the image and install project dependencies.
 COPY . /opt/photovault
 
 RUN python -m pip install --upgrade pip \
     && pip install -r requirements.txt
-
