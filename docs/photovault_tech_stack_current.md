@@ -95,12 +95,14 @@ Characteristics:
 - **Flask** (separate app)
 - **Jinja2** templates
 - **Bootstrap** for styling
-- **HTMX** for dynamic updates (polling job states, partial refreshes)
+- **HTMX** for in-page actions, filters, and pagination via fragment swaps
 - Minimal **vanilla JavaScript** (modals, confirmations, small interactions)
 
 Interaction model:
 - UI communicates with API over HTTP
 - UI does not own business logic
+- SSR remains the default; HTMX requests render server-side fragments (`HX-Request`) and keep
+  non-JS full-page fallback behavior.
 
 ---
 
@@ -123,8 +125,7 @@ Responsibilities:
 - **Flask** (only framework on client)
 - **Jinja2** templates
 - **Bootstrap** for layout
-- **HTMX** for live status updates
-- Minimal **vanilla JavaScript** for modals and confirmations
+- Minimal **vanilla JavaScript** for modals, confirmations, and AJAX fragment swaps
 
 Additional responsibility:
 - Networking configuration via **NetworkManager** (`nmcli` / DBus)
@@ -137,6 +138,10 @@ The client UI is control-plane only; all business logic lives in the daemon.
 - The client UI communicates with `photovault-clientd` exclusively via a local HTTP API.
 - The UI does not access SQLite or any other persistence layer directly.
 - All state mutation and validation logic resides in the daemon.
+- SSR remains the default; AJAX requests use `X-Requested-With: XMLHttpRequest` to receive
+  server-rendered fragments, while full-page requests keep existing SSR/redirect fallbacks.
+- AJAX responses include `X-Client-Location` to keep browser history/location aligned with the
+  rendered fragment state.
 
 ---
 
@@ -214,4 +219,3 @@ photovault uses a conservative, well-understood stack:
 - systemd + Ansible for operations
 
 The focus is on reliability, debuggability, and long-term maintainability.
-

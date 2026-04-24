@@ -2262,10 +2262,12 @@ def create_app(
                     original_size_bytes=size_bytes,
                 )
 
-                # Delete the media asset row; ON DELETE CASCADE (Postgres) and the
-                # in-memory delete_media_asset implementation both remove the
-                # extraction, preview, and reject-queue rows automatically.
-                store.delete_media_asset(safe_path)
+                # Remove the stored-file row; duplicates are computed from
+                # api_stored_files, and FK cascade removes dependent catalog rows.
+                # Fallback to media-asset-only cleanup for legacy/inconsistent
+                # states where the stored-file row is already absent.
+                if not store.delete_stored_file(safe_path):
+                    store.delete_media_asset(safe_path)
                 executed.append(safe_path)
             except OSError:
                 skipped.append(safe_path)

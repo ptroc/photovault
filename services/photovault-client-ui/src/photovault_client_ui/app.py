@@ -1183,7 +1183,19 @@ def create_app(
         response.headers["X-Client-Location"] = url_for("index")
         return response
 
-    def _render_jobs(*, selected_filter: str = "active") -> str:
+    def _render_template_response(
+        *,
+        page_template: str,
+        fragment_template: str,
+        context: dict[str, Any],
+        location: str,
+    ) -> Response:
+        template_name = fragment_template if _is_ajax_request() else page_template
+        response = make_response(render_template(template_name, **context))
+        response.headers["X-Client-Location"] = location
+        return response
+
+    def _render_jobs(*, selected_filter: str = "active") -> Response:
         context = _load_daemon_context()
         jobs = [_annotate_job_record(job) for job in context["jobs"]]
         effective_filter = (
@@ -1207,7 +1219,12 @@ def create_app(
                 "active_page": "jobs",
             }
         )
-        return render_template("jobs.html", **context)
+        return _render_template_response(
+            page_template="jobs.html",
+            fragment_template="_jobs_content.html",
+            context=context,
+            location=url_for("jobs_page", filter=effective_filter),
+        )
 
     def _render_job_detail(
         job_id: int,
@@ -1215,7 +1232,7 @@ def create_app(
         action_error: str | None = None,
         action_notice: str | None = None,
         action_notice_pending: bool = False,
-    ) -> str:
+    ) -> Response:
         context = _load_daemon_context()
         selected_job, selected_job_error = _load_selected_job(job_id)
         if selected_job is None:
@@ -1246,7 +1263,12 @@ def create_app(
                 "action_notice_pending": action_notice_pending,
             }
         )
-        return render_template("job_detail.html", **context)
+        return _render_template_response(
+            page_template="job_detail.html",
+            fragment_template="_job_detail_content.html",
+            context=context,
+            location=url_for("job_detail", job_id=job_id),
+        )
 
     def _render_events() -> str:
         context = _load_daemon_context(events_limit=30)
@@ -1266,7 +1288,7 @@ def create_app(
         network_notice: str | None = None,
         ap_form_data: dict[str, str] | None = None,
         sta_form_data: dict[str, str] | None = None,
-    ) -> str:
+    ) -> Response:
         context = _load_daemon_context()
         context.update(
             _load_network_context(
@@ -1282,7 +1304,12 @@ def create_app(
                 "active_page": "network",
             }
         )
-        return render_template("network.html", **context)
+        return _render_template_response(
+            page_template="network.html",
+            fragment_template="_network_content.html",
+            context=context,
+            location=url_for("network_page"),
+        )
 
     def _portal_recheck_notice(snapshot_payload: object, connectivity_check: object) -> str:
         status = ""
@@ -1312,7 +1339,7 @@ def create_app(
         block_device_error: str | None = None,
         block_device_error_detail: str | None = None,
         block_device_notice: str | None = None,
-    ) -> str:
+    ) -> Response:
         context = _load_daemon_context()
         devices: list[dict[str, Any]] = []
         try:
@@ -1355,14 +1382,19 @@ def create_app(
                 "active_page": "block_devices",
             }
         )
-        return render_template("block_devices.html", **context)
+        return _render_template_response(
+            page_template="block_devices.html",
+            fragment_template="_block_devices_content.html",
+            context=context,
+            location=url_for("block_devices_page"),
+        )
 
     @app.get("/")
     def index() -> Response:
         return _render_overview()
 
     @app.get("/jobs")
-    def jobs_page() -> str:
+    def jobs_page() -> Response:
         return _render_jobs(selected_filter=request.args.get("filter", "active"))
 
     @app.get("/events")
@@ -1370,11 +1402,11 @@ def create_app(
         return _render_events()
 
     @app.get("/network")
-    def network_page() -> str:
+    def network_page() -> Response:
         return _render_network()
 
     @app.get("/block-devices")
-    def block_devices_page() -> str:
+    def block_devices_page() -> Response:
         return _render_block_devices()
 
     @app.post("/ingest/jobs")
@@ -1543,6 +1575,22 @@ def create_app(
             )
         except httpx.TimeoutException:
             if return_to and return_to.startswith("/jobs/"):
+                if _is_ajax_request():
+                    try:
+                        job_id = int(return_to.rsplit("/", 1)[-1])
+                    except ValueError:
+                        return _render_overview(
+                            operator_notice="Daemon action is still running. Refreshing status...",
+                            operator_notice_pending=True,
+                            auto_refresh_ms=DEFAULT_TICK_STATUS_REFRESH_MS,
+                        )
+                    return make_response(
+                        _render_job_detail(
+                            job_id,
+                            action_notice="Daemon action is still running. Refreshing status...",
+                            action_notice_pending=True,
+                        )
+                    )
                 return redirect(return_to)
             return _render_overview(
                 operator_notice="Daemon action is still running. Refreshing status...",
@@ -1640,6 +1688,8 @@ def create_app(
             daemon_post(daemon_base_url, "/network/wifi-scan", {})
         except httpx.HTTPError as exc:
             return _render_network(network_error=f"Failed to scan Wi-Fi: {_describe_http_error(exc)}")
+        if _is_ajax_request():
+            return _render_network(network_notice="Triggered Wi-Fi scan and refreshed network status.")
         return redirect(url_for("network_page"))
 
     @app.post("/network/upstream-recheck")
@@ -1742,7 +1792,7 @@ def create_app(
         )
 
     @app.get("/jobs/<int:job_id>")
-    def job_detail(job_id: int) -> str:
+    def job_detail(job_id: int) -> Response:
         return _render_job_detail(job_id)
 
     return app

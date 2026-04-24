@@ -3158,6 +3158,54 @@ def test_execute_without_request_body_drains_whole_queue(tmp_path: Path) -> None
     assert store.is_sha_tombstoned("b" * 64)
 
 
+def test_execute_removes_deleted_asset_from_duplicate_groups(tmp_path: Path) -> None:
+    """Deleting one path from a duplicate SHA group should remove that group
+    from /v1/admin/duplicates when only one file remains."""
+    store = InMemoryUploadStateStore()
+    seen_at = "2026-04-22T11:00:00+00:00"
+    shared_sha = "d" * 64
+    for relative_path in ("2026/04/Job_A/a.jpg", "2026/04/Job_B/b.jpg"):
+        store.upsert_stored_file(
+            relative_path=relative_path,
+            sha256_hex=shared_sha,
+            size_bytes=100,
+            source_kind="upload_verify",
+            seen_at_utc=seen_at,
+        )
+        store.upsert_media_asset(
+            relative_path=relative_path,
+            sha256_hex=shared_sha,
+            size_bytes=100,
+            origin_kind="uploaded",
+            observed_at_utc=seen_at,
+        )
+
+    client = TestClient(create_app(state_store=store, storage_root=tmp_path))
+
+    before = client.get("/v1/admin/duplicates")
+    assert before.status_code == 200
+    assert before.json()["total"] == 1
+    assert before.json()["items"][0]["file_count"] == 2
+
+    # Queue one of the duplicates, then execute delete.
+    mark = client.post(
+        "/v1/admin/catalog/reject",
+        json={"relative_path": "2026/04/Job_A/a.jpg"},
+    )
+    assert mark.status_code == 200
+    execute = client.post(
+        "/v1/admin/catalog/rejects/execute",
+        json={"relative_paths": ["2026/04/Job_A/a.jpg"]},
+    )
+    assert execute.status_code == 200
+    assert execute.json()["executed"] == ["2026/04/Job_A/a.jpg"]
+
+    after = client.get("/v1/admin/duplicates")
+    assert after.status_code == 200
+    assert after.json()["total"] == 0
+    assert after.json()["items"] == []
+
+
 def test_upload_verify_returns_409_for_tombstoned_sha(tmp_path: Path) -> None:
     store = InMemoryUploadStateStore()
     content = b"test content"

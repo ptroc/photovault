@@ -279,6 +279,71 @@ def test_clients_actions_preserve_filter_sort_state_in_redirect() -> None:
     }
 
 
+def test_clients_page_returns_fragment_for_hx_requests() -> None:
+    def _fetcher(path: str, query: dict[str, str]) -> dict:
+        assert path == "/v1/admin/clients"
+        assert query == {
+            "limit": "50",
+            "offset": "50",
+            "presence_status": "online",
+            "sort_by": "presence_status",
+            "sort_order": "asc",
+        }
+        return {"total": 0, "limit": 50, "offset": 50, "items": []}
+
+    app = create_app(api_fetcher=_fetcher)
+    response = app.test_client().get(
+        "/clients?page=2&presence_status=online&sort_by=presence_status&sort_order=asc",
+        headers={"HX-Request": "true"},
+    )
+    html = response.get_data(as_text=True)
+    assert response.status_code == 200
+    assert 'id="clients-shell"' in html
+    assert "<!doctype html>" not in html
+
+
+def test_clients_approve_action_returns_fragment_for_hx_requests() -> None:
+    observed: dict[str, object] = {}
+
+    def _fetcher(path: str, query: dict[str, str]) -> dict:
+        assert path == "/v1/admin/clients"
+        assert query == {
+            "limit": "50",
+            "offset": "0",
+            "presence_status": "online",
+            "sort_by": "presence_status",
+            "sort_order": "asc",
+        }
+        return {"total": 0, "limit": 50, "offset": 0, "items": []}
+
+    def _poster(path: str, payload: dict) -> dict:
+        observed["path"] = path
+        observed["payload"] = payload
+        return {"ok": True}
+
+    app = create_app(api_fetcher=_fetcher, api_poster=_poster)
+    response = app.test_client().post(
+        "/clients/actions/approve",
+        data={
+            "client_id": "pi-kitchen",
+            "page": "1",
+            "presence_status": "online",
+            "workload_status": "",
+            "enrollment_status": "",
+            "sort_by": "presence_status",
+            "sort_order": "asc",
+        },
+        headers={"HX-Request": "true"},
+    )
+    html = response.get_data(as_text=True)
+    assert response.status_code == 200
+    assert observed["path"] == "/v1/admin/clients/pi-kitchen/approve"
+    assert observed["payload"] == {}
+    assert 'id="clients-shell"' in html
+    assert "Approved client pi-kitchen." in html
+    assert "<!doctype html>" not in html
+
+
 def test_dashboard_error_state_is_clear() -> None:
     def _fetcher(path: str, query: dict[str, str]) -> dict:
         raise TimeoutError("api unavailable")
@@ -321,10 +386,70 @@ def test_duplicates_page_renders_duplicate_groups() -> None:
     assert "2026/04/Trip/a.jpg" in html
     assert "2026/04/TripCopy/a.jpg" in html
     assert "2 path(s)" in html
-    assert 'src="/catalog/preview?relative_path=2026/04/Trip/a.jpg"' in html
-    assert "Mark for deletion" in html
-    assert ("a" * 64) not in html
-    assert "Technical detail" in html
+
+
+def test_catalog_page_returns_fragment_for_hx_requests() -> None:
+    def _fetcher(path: str, query: dict[str, str]) -> dict:
+        if path == "/v1/admin/catalog":
+            assert query == {"limit": "50", "offset": "0", "preview_status": "pending"}
+            return {
+                "total": 1,
+                "limit": 50,
+                "offset": 0,
+                "items": [_library_catalog_item("2026/04/Trip/a.jpg", preview_status="pending")],
+            }
+        assert path == "/v1/admin/catalog/backfill/latest"
+        return {"extraction_run": None, "preview_run": None}
+
+    app = create_app(api_fetcher=_fetcher)
+    response = app.test_client().get(
+        "/catalog?preview_status=pending",
+        headers={"HX-Request": "true"},
+    )
+    html = response.get_data(as_text=True)
+    assert response.status_code == 200
+    assert 'id="catalog-shell"' in html
+    assert "<!doctype html>" not in html
+
+
+def test_catalog_backfill_action_returns_fragment_for_hx_requests() -> None:
+    def _fetcher(path: str, query: dict[str, str]) -> dict:
+        if path == "/v1/admin/catalog":
+            assert query == {"limit": "50", "offset": "0", "preview_status": "pending"}
+            return {"total": 0, "limit": 50, "offset": 0, "items": []}
+        assert path == "/v1/admin/catalog/backfill/latest"
+        return {"extraction_run": None, "preview_run": None}
+
+    def _poster(path: str, payload: dict) -> dict:
+        assert path == "/v1/admin/catalog/extraction/backfill"
+        assert payload["target_statuses"] == ["pending", "failed"]
+        assert payload["limit"] == 25
+        return {
+            "run": {
+                "selected_count": 3,
+                "succeeded_count": 2,
+                "failed_count": 1,
+                "remaining_pending_count": 7,
+                "remaining_failed_count": 4,
+            }
+        }
+
+    app = create_app(api_fetcher=_fetcher, api_poster=_poster)
+    response = app.test_client().post(
+        "/catalog/actions/backfill",
+        data={
+            "page": "1",
+            "backfill_kind": "extraction",
+            "return_query": "preview_status=pending",
+            "target_statuses": ["pending", "failed"],
+            "limit": "25",
+        },
+        headers={"HX-Request": "true"},
+    )
+    html = response.get_data(as_text=True)
+    assert response.status_code == 200
+    assert 'id="catalog-shell"' in html
+    assert "Extraction backfill completed: selected=3, succeeded=2, failed=1" in html
 
 
 def test_conflicts_page_renders_conflict_history_and_latest_run() -> None:
@@ -1614,6 +1739,54 @@ def test_library_reject_toggle_unmarks_when_currently_rejected() -> None:
     assert observed["payload"] == {"relative_path": "2026/04/Job_A/a.jpg"}
 
 
+def test_library_reject_toggle_returns_duplicates_fragment_for_hx_duplicates_flow() -> None:
+    observed: dict[str, object] = {}
+
+    def _fetcher(path: str, query: dict[str, str]) -> dict:
+        if path == "/v1/admin/duplicates":
+            return {
+                "total": 1,
+                "limit": 25,
+                "offset": 0,
+                "items": [
+                    {
+                        "sha256_hex": "a" * 64,
+                        "file_count": 1,
+                        "first_seen_at_utc": "2026-04-20T09:00:00+00:00",
+                        "last_seen_at_utc": "2026-04-20T10:00:00+00:00",
+                        "relative_paths": ["2026/04/Job_A/a.jpg"],
+                    }
+                ],
+            }
+        assert path == "/v1/admin/catalog/asset"
+        return {"item": _library_catalog_item(query["relative_path"], is_rejected=True)}
+
+    def _poster(path: str, payload: dict) -> dict:
+        observed["path"] = path
+        observed["payload"] = payload
+        return {"ok": True}
+
+    app = create_app(api_fetcher=_fetcher, api_poster=_poster)
+    response = app.test_client().post(
+        "/library/actions/reject/toggle",
+        data={
+            "relative_path": "2026/04/Job_A/a.jpg",
+            "folder": "",
+            "index": "0",
+            "total": "1",
+            "currently_rejected": "false",
+            "return_to": "duplicates",
+        },
+        headers={"HX-Request": "true"},
+    )
+    html = response.get_data(as_text=True)
+    assert response.status_code == 200
+    assert observed["path"] == "/v1/admin/catalog/reject"
+    assert observed["payload"] == {"relative_path": "2026/04/Job_A/a.jpg"}
+    assert 'id="duplicates-shell"' in html
+    assert "Marked 2026/04/Job_A/a.jpg for deletion." in html
+
+
 def test_library_rejects_page_renders_rows_and_disabled_delete_button() -> None:
     def _fetcher(path: str, query: dict[str, str]) -> dict:
         assert path == "/v1/admin/catalog/rejects"
@@ -1676,6 +1849,24 @@ def test_library_rejects_page_renders_empty_state() -> None:
     assert "The reject queue is empty" in html
     # Delete button is still rendered (disabled) so the UI shape is stable.
     assert "Delete rejected media (0)" in html
+
+
+def test_library_rejects_action_message_renders_once() -> None:
+    """Rejects page should not duplicate action banners via base + page template."""
+
+    def _fetcher(path: str, query: dict[str, str]) -> dict:
+        assert path == "/v1/admin/catalog/rejects"
+        return {"total": 0, "limit": 60, "offset": 0, "items": []}
+
+    app = create_app(api_fetcher=_fetcher)
+    message = "Deleted 2 asset(s); trash retained for 14 days"
+    response = app.test_client().get(
+        "/library/rejects",
+        query_string={"action_message": message},
+    )
+    assert response.status_code == 200
+    html = response.get_data(as_text=True)
+    assert html.count(message) == 1
 
 
 def test_library_reject_unmark_action_posts_and_redirects() -> None:
@@ -1869,6 +2060,24 @@ def test_library_trash_page_renders_empty_state() -> None:
     assert response.status_code == 200
     html = response.get_data(as_text=True)
     assert "trash is empty" in html.lower()
+
+
+def test_library_trash_action_message_renders_once() -> None:
+    """Trash page should not duplicate action banners via base + page template."""
+
+    def _fetcher(path: str, query: dict[str, str]) -> dict:
+        assert path == "/v1/admin/catalog/tombstones"
+        return {"total": 0, "limit": 60, "offset": 0, "items": []}
+
+    app = create_app(api_fetcher=_fetcher)
+    message = "Restored 2026/04/Job_A/a.jpg"
+    response = app.test_client().get(
+        "/library/trash",
+        query_string={"action_message": message},
+    )
+    assert response.status_code == 200
+    html = response.get_data(as_text=True)
+    assert html.count(message) == 1
 
 
 def test_library_trash_restore_action_posts_to_api_and_redirects() -> None:

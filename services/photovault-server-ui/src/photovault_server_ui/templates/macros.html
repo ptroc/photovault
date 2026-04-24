@@ -38,17 +38,35 @@
   {% endif %}
 {%- endmacro %}
 
-{% macro pager(previous_url, next_url, page) -%}
+{% macro pager(previous_url, next_url, page, hx_target=None, hx_push_url=False) -%}
   <nav aria-label="Pagination" class="mt-4">
     <ul class="pagination pagination-sm mb-0">
       <li class="page-item {{ '' if previous_url else 'disabled' }}">
-        <a class="page-link" href="{{ previous_url or '#' }}">Previous</a>
+        <a
+          class="page-link"
+          href="{{ previous_url or '#' }}"
+          {% if previous_url and hx_target %}
+            hx-get="{{ previous_url }}"
+            hx-target="{{ hx_target }}"
+            hx-swap="outerHTML"
+            {% if hx_push_url %}hx-push-url="true"{% endif %}
+          {% endif %}
+        >Previous</a>
       </li>
       <li class="page-item disabled">
         <span class="page-link">Page {{ page }}</span>
       </li>
       <li class="page-item {{ '' if next_url else 'disabled' }}">
-        <a class="page-link" href="{{ next_url or '#' }}">Next</a>
+        <a
+          class="page-link"
+          href="{{ next_url or '#' }}"
+          {% if next_url and hx_target %}
+            hx-get="{{ next_url }}"
+            hx-target="{{ hx_target }}"
+            hx-swap="outerHTML"
+            {% if hx_push_url %}hx-push-url="true"{% endif %}
+          {% endif %}
+        >Next</a>
       </li>
     </ul>
   </nav>

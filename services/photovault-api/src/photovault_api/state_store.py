@@ -293,6 +293,14 @@ class UploadStateStore(Protocol):
 
     def list_stored_files(self, *, limit: int, offset: int) -> tuple[int, list[StoredFileRecord]]: ...
 
+    def delete_stored_file(self, relative_path: str) -> bool:
+        """Remove the stored-file row.
+
+        Backends with FK wiring should cascade this removal to dependent
+        catalog/extraction/preview/reject rows.
+        """
+        ...
+
     def upsert_media_asset(
         self,
         *,
@@ -657,6 +665,18 @@ class InMemoryUploadStateStore:
             ordered = sorted(ordered, key=lambda item: item.last_seen_at_utc, reverse=True)
             total = len(ordered)
             return total, ordered[offset : offset + limit]
+
+    def delete_stored_file(self, relative_path: str) -> bool:
+        """Remove a stored-file row and mirror FK cascade cleanup."""
+        with self._lock:
+            if relative_path not in self.stored_files:
+                return False
+            del self.stored_files[relative_path]
+            self.media_assets.pop(relative_path, None)
+            self.media_asset_extractions.pop(relative_path, None)
+            self.media_asset_previews.pop(relative_path, None)
+            self.media_asset_rejects.pop(relative_path, None)
+            return True
 
     def upsert_media_asset(
         self,
@@ -2147,6 +2167,20 @@ class PostgresUploadStateStore:
                     for row in rows
                 ]
                 return total, records
+
+    def delete_stored_file(self, relative_path: str) -> bool:
+        """Delete a stored-file row; FK cascade removes dependent catalog rows."""
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    DELETE FROM api_stored_files WHERE relative_path = %s;
+                    """,
+                    (relative_path,),
+                )
+                deleted = cur.rowcount > 0
+            conn.commit()
+        return deleted
 
     def upsert_media_asset(
         self,

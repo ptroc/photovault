@@ -96,6 +96,10 @@ The system consists of multiple autonomous **clients** (e.g. Raspberry Pi device
   - Wi-Fi configuration
   - Ingest / upload status
   - Manual actions (retry, verify)
+- Interaction pattern:
+  - SSR-first pages with progressive enhancement
+  - AJAX fragment swaps for high-frequency control actions
+  - Full-page fallback when JavaScript/AJAX is unavailable
 
 ### Server UI
 - Server-side rendered (Flask + Jinja2)
@@ -103,6 +107,10 @@ The system consists of multiple autonomous **clients** (e.g. Raspberry Pi device
   - Global job overview
   - Client status
   - Error and verification monitoring
+- Interaction pattern:
+  - SSR-first pages
+  - HTMX-driven fragment updates for actions, filters, and pagination
+  - Full-page fallback remains available for all interactive flows
 
 ---
 

@@ -65,6 +65,38 @@ def test_in_memory_upsert_media_asset_preserves_origin_and_first_cataloged_metad
     assert row.image_width is None
 
 
+def test_in_memory_delete_stored_file_cascades_media_rows() -> None:
+    from photovault_api.state_store import InMemoryUploadStateStore
+
+    store = InMemoryUploadStateStore()
+    observed_at = "2026-04-20T12:01:00+00:00"
+    store.upsert_stored_file(
+        relative_path="2026/04/job/photo.jpg",
+        sha256_hex="a" * 64,
+        size_bytes=12,
+        source_kind="index_scan",
+        seen_at_utc=observed_at,
+    )
+    store.upsert_media_asset(
+        relative_path="2026/04/job/photo.jpg",
+        sha256_hex="a" * 64,
+        size_bytes=12,
+        origin_kind="uploaded",
+        observed_at_utc=observed_at,
+    )
+    store.add_catalog_reject(
+        relative_path="2026/04/job/photo.jpg",
+        marked_at_utc=observed_at,
+        marked_reason="duplicate",
+    )
+
+    deleted = store.delete_stored_file("2026/04/job/photo.jpg")
+    assert deleted is True
+    assert store.get_stored_file_by_path("2026/04/job/photo.jpg") is None
+    assert store.get_media_asset_by_path("2026/04/job/photo.jpg") is None
+    assert store.is_catalog_reject("2026/04/job/photo.jpg") is False
+
+
 def test_in_memory_media_asset_extraction_updates_status_and_metadata() -> None:
     from photovault_api.state_store import InMemoryUploadStateStore
 
@@ -802,6 +834,48 @@ def test_postgres_upsert_stored_file_uses_latest_metadata_but_preserves_first_se
     assert "ON CONFLICT (relative_path) DO UPDATE" in query
     assert "last_seen_at_utc = EXCLUDED.last_seen_at_utc" in query
     assert "first_seen_at_utc = EXCLUDED.first_seen_at_utc" not in query
+    assert observed["committed"] is True
+
+
+def test_postgres_delete_stored_file_deletes_from_stored_files_table() -> None:
+    observed: dict[str, object] = {}
+
+    class _FakeCursor:
+        rowcount = 1
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def execute(self, query: str, params: tuple[object, ...]) -> None:
+            observed["query"] = query
+            observed["params"] = params
+
+    class _FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def cursor(self) -> _FakeCursor:
+            return _FakeCursor()
+
+        def commit(self) -> None:
+            observed["committed"] = True
+
+    class _TestStore(PostgresUploadStateStore):
+        def _connect(self):  # type: ignore[override]
+            return _FakeConnection()
+
+    store = _TestStore(database_url="postgresql://unused")
+    deleted = store.delete_stored_file("2026/04/job/photo.jpg")
+
+    assert deleted is True
+    assert "DELETE FROM api_stored_files" in str(observed["query"])
+    assert observed["params"] == ("2026/04/job/photo.jpg",)
     assert observed["committed"] is True
 
 

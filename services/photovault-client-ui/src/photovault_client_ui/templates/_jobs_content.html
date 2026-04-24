@@ -1,0 +1,140 @@
+{% from "macros.html" import state_badge %}
+<section id="jobs-shell">
+  <section class="card surface-card mb-4">
+    <div class="card-body">
+      <div class="d-flex flex-column flex-lg-row justify-content-between gap-3 align-items-lg-end">
+        <div>
+          <div class="eyebrow text-uppercase text-secondary fw-semibold small mb-2">Jobs</div>
+          <h2 class="card-title h3 mb-1">Jobs</h2>
+          <p class="muted-help mb-0">Scan by workload class, then open details for file-level action.</p>
+        </div>
+        <ul class="nav nav-pills flex-wrap gap-2">
+          <li class="nav-item"><a class="nav-link {% if job_filter == 'active' %}active{% endif %}" href="/jobs?filter=active" data-ajax-target="#jobs-shell">Active ({{ job_filter_counts.active }})</a></li>
+          <li class="nav-item"><a class="nav-link {% if job_filter == 'waiting' %}active{% endif %}" href="/jobs?filter=waiting" data-ajax-target="#jobs-shell">Waiting ({{ job_filter_counts.waiting }})</a></li>
+          <li class="nav-item"><a class="nav-link {% if job_filter == 'blocked' %}active{% endif %}" href="/jobs?filter=blocked" data-ajax-target="#jobs-shell">Blocked ({{ job_filter_counts.blocked }})</a></li>
+          <li class="nav-item"><a class="nav-link {% if job_filter == 'completed' %}active{% endif %}" href="/jobs?filter=completed" data-ajax-target="#jobs-shell">Completed ({{ job_filter_counts.completed }})</a></li>
+          <li class="nav-item"><a class="nav-link {% if job_filter == 'all' %}active{% endif %}" href="/jobs?filter=all" data-ajax-target="#jobs-shell">All ({{ job_filter_counts.all }})</a></li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section class="d-grid gap-3">
+    {% if jobs %}
+      {% for job in jobs %}
+      <article class="card job-card">
+        <div class="card-body">
+          <div class="d-flex flex-column flex-lg-row justify-content-between gap-3 mb-3">
+            <div>
+              <strong><a href="/jobs/{{ job.job_id }}" data-ajax-target="#jobs-shell">Job #{{ job.job_id }}</a></strong>
+              <div class="text-secondary small">{{ job.media_label }}</div>
+            </div>
+            {{ state_badge('blocked' if job.m2.paused_on_error else ('completed' if job.m2.remote_complete else 'active'), job.m2.operation_state_label) }}
+          </div>
+
+          <div class="mb-3">
+            <div class="d-flex justify-content-between gap-3 small mb-2">
+              <span>Transfer progress</span>
+              <strong>{{ job.operator_view.transferred_file_count }} transferred / {{ job.operator_view.total_file_count }} total</strong>
+            </div>
+            <div class="job-progress-bar d-flex" aria-label="transfer progress">
+              {% if job.operator_view.uploaded_percent > 0 %}
+              <span class="job-progress-segment uploaded" style="width: {{ '%.2f'|format(job.operator_view.uploaded_percent) }}%;"></span>
+              {% endif %}
+              {% if job.operator_view.ignored_percent > 0 %}
+              <span class="job-progress-segment ignored" style="width: {{ '%.2f'|format(job.operator_view.ignored_percent) }}%;"></span>
+              {% endif %}
+              {% if job.operator_view.failed_percent > 0 %}
+              <span class="job-progress-segment failed" style="width: {{ '%.2f'|format(job.operator_view.failed_percent) }}%;"></span>
+              {% endif %}
+              {% if job.operator_view.pending_percent > 0 %}
+              <span class="job-progress-segment pending" style="width: {{ '%.2f'|format(job.operator_view.pending_percent) }}%;"></span>
+              {% endif %}
+              {% if job.operator_view.total_file_count == 0 %}
+              <span class="job-progress-segment pending w-100"></span>
+              {% endif %}
+            </div>
+            <div class="small text-secondary mt-2">
+              uploaded {{ job.operator_view.transferred_file_count }} |
+              ignored {{ job.operator_view.ignored_file_count }} |
+              errors {{ job.operator_view.failed_file_count }} |
+              pending {{ job.operator_view.pending_file_count }}
+            </div>
+          </div>
+
+          <div class="row row-cols-2 row-cols-xl-6 g-3 mb-3">
+            <div class="col">
+              <div class="card metric-card h-100">
+                <div class="card-body">
+                  <div class="small text-secondary text-uppercase fw-semibold">Daemon status</div>
+                  <div class="fw-semibold">{{ job.status|replace('_', ' ')|lower|capitalize }}</div>
+                </div>
+              </div>
+            </div>
+            <div class="col">
+              <div class="card metric-card h-100">
+                <div class="card-body">
+                  <div class="small text-secondary text-uppercase fw-semibold">Current phase</div>
+                  <div class="fw-semibold">{{ job.operator_view.phase_label }}</div>
+                </div>
+              </div>
+            </div>
+            <div class="col">
+              <div class="card metric-card h-100">
+                <div class="card-body">
+                  <div class="small text-secondary text-uppercase fw-semibold">Transferred files</div>
+                  <div class="fw-semibold">{{ job.operator_view.transferred_file_count }}</div>
+                </div>
+              </div>
+            </div>
+            <div class="col">
+              <div class="card metric-card h-100">
+                <div class="card-body">
+                  <div class="small text-secondary text-uppercase fw-semibold">Pending files</div>
+                  <div class="fw-semibold">{{ job.operator_view.pending_file_count }}</div>
+                </div>
+              </div>
+            </div>
+            <div class="col">
+              <div class="card metric-card h-100">
+                <div class="card-body">
+                  <div class="small text-secondary text-uppercase fw-semibold">Retrying files</div>
+                  <div class="fw-semibold">{{ job.operator_view.retrying_file_count }}</div>
+                </div>
+              </div>
+            </div>
+            <div class="col">
+              <div class="card metric-card h-100">
+                <div class="card-body">
+                  <div class="small text-secondary text-uppercase fw-semibold">Cleanup staging</div>
+                  <div class="fw-semibold">{{ job.m2.cleanup_label }}</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="alert {% if job.operator_view.requires_operator_action %}alert-danger{% elif job.status == 'WAIT_NETWORK' %}alert-warning{% else %}alert-success{% endif %} mb-3" role="alert">
+            <strong>Next action</strong>
+            <div>{{ job.operator_view.next_action }}</div>
+            <div class="mt-1">{{ job.operator_view.completion_summary }}</div>
+            <div class="mt-1">{{ job.operator_view.wait_summary }}</div>
+            {% if job.operator_view.retry_backoff_active or job.operator_view.retry_exhausted_file_count > 0 %}
+            <div class="mt-1">{{ job.operator_view.retry_summary }}</div>
+            {% endif %}
+          </div>
+
+          <div class="d-flex flex-wrap gap-2">
+            <a class="btn btn-outline-primary btn-sm" href="/jobs/{{ job.job_id }}" data-ajax-target="#jobs-shell">Open job detail</a>
+          </div>
+        </div>
+      </article>
+      {% endfor %}
+    {% else %}
+      <section class="card surface-card">
+        <div class="card-body">
+          <p class="muted-help mb-0">No jobs match this filter.</p>
+        </div>
+      </section>
+    {% endif %}
+  </section>
+</section>

@@ -18,8 +18,8 @@ services:
       PHOTOVAULT_API_PREVIEW_MAX_LONG_EDGE: "${PHOTOVAULT_API_PREVIEW_MAX_LONG_EDGE:-1024}"
       PHOTOVAULT_API_PREVIEW_PASSTHROUGH_SUFFIXES: "${PHOTOVAULT_API_PREVIEW_PASSTHROUGH_SUFFIXES:-}"
       PHOTOVAULT_API_PREVIEW_PLACEHOLDER_SUFFIXES: "${PHOTOVAULT_API_PREVIEW_PLACEHOLDER_SUFFIXES:-}"
-    ports:
-      - "9301:9301"
+    expose:
+      - "9301"
     volumes:
       - ${PHOTOVAULT_STORAGE_HOST_ROOT:-/var/storage}:${PHOTOVAULT_STORAGE_CONTAINER_ROOT:-/var/storage}
     healthcheck:
@@ -42,8 +42,8 @@ services:
       PYTHONUNBUFFERED: "1"
       PYTHONDONTWRITEBYTECODE: "1"
       PHOTOVAULT_SERVER_UI_API_BASE_URL: "http://photovault-api:9301"
-    ports:
-      - "9401:9401"
+    expose:
+      - "9401"
     volumes:
       - ${PHOTOVAULT_STORAGE_HOST_ROOT:-/var/storage}:${PHOTOVAULT_STORAGE_CONTAINER_ROOT:-/var/storage}
     depends_on:
@@ -51,6 +51,26 @@ services:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9401/').read()"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  photovault-nginx:
+    image: nginx:1.27-alpine
+    container_name: photovault-nginx
+    restart: unless-stopped
+    ports:
+      - "${PHOTOVAULT_NGINX_HTTP_PORT:-80}:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./nginx/server-ui.htpasswd:/etc/nginx/conf.d/server-ui.htpasswd:ro
+    depends_on:
+      photovault-api:
+        condition: service_healthy
+      photovault-server-ui:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO", "-", "http://127.0.0.1/healthz"]
       interval: 10s
       timeout: 5s
       retries: 5

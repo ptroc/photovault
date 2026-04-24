@@ -1,9 +1,10 @@
-# photovault Server Install via Docker Compose (External PostgreSQL)
+# photovault Server Install via Docker Compose (External PostgreSQL + Nginx)
 
-This guide runs the server-side photovault services in Docker containers using Docker Compose as a wrapper:
+This guide runs server-side photovault services in Docker containers with Nginx as a reverse proxy:
 
-- `photovault-api` on host port `9301`
-- `photovault-server-ui` on host port `9401`
+- `photovault-nginx` on host port `80` (configurable)
+- `photovault-api` on internal Compose port `9301`
+- `photovault-server-ui` on internal Compose port `9401`
 
 Assumptions:
 
@@ -51,7 +52,7 @@ sudo mkdir -p /storage/photovault
 ```
 
 Note: the compose file uses env-based bind mount variables:
-`PHOTOVAULT_STORAGE_HOST_ROOT` → `PHOTOVAULT_STORAGE_CONTAINER_ROOT`.
+`PHOTOVAULT_STORAGE_HOST_ROOT` -> `PHOTOVAULT_STORAGE_CONTAINER_ROOT`.
 
 ## 4. Configure environment file for external PostgreSQL
 
@@ -68,6 +69,8 @@ PHOTOVAULT_API_STORAGE_ROOT=/var/storage
 PHOTOVAULT_API_PREVIEW_MAX_LONG_EDGE=2048
 PHOTOVAULT_API_PREVIEW_PASSTHROUGH_SUFFIXES=.jpg,.jpeg
 PHOTOVAULT_API_PREVIEW_PLACEHOLDER_SUFFIXES=.avi,.mp4
+# Optional: override if host port 80 is already in use.
+PHOTOVAULT_NGINX_HTTP_PORT=80
 ENV
 ```
 
@@ -81,7 +84,23 @@ and are served as original files by the preview endpoint.
 `PHOTOVAULT_API_PREVIEW_PLACEHOLDER_SUFFIXES` is optional; listed suffixes skip preview generation
 and stay in placeholder mode.
 
-## 5. Build and start services with Docker Compose
+## 5. Create server UI basic auth file
+
+Create `deploy/docker/nginx/server-ui.htpasswd` on the host:
+
+```bash
+cd /opt/photovault/deploy/docker/nginx
+cp server-ui.htpasswd.example server-ui.htpasswd
+```
+
+Then replace the sample credentials with your own bcrypt/apr1 hash:
+
+```bash
+printf 'admin:%s\n' "$(openssl passwd -apr1 'change-me-now')" > /opt/photovault/deploy/docker/nginx/server-ui.htpasswd
+chmod 600 /opt/photovault/deploy/docker/nginx/server-ui.htpasswd
+```
+
+## 6. Build and start services with Docker Compose
 
 ```bash
 cd /opt/photovault/deploy/docker
@@ -92,26 +111,29 @@ The compose file is at:
 
 - `/opt/photovault/deploy/docker/docker-compose.server.yml`
 
-## 6. Verify container health
+## 7. Verify container health
 
 ```bash
 sudo docker compose -f /opt/photovault/deploy/docker/docker-compose.server.yml ps
 sudo docker compose -f /opt/photovault/deploy/docker/docker-compose.server.yml logs --tail=100 photovault-api
 sudo docker compose -f /opt/photovault/deploy/docker/docker-compose.server.yml logs --tail=100 photovault-server-ui
+sudo docker compose -f /opt/photovault/deploy/docker/docker-compose.server.yml logs --tail=100 photovault-nginx
 ```
 
 Local HTTP verification:
 
 ```bash
-curl -fsS http://127.0.0.1:9301/healthz
-curl -fsS http://127.0.0.1:9401/ >/dev/null && echo "server-ui: ok"
+curl -fsS http://127.0.0.1/healthz
+curl -fsS -u admin:change-me-now http://127.0.0.1/ >/dev/null && echo "server-ui: ok"
+curl -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1/v1/admin/overview
 ```
 
 Expected:
 
-- API returns JSON like `{"status":"ok"}`
-- Server UI responds on `/`
-- Server UI proxies its overview/files data from `http://photovault-api:9301` inside Compose
+- `/healthz` returns JSON like `{"status":"ok"}`
+- Server UI responds on `/` when basic auth credentials are provided
+- `/v1/admin/overview` returns `401` without basic auth
+- Client daemon endpoints under `/v1/client/*` and `/v1/upload/*` stay reachable for token-authenticated client traffic
 
 Run the explicit M4 smoke check inside the API container:
 
@@ -127,7 +149,7 @@ Expected:
 - the deterministic smoke fixture is indexed under `_photovault_smoke/m4/manual-smoke.txt`
 - unauthenticated metadata handshake is rejected with `CLIENT_AUTH_REQUIRED`
 
-## 7. Day-2 operations
+## 8. Day-2 operations
 
 Restart:
 
@@ -158,4 +180,4 @@ sudo docker compose --env-file .env -f docker-compose.server.yml up -d --build -
 - If health checks stay unhealthy, inspect logs with `docker compose logs` and test DB connectivity separately.
 - If container health is green but M4 smoke fails, verify the bind-mounted storage path is the
   same path configured in `PHOTOVAULT_API_STORAGE_ROOT` and is writable inside the container.
-- If remote access fails, verify host firewall allows `9301` and `9401`.
+- If remote access fails, verify host firewall allows the configured Nginx port (`PHOTOVAULT_NGINX_HTTP_PORT`, default `80`).

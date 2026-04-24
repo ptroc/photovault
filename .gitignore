@@ -74,6 +74,7 @@ secrets/
 # Generated or local override units
 *.service.local
 *.override.conf
+deploy/docker/nginx/server-ui.htpasswd
 
 # =========================
 # Frontend (if any later)

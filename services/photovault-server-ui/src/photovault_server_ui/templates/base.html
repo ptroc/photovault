@@ -56,14 +56,16 @@
     </nav>
 
     <main class="container-xxl py-4 py-lg-5">
-      {% if error_message %}
-      <div class="alert alert-danger shadow-sm" role="alert">{{ error_message }}</div>
-      {% endif %}
-      {% if action_error %}
-      <div class="alert alert-danger shadow-sm" role="alert">{{ action_error }}</div>
-      {% endif %}
-      {% if action_message %}
-      <div class="alert alert-success shadow-sm" role="alert">{{ action_message }}</div>
+      {% if not suppress_layout_alerts %}
+        {% if error_message %}
+        <div class="alert alert-danger shadow-sm" role="alert">{{ error_message }}</div>
+        {% endif %}
+        {% if action_error %}
+        <div class="alert alert-danger shadow-sm" role="alert">{{ action_error }}</div>
+        {% endif %}
+        {% if action_message %}
+        <div class="alert alert-success shadow-sm" role="alert">{{ action_message }}</div>
+        {% endif %}
       {% endif %}
       {% block content %}{% endblock %}
     </main>

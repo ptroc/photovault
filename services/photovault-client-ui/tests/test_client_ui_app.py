@@ -534,6 +534,30 @@ def test_jobs_page_renders_filtered_views() -> None:
     assert "Job #3" in completed
 
 
+def test_jobs_filter_returns_fragment_for_ajax_requests() -> None:
+    payloads = _overview_payloads()
+
+    def fake_daemon_get(_: str, path: str) -> object:
+        return payloads[path]
+
+    app = create_app(
+        daemon_get=fake_daemon_get,
+        network_snapshot_get=_network_snapshot,
+        dependency_snapshot_get=_dependency_snapshot,
+    )
+    response = app.test_client().get(
+        "/jobs?filter=blocked",
+        headers={"X-Requested-With": "XMLHttpRequest"},
+    )
+    body = response.get_data(as_text=True)
+
+    assert response.status_code == 200
+    assert response.headers["X-Client-Location"].endswith("/jobs?filter=blocked")
+    assert 'id="jobs-shell"' in body
+    assert "<!doctype html>" not in body
+    assert "Job #1" in body
+
+
 def test_derive_job_operator_view_reports_transferred_and_pending_file_counts() -> None:
     operator_view = _derive_job_operator_view(
         {
@@ -698,6 +722,37 @@ def test_block_device_mount_action_routes_to_daemon_endpoint() -> None:
     assert response.status_code == 200
     assert observed["path"] == "/block-devices/mount"
     assert observed["payload"] == {"device_path": "/dev/sda1"}
+    assert "Mounted /dev/sda1 at /mnt/sda_1." in body
+
+
+def test_block_device_mount_action_returns_fragment_for_ajax_requests() -> None:
+    payloads = _overview_payloads(daemon_state="IDLE")
+
+    def fake_daemon_get(_: str, path: str) -> object:
+        return payloads[path]
+
+    def fake_daemon_post(_: str, path: str, payload: dict[str, object]) -> object:
+        assert path == "/block-devices/mount"
+        assert payload == {"device_path": "/dev/sda1"}
+        return {"device_path": "/dev/sda1", "mount_path": "/mnt/sda_1"}
+
+    app = create_app(
+        daemon_get=fake_daemon_get,
+        daemon_post=fake_daemon_post,
+        network_snapshot_get=_network_snapshot,
+        dependency_snapshot_get=_dependency_snapshot,
+    )
+    response = app.test_client().post(
+        "/actions/block-devices/mount",
+        data={"device_path": "/dev/sda1"},
+        headers={"X-Requested-With": "XMLHttpRequest"},
+    )
+    body = response.get_data(as_text=True)
+
+    assert response.status_code == 200
+    assert response.headers["X-Client-Location"].endswith("/block-devices")
+    assert 'id="block-devices-shell"' in body
+    assert "<!doctype html>" not in body
     assert "Mounted /dev/sda1 at /mnt/sda_1." in body
 
 
@@ -977,6 +1032,34 @@ def test_network_page_and_errors_render() -> None:
     )
     scan_error_body = app_with_scan_error.test_client().post("/network/scan").get_data(as_text=True)
     assert "Failed to scan Wi-Fi: daemon API returned HTTP 503" in scan_error_body
+
+
+def test_network_scan_returns_fragment_for_ajax_requests() -> None:
+    payloads = _overview_payloads()
+
+    def fake_daemon_get(_: str, path: str) -> object:
+        return payloads[path]
+
+    def fake_daemon_post(_: str, path: str, payload: dict[str, object]) -> object:
+        assert path == "/network/wifi-scan"
+        assert payload == {}
+        return {"ok": True}
+
+    app = create_app(
+        daemon_get=fake_daemon_get,
+        daemon_post=fake_daemon_post,
+        dependency_snapshot_get=_dependency_snapshot,
+    )
+    response = app.test_client().post(
+        "/network/scan",
+        headers={"X-Requested-With": "XMLHttpRequest"},
+    )
+    body = response.get_data(as_text=True)
+
+    assert response.status_code == 200
+    assert response.headers["X-Client-Location"].endswith("/network")
+    assert 'id="network-shell"' in body
+    assert "Triggered Wi-Fi scan and refreshed network status." in body
 
 
 def test_network_page_renders_captive_portal_guidance() -> None:
