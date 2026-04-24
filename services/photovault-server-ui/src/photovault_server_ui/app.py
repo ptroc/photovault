@@ -54,7 +54,7 @@ def _catalog_metadata_summary(item: dict[str, Any]) -> str:
     metadata_bits: list[str] = []
     capture = item.get("capture_timestamp_utc")
     if capture:
-        metadata_bits.append(f"captured {capture}")
+        metadata_bits.append(f"captured {_format_timestamp_inline(str(capture))}")
     make = (item.get("camera_make") or "").strip()
     model = (item.get("camera_model") or "").strip()
     if make or model:
@@ -149,6 +149,41 @@ def _format_sha_for_display(value: str | None, chunk_size: int = 8) -> str:
     if not value:
         return "n/a"
     return " ".join(value[index : index + chunk_size] for index in range(0, len(value), chunk_size))
+
+
+def _timestamp_parts(value: str | None) -> dict[str, str] | None:
+    raw_value = (value or "").strip()
+    if not raw_value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw_value.replace("Z", "+00:00"))
+    except ValueError:
+        if "T" not in raw_value:
+            return {"date": raw_value, "time": ""}
+        date_part, time_part = raw_value.split("T", 1)
+        return {"date": date_part, "time": time_part}
+
+    date_part = parsed.date().isoformat()
+    time_part = parsed.strftime("%H:%M:%S")
+    if parsed.tzinfo is not None:
+        offset = parsed.utcoffset()
+        if offset == timezone.utc.utcoffset(parsed):
+            time_part = f"{time_part} UTC"
+        else:
+            offset_text = parsed.strftime("%z")
+            if offset_text:
+                offset_text = f"{offset_text[:3]}:{offset_text[3:]}"
+                time_part = f"{time_part} {offset_text}"
+    return {"date": date_part, "time": time_part}
+
+
+def _format_timestamp_inline(value: str | None) -> str:
+    parts = _timestamp_parts(value)
+    if not parts:
+        return "n/a"
+    if not parts["time"]:
+        return parts["date"]
+    return f"{parts['date']} {parts['time']}"
 
 
 def _count_client_summary(items: list[dict[str, Any]]) -> dict[str, int]:
@@ -263,9 +298,61 @@ def _decorate_catalog_item(item: dict[str, Any]) -> dict[str, Any]:
     return item
 
 
+def _fallback_catalog_asset(relative_path: str) -> dict[str, Any]:
+    item = {
+        "relative_path": relative_path,
+        "sha256_hex": "",
+        "size_bytes": 0,
+        "media_type": "unknown",
+        "preview_capability": "not_previewable",
+        "origin_kind": "indexed",
+        "last_observed_origin_kind": "indexed",
+        "provenance_job_name": None,
+        "provenance_original_filename": PurePosixPath(relative_path).name,
+        "first_cataloged_at_utc": None,
+        "last_cataloged_at_utc": None,
+        "extraction_status": "unknown",
+        "extraction_last_attempted_at_utc": None,
+        "extraction_last_succeeded_at_utc": None,
+        "extraction_last_failed_at_utc": None,
+        "extraction_failure_detail": None,
+        "preview_status": "pending",
+        "preview_relative_path": None,
+        "preview_last_attempted_at_utc": None,
+        "preview_last_succeeded_at_utc": None,
+        "preview_last_failed_at_utc": None,
+        "preview_failure_detail": None,
+        "is_favorite": False,
+        "is_archived": False,
+        "is_rejected": False,
+        "capture_timestamp_utc": None,
+        "camera_make": None,
+        "camera_model": None,
+        "image_width": None,
+        "image_height": None,
+        "orientation": None,
+        "lens_model": None,
+    }
+    return _decorate_catalog_item(item)
+
+
+def _fetch_catalog_asset_for_display(
+    fetcher: ApiFetcher, relative_path: str
+) -> dict[str, Any]:
+    try:
+        payload = fetcher("/v1/admin/catalog/asset", {"relative_path": relative_path})
+    except (URLError, TimeoutError, ValueError):
+        return _fallback_catalog_asset(relative_path)
+    item = dict(payload.get("item") or {})
+    if not item:
+        return _fallback_catalog_asset(relative_path)
+    return _decorate_catalog_item(item)
+
+
 def create_app(*, api_fetcher: ApiFetcher | None = None, api_poster: ApiPoster | None = None) -> Flask:
     app = Flask(__name__)
     app.jinja_env.globals["format_sha_for_display"] = _format_sha_for_display
+    app.jinja_env.globals["timestamp_parts"] = _timestamp_parts
     fetcher = api_fetcher or _default_api_fetcher
     poster = api_poster or _default_api_poster
     page_size = 50
@@ -532,6 +619,8 @@ def create_app(*, api_fetcher: ApiFetcher | None = None, api_poster: ApiPoster |
 
     @app.get("/duplicates")
     def duplicates() -> str:
+        action_message = request.args.get("action_message")
+        action_error = request.args.get("action_error")
         error_message: str | None = None
         try:
             payload = fetcher("/v1/admin/duplicates", {"limit": str(insight_page_size), "offset": "0"})
@@ -542,11 +631,17 @@ def create_app(*, api_fetcher: ApiFetcher | None = None, api_poster: ApiPoster |
         groups = list(payload.get("items", []))
         for group in groups:
             group["sha256_display"] = _format_sha_for_display(str(group.get("sha256_hex") or ""))
+            group["assets"] = [
+                _fetch_catalog_asset_for_display(fetcher, relative_path)
+                for relative_path in list(group.get("relative_paths") or [])
+            ]
         return render_template(
             "duplicates.html",
             groups=groups,
             total=int(payload.get("total", 0)),
             error_message=error_message,
+            action_message=action_message,
+            action_error=action_error,
             active_page="duplicates",
         )
 
@@ -936,6 +1031,7 @@ def create_app(*, api_fetcher: ApiFetcher | None = None, api_poster: ApiPoster |
             total = max(1, int(request.form.get("total", "1")))
         except ValueError:
             total = 1
+        return_to = request.form.get("return_to", "library").strip() or "library"
         currently_rejected = (
             request.form.get("currently_rejected", "false").strip().lower() == "true"
         )
@@ -944,6 +1040,7 @@ def create_app(*, api_fetcher: ApiFetcher | None = None, api_poster: ApiPoster |
             return _library_reject_toggle_fallback(
                 action_error="Missing catalog relative path for reject toggle.",
                 folder=folder,
+                return_to=return_to,
             )
 
         endpoint = (
@@ -957,9 +1054,17 @@ def create_app(*, api_fetcher: ApiFetcher | None = None, api_poster: ApiPoster |
                     f"Failed to {'unmark' if currently_rejected else 'mark'} reject for {relative_path}."
                 ),
                 folder=folder,
+                return_to=return_to,
             )
 
         if request.headers.get("HX-Request", "").lower() != "true":
+            if return_to == "duplicates":
+                action_message = (
+                    f"Restored {relative_path} from the delete queue."
+                    if currently_rejected
+                    else f"Marked {relative_path} for deletion."
+                )
+                return redirect(url_for("duplicates", action_message=action_message))
             target = "/library"
             if folder:
                 target = f"{target}?folder={urlencode({'': folder})[1:]}"
@@ -986,7 +1091,9 @@ def create_app(*, api_fetcher: ApiFetcher | None = None, api_poster: ApiPoster |
             total=total,
         )
 
-    def _library_reject_toggle_fallback(*, action_error: str, folder: str):
+    def _library_reject_toggle_fallback(*, action_error: str, folder: str, return_to: str):
+        if return_to == "duplicates":
+            return redirect(url_for("duplicates", action_error=action_error))
         target = "/library"
         query_parts: list[str] = []
         if folder:
@@ -1262,6 +1369,16 @@ def create_app(*, api_fetcher: ApiFetcher | None = None, api_poster: ApiPoster |
         except (URLError, TimeoutError, ValueError):
             reject_queue_count = 0
 
+        # Trash count drives the secondary header pill. Same best-effort logic.
+        trash_count = 0
+        try:
+            trash_payload = fetcher(
+                "/v1/admin/catalog/tombstones", {"limit": "1", "offset": "0"}
+            )
+            trash_count = int(trash_payload.get("total", 0))
+        except (URLError, TimeoutError, ValueError):
+            trash_count = 0
+
         total = int(payload.get("total", 0))
         items = list(payload.get("items", []))
         for item in items:
@@ -1301,6 +1418,7 @@ def create_app(*, api_fetcher: ApiFetcher | None = None, api_poster: ApiPoster |
             previous_url=previous_url,
             next_url=next_url,
             reject_queue_count=reject_queue_count,
+            trash_count=trash_count,
             error_message=error_message,
             active_page="library",
         )
@@ -1379,12 +1497,9 @@ def create_app(*, api_fetcher: ApiFetcher | None = None, api_poster: ApiPoster |
 
     @app.get("/library/rejects")
     def library_rejects() -> str:
-        """Phase 3.B review page. Grid of assets in the reject queue with
-        per-row Restore and a top "Delete rejected media" button. The delete
-        button is deliberately disabled here — wiring the execute path is
-        Phase 3.C's job. Rendering the page without the execute wiring keeps
-        the triage UX available while still forcing a separate code review
-        pass before anything destructive ships.
+        """Phase 3.C review page. Grid of assets in the reject queue with
+        per-row Restore and a top "Delete rejected media" button. Wiring for
+        the destructive execute action is complete as of Phase 3.C.
         """
 
         raw_page = request.args.get("page", "1")
@@ -1394,6 +1509,7 @@ def create_app(*, api_fetcher: ApiFetcher | None = None, api_poster: ApiPoster |
             page = 1
         page_size = 60
         offset = (page - 1) * page_size
+        action_message = request.args.get("action_message")
 
         error_message: str | None = None
         try:
@@ -1446,6 +1562,7 @@ def create_app(*, api_fetcher: ApiFetcher | None = None, api_poster: ApiPoster |
             previous_url=previous_url,
             next_url=next_url,
             error_message=error_message,
+            action_message=action_message,
             active_page="library",
         )
 
@@ -1472,6 +1589,104 @@ def create_app(*, api_fetcher: ApiFetcher | None = None, api_poster: ApiPoster |
             # Non-fatal; the page will re-fetch and show whatever the API says.
             return redirect(url_for("library_rejects", page=page))
         return redirect(url_for("library_rejects", page=page))
+
+    @app.post("/library/actions/rejects/execute")
+    def library_rejects_execute_action():
+        """Execute delete action for Phase 3.C reject queue execution.
+
+        Posts to the API's /v1/admin/catalog/rejects/execute endpoint and
+        redirects back to /library/rejects with a success message.
+        """
+
+        try:
+            result = poster("/v1/admin/catalog/rejects/execute", {"relative_paths": None})
+            executed_count = len(result.get("executed", []))
+            message = f"Deleted {executed_count} asset(s); trash retained for 14 days"
+        except (URLError, TimeoutError, ValueError):
+            message = "Error executing delete; check server logs"
+
+        return redirect(url_for("library_rejects", page=1, action_message=message))
+
+    # ---------- Phase 3.D: trash triage page --------------------------------
+
+    @app.get("/library/trash")
+    def library_trash() -> str:
+        """Trash triage page — shows soft-deleted assets still within the
+        14-day retention window. Reviewers can restore individual assets or
+        leave them to be purged by the cron script.
+        """
+
+        raw_page = request.args.get("page", "1")
+        try:
+            page = max(1, int(raw_page))
+        except ValueError:
+            page = 1
+        page_size = 60
+        offset = (page - 1) * page_size
+        action_message = request.args.get("action_message")
+
+        error_message: str | None = None
+        try:
+            payload = fetcher(
+                "/v1/admin/catalog/tombstones",
+                {"limit": str(page_size), "offset": str(offset)},
+            )
+        except (URLError, TimeoutError, ValueError):
+            payload = {"total": 0, "limit": page_size, "offset": offset, "items": []}
+            error_message = "Unable to reach photovault-api tombstones endpoint."
+
+        total = int(payload.get("total", 0))
+        raw_items = list(payload.get("items") or [])
+
+        has_previous = page > 1
+        has_next = offset + len(raw_items) < total
+        previous_url = (
+            url_for("library_trash", page=page - 1) if has_previous else None
+        )
+        next_url = (
+            url_for("library_trash", page=page + 1) if has_next else None
+        )
+        start_index = offset + 1 if total > 0 and raw_items else 0
+        end_index = offset + len(raw_items)
+
+        return render_template(
+            "library_trash.html",
+            trash_rows=raw_items,
+            total=total,
+            page=page,
+            page_size=page_size,
+            start_index=start_index,
+            end_index=end_index,
+            previous_url=previous_url,
+            next_url=next_url,
+            error_message=error_message,
+            action_message=action_message,
+            active_page="library",
+        )
+
+    @app.post("/library/actions/trash/restore")
+    def library_trash_restore_action():
+        """Restore action used by /library/trash.
+
+        Posts to the API's /v1/admin/catalog/tombstones/restore endpoint and
+        redirects back to /library/trash with a flash message.
+        """
+
+        relative_path = request.form.get("relative_path", "").strip()
+        raw_page = request.form.get("page", "1").strip() or "1"
+        try:
+            page = max(1, int(raw_page))
+        except ValueError:
+            page = 1
+        if not relative_path:
+            return redirect(url_for("library_trash", page=page))
+        try:
+            poster("/v1/admin/catalog/tombstones/restore", {"relative_path": relative_path})
+            message = f"Restored {relative_path}"
+        except (URLError, TimeoutError, ValueError):
+            message = f"Error restoring {relative_path}; check server logs"
+
+        return redirect(url_for("library_trash", page=page, action_message=message))
 
 
     return app

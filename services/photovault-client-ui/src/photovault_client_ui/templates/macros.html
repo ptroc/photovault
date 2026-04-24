@@ -1,0 +1,27 @@
+{% macro state_badge(kind, label=None) -%}
+  {% set normalized = (kind or 'secondary')|lower %}
+  {% set classes = {
+    'ok': 'text-bg-success',
+    'healthy': 'text-bg-success',
+    'ready': 'text-bg-success',
+    'active': 'text-bg-primary',
+    'working': 'text-bg-primary',
+    'warning': 'text-bg-warning',
+    'warn': 'text-bg-warning',
+    'waiting': 'text-bg-warning',
+    'blocked': 'text-bg-danger',
+    'critical': 'text-bg-danger',
+    'error': 'text-bg-danger',
+    'completed': 'text-bg-success',
+    'secondary': 'text-bg-secondary'
+  } %}
+  <span class="badge rounded-pill {{ classes.get(normalized, 'text-bg-secondary') }}">
+    {{ label or kind }}
+  </span>
+{%- endmacro %}
+
+{% macro nav_link(href, text, active_page, page_id, secondary=False) -%}
+  <li class="nav-item">
+    <a class="nav-link {{ 'active' if active_page == page_id else '' }} {{ 'text-secondary' if secondary else '' }}" href="{{ href }}">{{ text }}</a>
+  </li>
+{%- endmacro %}

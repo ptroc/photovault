@@ -207,7 +207,7 @@ run_remote_health_checks() {
 systemctl is-active ${services_joined} >/dev/null
 curl -fsS http://127.0.0.1:9101/healthz
 echo
-curl -fsS http://127.0.0.1:80/ >/dev/null && echo 'client-ui: ok'
+curl -fsS http://127.0.0.1:8888/ >/dev/null && echo 'client-ui: ok'
 curl -fsS http://127.0.0.1:9301/healthz
 echo
 curl -fsS http://127.0.0.1:9401/ >/dev/null && echo 'server-ui: ok'"

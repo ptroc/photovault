@@ -1,4 +1,4 @@
-{% from "macros.html" import status_badge %}
+{% from "macros.html" import status_badge, timestamp_stack %}
 {# Lightbox body. Swapped into #libraryLightboxBody by HTMX. The surrounding
    modal provides the header and close affordance; this fragment renders
    the enlarged preview plus inline metadata. Prev/next are left to the
@@ -67,7 +67,10 @@
       {% if asset.lens_model %}
         <dt>Lens</dt><dd>{{ asset.lens_model }}</dd>
       {% endif %}
-      <dt>Cataloged</dt><dd>{{ asset.last_cataloged_at_utc }}</dd>
+      {% if asset.capture_timestamp_utc %}
+        <dt>Captured</dt><dd>{{ timestamp_stack(asset.capture_timestamp_utc, mono=True) }}</dd>
+      {% endif %}
+      <dt>Cataloged</dt><dd>{{ timestamp_stack(asset.last_cataloged_at_utc, mono=True) }}</dd>
       {% if asset.provenance_job_name %}
         <dt>Job</dt><dd>{{ asset.provenance_job_name }}</dd>
       {% endif %}

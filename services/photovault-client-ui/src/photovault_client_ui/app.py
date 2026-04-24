@@ -1382,13 +1382,19 @@ def create_app(
         media_label = request.form.get("media_label", "").strip()
         source_paths_text = request.form.get("source_paths", "")
         source_paths = [line.strip() for line in source_paths_text.splitlines() if line.strip()]
-        form_data = {"media_label": media_label, "source_paths": source_paths_text}
+        normalized_source_path = source_paths[0] if len(source_paths) == 1 else source_paths_text.strip()
+        form_data = {"media_label": media_label, "source_paths": normalized_source_path}
 
         if not media_label:
             return _render_overview(ingest_error="Media label is required.", form_data=form_data)
         if not source_paths:
             return _render_overview(
-                ingest_error="At least one source path is required.",
+                ingest_error="A source path is required.",
+                form_data=form_data,
+            )
+        if len(source_paths) > 1:
+            return _render_overview(
+                ingest_error="Use one absolute source path per ingest job.",
                 form_data=form_data,
             )
 

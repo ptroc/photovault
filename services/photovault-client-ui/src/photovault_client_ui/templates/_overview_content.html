@@ -1,3 +1,4 @@
+{% from "macros.html" import state_badge %}
 <section
   id="overview-shell"
   {% if auto_refresh_ms and auto_refresh_path %}
@@ -5,278 +6,374 @@
     data-auto-refresh-path="{{ auto_refresh_path }}"
   {% endif %}
 >
-  <section class="section dashboard-grid">
-    <article class="card stack">
-      <h2>Operator dashboard</h2>
-      <div class="kpi-grid">
-        <div class="kpi-box">
-          <span class="muted">Daemon health</span>
-          <span class="kpi-value {% if overview_metrics.daemon_health_level == 'critical' %}status-error{% elif overview_metrics.daemon_health_level == 'warning' %}status-warn{% elif overview_metrics.daemon_health_level == 'active' %}status-active{% else %}status-ok{% endif %}">
-            {{ overview_metrics.daemon_health_label }}
-          </span>
-        </div>
-        <div class="kpi-box">
-          <span class="muted">Ingest/upload activity</span>
-          <span class="kpi-value status-active">{{ overview_metrics.active_jobs_count }}</span>
-          <span class="muted">active jobs</span>
-        </div>
-        <div class="kpi-box">
-          <span class="muted">Waiting jobs</span>
-          <span class="kpi-value {% if overview_metrics.waiting_jobs_count > 0 %}status-warn{% else %}status-ok{% endif %}">
-            {{ overview_metrics.waiting_jobs_count }}
-          </span>
-          <span class="muted">dependency gated</span>
-        </div>
-        <div class="kpi-box">
-          <span class="muted">Blocked work</span>
-          <span class="kpi-value {% if overview_metrics.blocked_jobs_count > 0 %}status-error{% else %}status-ok{% endif %}">
-            {{ overview_metrics.blocked_jobs_count }}
-          </span>
-          <span class="muted">jobs need attention</span>
-        </div>
-        <div class="kpi-box">
-          <span class="muted">Upload pending</span>
-          <span class="kpi-value {% if overview_metrics.upload_pending_jobs_count > 0 %}status-warn{% else %}status-ok{% endif %}">
-            {{ overview_metrics.upload_pending_jobs_count }}
-          </span>
-          <span class="muted">jobs still uploading</span>
-        </div>
-      </div>
-      <div class="banner {% if overview_metrics.state_guidance.kind == 'blocked' %}banner-critical{% elif overview_metrics.state_guidance.kind == 'waiting' %}banner-warning{% elif overview_metrics.state_guidance.kind == 'active' %}banner-warning{% else %}banner-success{% endif %}">
-        <strong>{{ overview_metrics.state_guidance.title }}</strong>
-        <span>{{ overview_metrics.state_guidance.summary }}</span>
-        <span>Operator action: {{ overview_metrics.state_guidance.operator_action }}</span>
-      </div>
-      <p class="muted">
-        Next operator action: <strong>{{ overview_metrics.next_action }}</strong>
-      </p>
-      {% if state %}
-        <p class="muted">Current state: <code>{{ state.current_state }}</code> · Last update: {{ state.updated_at_utc }}</p>
-      {% endif %}
-      {% if overview_metrics.client_auth_guidance %}
-        <div class="banner banner-critical">
-          <strong>{{ overview_metrics.client_auth_guidance.title }}</strong>
-          <span>{{ overview_metrics.client_auth_guidance.summary }}</span>
-          <span>Operator action: {{ overview_metrics.client_auth_guidance.operator_action }}</span>
-        </div>
-      {% endif %}
-      <div class="banner {% if daemon_progress.is_auto_progressing %}banner-warning{% else %}banner-success{% endif %}">
-        <strong>{{ daemon_progress.badge_label }}</strong>
-        <span>{{ daemon_progress.message }}</span>
-      </div>
-    </article>
-
-    <article class="card stack">
-      <h2>Top actions</h2>
-      {% if operator_notice %}
-        <div class="banner {% if operator_notice_pending %}banner-warning{% else %}banner-success{% endif %}">
-          <strong>{% if operator_notice_pending %}Action in progress{% else %}Action complete{% endif %}</strong>
-          <span>{{ operator_notice }}</span>
-        </div>
-      {% endif %}
-      <div class="action-row">
-        <form method="post" action="/actions/daemon/tick" data-ajax-target="#overview-shell">
-          <input type="hidden" name="return_to" value="/">
-          <button
-            type="submit"
-            {% if daemon_progress.is_auto_progressing %}
-              disabled
-              aria-disabled="true"
-            {% endif %}
-            data-idle-label="Run daemon tick"
-            data-busy-label="Running daemon tick..."
-          >
-            {% if daemon_progress.is_auto_progressing %}
-              Run daemon tick (auto progression active)
-            {% else %}
-              Run daemon tick
-            {% endif %}
-          </button>
-        </form>
-      </div>
-      {% if ingest_gate.can_start %}
-        <div class="banner banner-success">
-          <strong>Ingest ready</strong>
-          <span>{{ ingest_gate.summary }}</span>
-        </div>
-      {% else %}
-        <div class="banner banner-warning">
-          <strong>Ingest blocked</strong>
-          <span>Current daemon state: <code>{{ ingest_gate.current_state }}</code></span>
-          <span>{{ ingest_gate.summary }}</span>
-          <span>{{ ingest_gate.operator_action }}</span>
-        </div>
-      {% endif %}
-    </article>
-  </section>
-
-  <section class="section dashboard-grid">
-    <article class="card stack">
-      <h2>Attention and blockers</h2>
-      {% if overview_metrics.alerts %}
-        {% for alert in overview_metrics.alerts %}
-          <div class="banner {% if alert.severity == 'critical' %}banner-critical{% else %}banner-warning{% endif %}">
-            <strong>{{ alert.title }}</strong>
-            <span>{{ alert.message }}</span>
+  <section class="row g-3 mb-4">
+    <div class="col-lg-8">
+      <article class="card surface-card h-100">
+        <div class="card-body">
+          <div class="d-flex flex-column flex-xl-row justify-content-between gap-3 mb-4">
+            <div>
+              <div class="eyebrow text-uppercase text-secondary fw-semibold small mb-2">Overview</div>
+              <h2 class="card-title h3 mb-2">Operator dashboard</h2>
+              <p class="muted-help mb-0">Health, workload, and the next state-machine action in one place.</p>
+            </div>
+            <div class="summary-card rounded-4 p-3">
+              <div class="small text-secondary text-uppercase fw-semibold mb-1">Next operator action</div>
+              <div class="fw-semibold">{{ overview_metrics.next_action }}</div>
+              {% if state %}
+              <div class="small text-secondary mt-2">Current state: <code class="inline-code">{{ state.current_state }}</code></div>
+              <div class="small text-secondary">Last update: {{ state.updated_at_utc }}</div>
+              {% endif %}
+            </div>
           </div>
-        {% endfor %}
-      {% else %}
-        <div class="banner banner-success">
-          <strong>No immediate alerts</strong>
-          <span>Ingest, upload, and dependencies are currently healthy.</span>
-        </div>
-      {% endif %}
-    </article>
 
-    <article class="card stack">
-      <h2>Recent daemon activity</h2>
-      <div class="kpi-grid">
-        <div class="kpi-box">
-          <span class="muted">Recent error events</span>
-          <span class="kpi-value {% if overview_metrics.event_summary.error_count > 0 %}status-error{% else %}status-ok{% endif %}">
-            {{ overview_metrics.event_summary.error_count }}
-          </span>
-        </div>
-        <div class="kpi-box">
-          <span class="muted">Recent warnings</span>
-          <span class="kpi-value {% if overview_metrics.event_summary.warn_count > 0 %}status-warn{% else %}status-ok{% endif %}">
-            {{ overview_metrics.event_summary.warn_count }}
-          </span>
-        </div>
-      </div>
-      {% if overview_metrics.event_summary.latest_error %}
-        <div class="banner banner-critical">
-          <strong>Latest error: {{ overview_metrics.event_summary.latest_error.category }}</strong>
-          <span>{{ overview_metrics.event_summary.latest_error.message }}</span>
-          <span>{{ overview_metrics.event_summary.latest_error.created_at_utc }}</span>
-        </div>
-      {% elif overview_metrics.event_summary.latest_activity %}
-        <div class="banner banner-success">
-          <strong>Latest event: {{ overview_metrics.event_summary.latest_activity.category }}</strong>
-          <span>{{ overview_metrics.event_summary.latest_activity.message }}</span>
-        </div>
-      {% endif %}
-      {% if overview_metrics.event_summary.highlights %}
-        <ul class="list-inline">
-          {% for event in overview_metrics.event_summary.highlights %}
-            <li>
-              <strong>{{ event.category }}</strong>
-              <span class="pill {% if event.level == 'ERROR' %}blocked{% elif event.level == 'WARN' %}active{% else %}completed{% endif %}">
-                {{ event.level }}
-              </span><br>
-              <span class="muted">{{ event.created_at_utc }}</span><br>
-              <span>{{ event.message }}</span>
-            </li>
-          {% endfor %}
-        </ul>
-      {% else %}
-        <p class="muted">No recent events available.</p>
-      {% endif %}
-      <div class="action-row">
-        <a class="button-link" href="/events">Open full diagnostics and events</a>
-      </div>
-    </article>
-  </section>
-
-  <section class="section dashboard-grid">
-    <article class="card stack">
-      <h2>Dependency health</h2>
-      {% if dependencies %}
-        <ul class="list-inline">
-          {% for dependency in dependencies %}
-            <li>
-              <strong>{{ dependency.name }}</strong>
-              <span class="pill {% if dependency.status in ['ready', 'active'] %}completed{% elif dependency.status in ['provisionable', 'activating', 'reloading'] %}active{% else %}blocked{% endif %}">
-                {{ dependency.status }}
-              </span><br>
-              <span class="muted">{{ dependency.detail }}</span>
-            </li>
-          {% endfor %}
-        </ul>
-      {% else %}
-        <p class="muted">No dependency status is available.</p>
-      {% endif %}
-    </article>
-
-    <article class="card stack">
-      <h2>Active job summary</h2>
-      {% if overview_metrics.highlight_jobs %}
-        <div class="jobs-list">
-          {% for job in overview_metrics.highlight_jobs %}
-            <article class="job-card">
-              <div class="job-card-head">
-                <div>
-                  <strong><a href="/jobs/{{ job.job_id }}">Job #{{ job.job_id }}</a></strong>
-                  <div class="muted">{{ job.media_label }}</div>
+          <div class="row row-cols-2 row-cols-xl-5 g-3 mb-4">
+            <div class="col">
+              <div class="card metric-card h-100">
+                <div class="card-body">
+                  <div class="small text-secondary text-uppercase fw-semibold">Daemon health</div>
+                  <div class="h3 fw-semibold metric-value mb-0">{{ overview_metrics.daemon_health_label }}</div>
                 </div>
-                <span class="pill {% if job.m2.paused_on_error %}blocked{% elif job.m2.remote_complete %}completed{% else %}active{% endif %}">
-                  {{ job.m2.operation_state_label }}
-                </span>
               </div>
-              <div class="muted">
-                phase={{ job.operator_view.phase_label }},
-                upload required={{ job.operator_view.upload_required_count }},
-                retries={{ job.operator_view.retrying_file_count }}
+            </div>
+            <div class="col">
+              <div class="card metric-card h-100">
+                <div class="card-body">
+                  <div class="small text-secondary text-uppercase fw-semibold">Active jobs</div>
+                  <div class="h3 fw-semibold metric-value mb-0">{{ overview_metrics.active_jobs_count }}</div>
+                </div>
               </div>
-              <div class="muted">Completion: {{ job.operator_view.completion_summary }}</div>
-              <div class="muted">Retry posture: {{ job.operator_view.retry_summary }}</div>
-              <div class="muted">Next action: {{ job.operator_view.next_action }}</div>
-            </article>
-          {% endfor %}
+            </div>
+            <div class="col">
+              <div class="card metric-card h-100">
+                <div class="card-body">
+                  <div class="small text-secondary text-uppercase fw-semibold">Waiting jobs</div>
+                  <div class="h3 fw-semibold metric-value mb-0">{{ overview_metrics.waiting_jobs_count }}</div>
+                </div>
+              </div>
+            </div>
+            <div class="col">
+              <div class="card metric-card h-100">
+                <div class="card-body">
+                  <div class="small text-secondary text-uppercase fw-semibold">Blocked work</div>
+                  <div class="h3 fw-semibold metric-value mb-0">{{ overview_metrics.blocked_jobs_count }}</div>
+                </div>
+              </div>
+            </div>
+            <div class="col">
+              <div class="card metric-card h-100">
+                <div class="card-body">
+                  <div class="small text-secondary text-uppercase fw-semibold">Upload pending</div>
+                  <div class="h3 fw-semibold metric-value mb-0">{{ overview_metrics.upload_pending_jobs_count }}</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="alert {% if overview_metrics.state_guidance.kind == 'blocked' %}alert-danger{% elif overview_metrics.state_guidance.kind == 'waiting' %}alert-warning{% elif overview_metrics.state_guidance.kind == 'active' %}alert-warning{% else %}alert-success{% endif %} mb-3" role="alert">
+            <div class="d-flex flex-column flex-lg-row justify-content-between gap-2">
+              <div>
+                <strong>{{ overview_metrics.state_guidance.title }}</strong>
+                <div>{{ overview_metrics.state_guidance.summary }}</div>
+              </div>
+              {{ state_badge(overview_metrics.state_guidance.kind, overview_metrics.state_guidance.kind|capitalize) }}
+            </div>
+            <div class="mt-2">Operator action: {{ overview_metrics.state_guidance.operator_action }}</div>
+          </div>
+
+          {% if overview_metrics.client_auth_guidance %}
+          <div class="alert alert-danger mb-3" role="alert">
+            <strong>{{ overview_metrics.client_auth_guidance.title }}</strong>
+            <div>{{ overview_metrics.client_auth_guidance.summary }}</div>
+            <div class="mt-2">Operator action: {{ overview_metrics.client_auth_guidance.operator_action }}</div>
+          </div>
+          {% endif %}
+
+          <div class="alert {% if daemon_progress.is_auto_progressing %}alert-warning{% else %}alert-success{% endif %} mb-0" role="alert">
+            <strong>{{ daemon_progress.badge_label }}</strong>
+            <div>{{ daemon_progress.message }}</div>
+          </div>
         </div>
-      {% else %}
-        <p class="muted">No jobs are currently active or blocked.</p>
-      {% endif %}
-      <div class="action-row">
-        <a class="button-link" href="/jobs?filter=active">Active jobs</a>
-        <a class="button-link" href="/jobs?filter=waiting">Waiting jobs</a>
-        <a class="button-link" href="/jobs?filter=blocked">Blocked jobs</a>
-      </div>
-    </article>
+      </article>
+    </div>
+
+    <div class="col-lg-4">
+      <article class="card surface-card h-100 sticky-page-actions">
+        <div class="card-body">
+          <h2 class="card-title h4 mb-3">Top actions</h2>
+          {% if operator_notice %}
+          <div class="alert {% if operator_notice_pending %}alert-warning{% else %}alert-success{% endif %}" role="alert">
+            <strong>{% if operator_notice_pending %}Action in progress{% else %}Action complete{% endif %}</strong>
+            <div>{{ operator_notice }}</div>
+          </div>
+          {% endif %}
+
+          <div class="d-grid gap-3">
+            <div class="summary-card rounded-4 p-3">
+              <div class="d-flex justify-content-between align-items-start gap-3 mb-3">
+                <div>
+                  <div class="fw-semibold">Create ingest job</div>
+                  <div class="small text-secondary">One ingest job maps to one absolute source path.</div>
+                </div>
+                {% if ingest_gate.can_start %}
+                {{ state_badge('ok', 'Ready') }}
+                {% else %}
+                {{ state_badge('waiting', 'Blocked') }}
+                {% endif %}
+              </div>
+              {% if ingest_error %}
+              <div class="alert alert-danger mb-3" role="alert">
+                <strong>Ingest request failed.</strong> {{ ingest_error }}
+                {% if ingest_error_detail %}
+                <details class="mt-2">
+                  <summary class="technical-summary">Debug detail</summary>
+                  <div class="technical-copy mt-2">{{ ingest_error_detail }}</div>
+                </details>
+                {% endif %}
+              </div>
+              {% endif %}
+              {% if ingest_notice %}
+              <div class="alert alert-success mb-3" role="alert">
+                <strong>Ingest queued.</strong> {{ ingest_notice }}
+                {% if ingest_notice_detail %}
+                <details class="mt-2">
+                  <summary class="technical-summary">Filtered files</summary>
+                  <div class="technical-copy mt-2">{{ ingest_notice_detail }}</div>
+                </details>
+                {% endif %}
+              </div>
+              {% endif %}
+              <form method="post" action="/ingest/jobs" data-ajax-target="#overview-shell">
+                <div class="row g-2">
+                  <div class="col-12">
+                    <label class="form-label mb-1" for="top_media_label">Media label</label>
+                    <input
+                      class="form-control"
+                      id="top_media_label"
+                      name="media_label"
+                      value="{{ ingest_form.media_label }}"
+                      required
+                    >
+                  </div>
+                  <div class="col-12">
+                    <label class="form-label mb-1" for="top_source_path">Source path</label>
+                    <input
+                      class="form-control"
+                      id="top_source_path"
+                      name="source_paths"
+                      placeholder="/mnt/media"
+                      value="{{ ingest_form.source_paths }}"
+                      required
+                    >
+                    <div class="form-text">Use one absolute file or directory path per ingest job.</div>
+                  </div>
+                  <div class="col-12">
+                    <button
+                      class="btn btn-primary w-100"
+                      type="submit"
+                      {% if not ingest_gate.can_start %}
+                        disabled
+                        aria-disabled="true"
+                      {% endif %}
+                    >
+                      Create ingest job
+                    </button>
+                  </div>
+                </div>
+              </form>
+            </div>
+
+            <form method="post" action="/actions/daemon/tick" data-ajax-target="#overview-shell">
+              <input type="hidden" name="return_to" value="/">
+              <button
+                class="btn btn-primary w-100"
+                type="submit"
+                {% if daemon_progress.is_auto_progressing %}
+                  disabled
+                  aria-disabled="true"
+                {% endif %}
+                data-idle-label="Run daemon tick"
+                data-busy-label="Running daemon tick..."
+              >
+                {% if daemon_progress.is_auto_progressing %}
+                  Run daemon tick (auto progression active)
+                {% else %}
+                  Run daemon tick
+                {% endif %}
+              </button>
+            </form>
+
+            {% if ingest_gate.can_start %}
+            <div class="summary-card rounded-4 p-3">
+              <div class="d-flex justify-content-between align-items-start gap-3">
+                <div>
+                  <div class="fw-semibold">Ingest ready</div>
+                  <div class="small text-secondary">{{ ingest_gate.summary }}</div>
+                </div>
+                {{ state_badge('ok', 'Ready') }}
+              </div>
+            </div>
+            {% else %}
+            <div class="summary-card rounded-4 p-3 border border-warning-subtle">
+              <div class="d-flex justify-content-between align-items-start gap-3">
+                <div>
+                  <div class="fw-semibold">Ingest blocked</div>
+                  <div class="small text-secondary">Current daemon state: <code class="inline-code">{{ ingest_gate.current_state }}</code></div>
+                  <div class="small mt-2">{{ ingest_gate.summary }}</div>
+                  <div class="small text-secondary mt-2">{{ ingest_gate.operator_action }}</div>
+                </div>
+                {{ state_badge('waiting', 'Blocked') }}
+              </div>
+            </div>
+            {% endif %}
+          </div>
+        </div>
+      </article>
+    </div>
   </section>
 
-  <section class="section card stack">
-    <h2>Create ingest job</h2>
-    {% if ingest_error %}
-      <div class="banner banner-critical">
-        <strong>Ingest request failed</strong>
-        <span>{{ ingest_error }}</span>
-        {% if ingest_error_detail %}
-          <details class="meta-details">
-            <summary>Debug detail</summary>
-            <code>{{ ingest_error_detail }}</code>
+  <section class="row g-3 mb-4">
+    <div class="col-lg-6">
+      <article class="card surface-card h-100">
+        <div class="card-body">
+          <h2 class="card-title h4 mb-3">Attention and blockers</h2>
+          {% if overview_metrics.alerts %}
+            <div class="d-grid gap-3">
+              {% for alert in overview_metrics.alerts %}
+              <div class="alert {% if alert.severity == 'critical' %}alert-danger{% else %}alert-warning{% endif %} mb-0" role="alert">
+                <strong>{{ alert.title }}</strong>
+                <div>{{ alert.message }}</div>
+              </div>
+              {% endfor %}
+            </div>
+          {% else %}
+            <div class="alert alert-success mb-0" role="alert">
+              <strong>No immediate alerts.</strong>
+              <div>Ingest, upload, and dependencies are currently healthy.</div>
+            </div>
+          {% endif %}
+        </div>
+      </article>
+    </div>
+    <div class="col-lg-6">
+      <article class="card surface-card h-100">
+        <div class="card-body">
+          <h2 class="card-title h4 mb-3">Recent daemon activity</h2>
+          <div class="row row-cols-2 g-3 mb-3">
+            <div class="col">
+              <div class="card metric-card h-100">
+                <div class="card-body">
+                  <div class="small text-secondary text-uppercase fw-semibold">Recent error events</div>
+                  <div class="h3 fw-semibold metric-value mb-0">{{ overview_metrics.event_summary.error_count }}</div>
+                </div>
+              </div>
+            </div>
+            <div class="col">
+              <div class="card metric-card h-100">
+                <div class="card-body">
+                  <div class="small text-secondary text-uppercase fw-semibold">Recent warnings</div>
+                  <div class="h3 fw-semibold metric-value mb-0">{{ overview_metrics.event_summary.warn_count }}</div>
+                </div>
+              </div>
+            </div>
+          </div>
+          {% if overview_metrics.event_summary.latest_error %}
+            <div class="alert alert-danger" role="alert">
+              <strong>Latest error: {{ overview_metrics.event_summary.latest_error.category }}</strong>
+              <div>{{ overview_metrics.event_summary.latest_error.message }}</div>
+              <div class="small text-secondary mt-1">{{ overview_metrics.event_summary.latest_error.created_at_utc }}</div>
+            </div>
+          {% elif overview_metrics.event_summary.latest_activity %}
+            <div class="alert alert-success" role="alert">
+              <strong>Latest event: {{ overview_metrics.event_summary.latest_activity.category }}</strong>
+              <div>{{ overview_metrics.event_summary.latest_activity.message }}</div>
+            </div>
+          {% endif %}
+
+          <details class="diagnostic-block">
+            <summary class="technical-summary">Recent diagnostic highlights</summary>
+            <div class="d-grid gap-2 mt-3">
+              {% if overview_metrics.event_summary.highlights %}
+                {% for event in overview_metrics.event_summary.highlights %}
+                <div class="summary-card rounded-4 p-3">
+                  <div class="d-flex flex-wrap gap-2 align-items-center mb-2">
+                    <strong>{{ event.category }}</strong>
+                    {{ state_badge(event.level|lower, event.level) }}
+                  </div>
+                  <div class="small text-secondary mb-1">{{ event.created_at_utc }}</div>
+                  <div>{{ event.message }}</div>
+                </div>
+                {% endfor %}
+              {% else %}
+                <p class="muted-help mb-0">No recent events available.</p>
+              {% endif %}
+            </div>
           </details>
-        {% endif %}
-      </div>
-    {% endif %}
-    {% if ingest_notice %}
-      <div class="banner banner-success">
-        <strong>Ingest queued</strong>
-        <span>{{ ingest_notice }}</span>
-        {% if ingest_notice_detail %}
-          <details class="meta-details">
-            <summary>Filtered files</summary>
-            <code>{{ ingest_notice_detail }}</code>
-          </details>
-        {% endif %}
-      </div>
-    {% endif %}
-    <form class="form-grid" method="post" action="/ingest/jobs" data-ajax-target="#overview-shell">
-      <div>
-        <label for="media_label">Media label</label>
-        <input id="media_label" name="media_label" value="{{ ingest_form.media_label }}" required>
-      </div>
-      <div>
-        <label for="source_paths">Source paths</label>
-        <textarea id="source_paths" name="source_paths" required>{{ ingest_form.source_paths }}</textarea>
-        <p class="muted">
-          One absolute file or directory path per line. Mounted directories skip obvious filesystem junk
-          and only include supported photo, RAW, and video files.
-        </p>
-      </div>
-      <div class="action-row">
-        <button type="submit">Create ingest job</button>
-      </div>
-    </form>
+        </div>
+      </article>
+    </div>
   </section>
+
+  <section class="row g-3 mb-4">
+    <div class="col-lg-5">
+      <article class="card surface-card h-100">
+        <div class="card-body">
+          <h2 class="card-title h4 mb-3">Dependency health</h2>
+          {% if dependencies %}
+          <div class="d-grid gap-2">
+            {% for dependency in dependencies %}
+            <div class="summary-card rounded-4 p-3">
+              <div class="d-flex justify-content-between gap-3 align-items-start">
+                <div>
+                  <div class="fw-semibold">{{ dependency.name }}</div>
+                  <div class="small text-secondary">{{ dependency.detail }}</div>
+                </div>
+                {{ state_badge('ok' if dependency.status in ['ready', 'active'] else ('active' if dependency.status in ['provisionable', 'activating', 'reloading'] else 'blocked'), dependency.status) }}
+              </div>
+            </div>
+            {% endfor %}
+          </div>
+          {% else %}
+          <p class="muted-help mb-0">No dependency status is available.</p>
+          {% endif %}
+        </div>
+      </article>
+    </div>
+    <div class="col-lg-7">
+      <article class="card surface-card h-100">
+        <div class="card-body">
+          <div class="d-flex justify-content-between align-items-start gap-3 mb-3">
+            <div>
+              <h2 class="card-title h4 mb-1">Active job summary</h2>
+              <p class="muted-help mb-0">Compact view of the jobs that currently need operator awareness.</p>
+            </div>
+            <a class="btn btn-outline-secondary btn-sm" href="/jobs?filter=active">Open Jobs</a>
+          </div>
+          {% if overview_metrics.highlight_jobs %}
+          <div class="d-grid gap-3">
+            {% for job in overview_metrics.highlight_jobs %}
+            <article class="card job-card">
+              <div class="card-body">
+                <div class="d-flex justify-content-between gap-3 align-items-start mb-2">
+                  <div>
+                    <strong><a href="/jobs/{{ job.job_id }}">Job #{{ job.job_id }}</a></strong>
+                    <div class="small text-secondary">{{ job.media_label }}</div>
+                  </div>
+                  {{ state_badge('blocked' if job.m2.paused_on_error else ('completed' if job.m2.remote_complete else 'active'), job.m2.operation_state_label) }}
+                </div>
+                <div class="small text-secondary">Current phase {{ job.operator_view.phase_label }}</div>
+                <div class="small text-secondary">Transfer progress {{ job.operator_view.completion_summary }}</div>
+                <div class="small text-secondary">Retry posture {{ job.operator_view.retry_summary }}</div>
+                <div class="mt-2 fw-semibold">{{ job.operator_view.next_action }}</div>
+              </div>
+            </article>
+            {% endfor %}
+          </div>
+          {% else %}
+          <p class="muted-help mb-0">No jobs are currently active or blocked.</p>
+          {% endif %}
+        </div>
+      </article>
+    </div>
+  </section>
+
 </section>

@@ -26,6 +26,13 @@
       >
         {{ reject_queue_count }} marked for deletion
       </a>
+      <a
+        class="btn btn-sm {{ 'btn-outline-warning' if trash_count else 'btn-outline-secondary' }} library-trash-badge"
+        href="/library/trash"
+        title="Open the trash"
+      >
+        {{ trash_count }} in trash
+      </a>
     </div>
   </div>
 </section>

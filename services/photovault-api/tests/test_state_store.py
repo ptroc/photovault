@@ -1537,3 +1537,294 @@ def test_postgres_set_media_asset_favorite_updates_single_field() -> None:
     assert observed["params"] == (True, "2026/04/job/a.jpg")
     assert observed["lookup_path"] == "2026/04/job/a.jpg"
     assert observed["committed"] is True
+
+
+# ---------------------------------------------------------------------------
+# Phase 3.C: tombstones
+# ---------------------------------------------------------------------------
+
+
+def test_in_memory_tombstone_roundtrip() -> None:
+    from photovault_api.state_store import InMemoryUploadStateStore
+
+    store = InMemoryUploadStateStore()
+    ts = store.add_tombstone(
+        relative_path="2026/04/job/photo.jpg",
+        sha256_hex="a" * 64,
+        trashed_at_utc="2026-04-22T10:00:00+00:00",
+        marked_reason="test deletion",
+        trash_relative_path=".trash/2026/04/22/aaaa/2026/04/job/photo.jpg",
+        original_size_bytes=1024,
+    )
+    assert ts.relative_path == "2026/04/job/photo.jpg"
+    assert ts.sha256_hex == "a" * 64
+    assert store.is_sha_tombstoned("a" * 64) is True
+    assert store.is_sha_tombstoned("b" * 64) is False
+
+    # Batch lookup.
+    results = store.list_sha_tombstones(["a" * 64, "b" * 64, "c" * 64])
+    assert len(results) == 1
+    assert results[0].sha256_hex == "a" * 64
+
+    # Remove.
+    assert store.remove_tombstone("2026/04/job/photo.jpg") is True
+    assert store.is_sha_tombstoned("a" * 64) is False
+    assert store.remove_tombstone("2026/04/job/photo.jpg") is False
+
+
+def test_postgres_tombstone_add_and_is_sha_tombstoned() -> None:
+    observed: dict[str, object] = {}
+
+    class _FakeCursor:
+        def __init__(self):
+            self.call_count = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def execute(self, query: str, params: tuple[object, ...]) -> None:
+            self.call_count += 1
+            observed[f"query_{self.call_count}"] = query
+            observed[f"params_{self.call_count}"] = params
+
+        def fetchone(self) -> tuple[object, ...] | None:
+            if self.call_count == 2:
+                return (1,)  # Found
+            return None
+
+    class _FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def cursor(self) -> _FakeCursor:
+            return _FakeCursor()
+
+        def commit(self) -> None:
+            observed["committed"] = True
+
+    class _TestStore(PostgresUploadStateStore):
+        def _connect(self):  # type: ignore[override]
+            return _FakeConnection()
+
+    store = _TestStore(database_url="postgresql://unused")
+
+    # Add tombstone.
+    ts = store.add_tombstone(
+        relative_path="2026/04/job/a.jpg",
+        sha256_hex="a" * 64,
+        trashed_at_utc="2026-04-22T10:00:00+00:00",
+        marked_reason="test",
+        trash_relative_path=".trash/2026/04/22/aaaa/2026/04/job/a.jpg",
+        original_size_bytes=100,
+    )
+    assert ts.sha256_hex == "a" * 64
+    assert "INSERT INTO api_catalog_tombstones" in str(observed.get("query_1", ""))
+    assert "ON CONFLICT (relative_path) DO UPDATE" in str(observed.get("query_1", ""))
+
+
+# ---------------------------------------------------------------------------
+# Phase 3.D: list_tombstones + purge_tombstones (in-memory)
+# ---------------------------------------------------------------------------
+
+
+def test_in_memory_list_tombstones_sort_and_filter() -> None:
+    from datetime import UTC, datetime, timedelta
+
+    from photovault_api.state_store import InMemoryUploadStateStore
+
+    store = InMemoryUploadStateStore()
+
+    old_ts = (datetime.now(UTC) - timedelta(days=20)).isoformat()
+    new_ts = (datetime.now(UTC) - timedelta(days=5)).isoformat()
+
+    store.add_tombstone(
+        relative_path="2026/04/Job_B/b.jpg",
+        sha256_hex="b" * 64,
+        trashed_at_utc=new_ts,
+        marked_reason=None,
+        trash_relative_path=".trash/new/b.jpg",
+        original_size_bytes=200,
+    )
+    store.add_tombstone(
+        relative_path="2026/04/Job_A/a.jpg",
+        sha256_hex="a" * 64,
+        trashed_at_utc=old_ts,
+        marked_reason=None,
+        trash_relative_path=".trash/old/a.jpg",
+        original_size_bytes=100,
+    )
+
+    # Without filter: both rows, oldest first.
+    total, rows = store.list_tombstones(limit=10, offset=0)
+    assert total == 2
+    assert rows[0].relative_path == "2026/04/Job_A/a.jpg"
+    assert rows[1].relative_path == "2026/04/Job_B/b.jpg"
+
+    # With older_than_days=14: only the 20-day old row.
+    total_f, rows_f = store.list_tombstones(limit=10, offset=0, older_than_days=14)
+    assert total_f == 1
+    assert rows_f[0].relative_path == "2026/04/Job_A/a.jpg"
+
+
+def test_in_memory_purge_tombstones_returns_selected_rows_and_deletes() -> None:
+    from datetime import UTC, datetime, timedelta
+
+    from photovault_api.state_store import InMemoryUploadStateStore
+
+    store = InMemoryUploadStateStore()
+
+    old_ts = (datetime.now(UTC) - timedelta(days=20)).isoformat()
+    new_ts = (datetime.now(UTC) - timedelta(days=5)).isoformat()
+
+    store.add_tombstone(
+        relative_path="2026/04/Job_A/a.jpg",
+        sha256_hex="a" * 64,
+        trashed_at_utc=old_ts,
+        marked_reason=None,
+        trash_relative_path=".trash/old/a.jpg",
+        original_size_bytes=100,
+    )
+    store.add_tombstone(
+        relative_path="2026/04/Job_B/b.jpg",
+        sha256_hex="b" * 64,
+        trashed_at_utc=new_ts,
+        marked_reason=None,
+        trash_relative_path=".trash/new/b.jpg",
+        original_size_bytes=200,
+    )
+
+    purged = store.purge_tombstones(older_than_days=14, max_batch=500)
+
+    # Only the 20-day old row should be purged.
+    assert len(purged) == 1
+    assert purged[0].relative_path == "2026/04/Job_A/a.jpg"
+
+    # Tombstone for "a" must be gone; "b" must still be present.
+    assert not store.is_sha_tombstoned("a" * 64)
+    assert store.is_sha_tombstoned("b" * 64)
+
+    # max_batch is respected.
+    store.add_tombstone(
+        relative_path="2026/04/Job_C/c.jpg",
+        sha256_hex="c" * 64,
+        trashed_at_utc=old_ts,
+        marked_reason=None,
+        trash_relative_path=".trash/old/c.jpg",
+        original_size_bytes=300,
+    )
+    # Now "b" is still new but "c" is 20 days old. Purge with max_batch=0 should return [].
+    purged_zero = store.purge_tombstones(older_than_days=14, max_batch=0)
+    assert purged_zero == []
+
+
+def test_in_memory_remove_tombstone_happy_and_absent() -> None:
+    from photovault_api.state_store import InMemoryUploadStateStore
+
+    store = InMemoryUploadStateStore()
+    store.add_tombstone(
+        relative_path="2026/04/Job_A/a.jpg",
+        sha256_hex="a" * 64,
+        trashed_at_utc="2026-04-10T00:00:00+00:00",
+        marked_reason=None,
+        trash_relative_path=".trash/a.jpg",
+        original_size_bytes=100,
+    )
+
+    assert store.remove_tombstone("2026/04/Job_A/a.jpg") is True
+    assert store.is_sha_tombstoned("a" * 64) is False
+    # Second call returns False (absent).
+    assert store.remove_tombstone("2026/04/Job_A/a.jpg") is False
+
+
+# ---------------------------------------------------------------------------
+# Phase 3.D: Postgres SQL discipline tests (fake-cursor pattern)
+# ---------------------------------------------------------------------------
+
+
+def _make_postgres_fake(observed: dict, rows_to_return: list | None = None) -> type:
+    """Factory for Postgres fake-connection that records SQL and can return rows."""
+
+    rows = rows_to_return or []
+
+    class _FakeCursor:
+        def __init__(self):
+            self._queries: list[str] = []
+            self.rowcount = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def execute(self, query: str, params=()) -> None:
+            self._queries.append(query)
+            observed.setdefault("queries", []).append((query, params))
+            self.rowcount = 0
+
+        def fetchone(self) -> tuple | None:
+            if rows:
+                return rows[0]
+            return (0,)
+
+        def fetchall(self) -> list:
+            return list(rows)
+
+    class _FakeConn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def cursor(self) -> _FakeCursor:
+            return _FakeCursor()
+
+        def commit(self) -> None:
+            observed["committed"] = True
+
+    return _FakeConn
+
+
+def test_postgres_list_tombstones_sql_carries_older_than_days_filter_and_order() -> None:
+    observed: dict = {}
+
+    class _TestStore(PostgresUploadStateStore):
+        def _connect(self):  # type: ignore[override]
+            return _make_postgres_fake(observed)()
+
+    store = _TestStore(database_url="postgresql://unused")
+    store.list_tombstones(limit=10, offset=0, older_than_days=14)
+
+    queries = [q for q, _ in observed.get("queries", [])]
+    # Both the COUNT and the SELECT should have an ORDER BY or filter.
+    select_queries = [q for q in queries if "SELECT" in q and "api_catalog_tombstones" in q]
+    assert len(select_queries) >= 1
+
+    # The SELECT must carry the older_than filter.
+    assert any("trashed_at_utc" in q for q in select_queries)
+    # The main data query must order oldest-first.
+    assert any("ORDER BY trashed_at_utc ASC" in q for q in select_queries)
+
+
+def test_postgres_purge_tombstones_sql_uses_for_update_skip_locked() -> None:
+    observed: dict = {}
+
+    class _TestStore(PostgresUploadStateStore):
+        def _connect(self):  # type: ignore[override]
+            return _make_postgres_fake(observed)()
+
+    store = _TestStore(database_url="postgresql://unused")
+    store.purge_tombstones(older_than_days=14, max_batch=100)
+
+    queries = [q for q, _ in observed.get("queries", [])]
+    # The SELECT must contain FOR UPDATE SKIP LOCKED.
+    assert any("FOR UPDATE SKIP LOCKED" in q for q in queries)
+    # There must be a LIMIT clause.
+    assert any("LIMIT" in q for q in queries)

@@ -25,6 +25,53 @@ scripts/deploy_rpi.sh --dry-run
 scripts/deploy_rpi.sh --skip-smoke
 ```
 
+## Trash purge script
+
+[`purge_trash.py`](./purge_trash.py) hard-deletes trash files and their
+tombstone rows once they are older than the retention window (default 14 days).
+It is designed to be invoked once per day by cron — it is single-shot,
+idempotent, and safe to run concurrently with itself (uses
+`SELECT … FOR UPDATE SKIP LOCKED` so two overlapping jobs cannot double-purge
+the same row).
+
+### Dry run (see what would be purged without touching anything)
+
+```bash
+source .venv/bin/activate
+python scripts/purge_trash.py \
+  --storage-root /path/to/storage \
+  --database-url postgres://user:pass@host/db \
+  --dry-run
+```
+
+### Normal invocation
+
+```bash
+python scripts/purge_trash.py \
+  --storage-root /path/to/storage \
+  --database-url postgres://user:pass@host/db \
+  --log-json
+```
+
+### Output shape
+
+In `--log-json` mode each row produces one NDJSON line, followed by a
+summary line:
+
+```json
+{"event": "purge", "relative_path": "2026/04/job/photo.jpg", "sha256_hex": "abc123...", "status": "file_deleted", ...}
+{"event": "summary", "scanned": 3, "purged_files": 2, "purged_rows": 3, "missing_files": 1, "errors": 0, "duration_seconds": 0.042, ...}
+```
+
+Exit code is `0` on success (including already-gone files), `1` if any
+unrecoverable error occurred.
+
+### Sample crontab line (set up once per install, not managed by Ansible)
+
+```crontab
+15 3 * * * root /opt/photovault/.venv/bin/python /opt/photovault/scripts/purge_trash.py --storage-root /data/photovault --database-url $DATABASE_URL --log-json >> /var/log/photovault/purge.log 2>&1
+```
+
 ## M4 smoke helper
 
 You can also run the storage/index smoke check directly on a host:

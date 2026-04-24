@@ -3,6 +3,7 @@
 import hashlib
 import io
 import math
+import mimetypes
 import os
 import re
 import secrets
@@ -435,7 +436,7 @@ class ClientHeartbeatResponse(BaseModel):
 _HEARTBEAT_ONLINE_MAX_AGE_SECONDS = 90
 _CLIENT_LIST_SCAN_MAX = 5000
 _CLIENT_LIST_SCAN_PAGE_SIZE = 200
-_PREVIEW_MAX_SIZE = (1024, 1024)
+_DEFAULT_PREVIEW_MAX_LONG_EDGE = 1024
 _PREVIEW_RASTER_SUFFIXES = {".png", ".jpg", ".jpeg"}
 _PREVIEW_HEIC_SUFFIXES = {".heic", ".heif"}
 _PREVIEW_RAW_SUFFIXES = {
@@ -466,6 +467,70 @@ _ALLOWED_PREVIEW_STATUS = {"pending", "succeeded", "failed"}
 _ALLOWED_ORIGIN_KIND = {"uploaded", "indexed"}
 _ALLOWED_MEDIA_TYPE = {"jpeg", "png", "heic", "raw", "video", "other"}
 _ALLOWED_PREVIEW_CAPABILITY = {"previewable", "not_previewable"}
+
+
+def _resolve_preview_max_long_edge(raw_value: str | int | None) -> int:
+    if raw_value is None:
+        return _DEFAULT_PREVIEW_MAX_LONG_EDGE
+    if isinstance(raw_value, bool):
+        raise RuntimeError("PHOTOVAULT_API_PREVIEW_MAX_LONG_EDGE must be a positive integer")
+    if isinstance(raw_value, int):
+        parsed = raw_value
+    else:
+        stripped = raw_value.strip()
+        if not stripped:
+            return _DEFAULT_PREVIEW_MAX_LONG_EDGE
+        try:
+            parsed = int(stripped)
+        except ValueError as exc:
+            raise RuntimeError("PHOTOVAULT_API_PREVIEW_MAX_LONG_EDGE must be a positive integer") from exc
+    if parsed <= 0:
+        raise RuntimeError("PHOTOVAULT_API_PREVIEW_MAX_LONG_EDGE must be a positive integer")
+    return parsed
+
+
+def _preview_max_size(max_long_edge: int) -> tuple[int, int]:
+    return (max_long_edge, max_long_edge)
+
+
+def _normalize_preview_suffix_token(raw_value: str, *, env_name: str) -> str:
+    token = raw_value.strip().lower()
+    if not token:
+        raise RuntimeError(
+            f"{env_name} must be a comma-separated list of file suffixes like '.jpg,.png'"
+        )
+    normalized = token if token.startswith(".") else f".{token}"
+    if len(normalized) <= 1:
+        raise RuntimeError(
+            f"{env_name} must be a comma-separated list of file suffixes like '.jpg,.png'"
+        )
+    if "/" in normalized or "\\" in normalized or "," in normalized or " " in normalized:
+        raise RuntimeError(
+            f"{env_name} must be a comma-separated list of file suffixes like '.jpg,.png'"
+        )
+    return normalized
+
+
+def _resolve_preview_suffix_set(
+    raw_value: str | list[str] | set[str] | tuple[str, ...] | None,
+    *,
+    env_name: str,
+) -> frozenset[str]:
+    if raw_value is None:
+        return frozenset()
+
+    tokens: list[str]
+    if isinstance(raw_value, str):
+        if not raw_value.strip():
+            return frozenset()
+        tokens = [token for token in raw_value.split(",") if token.strip()]
+    else:
+        tokens = [str(token) for token in raw_value]
+
+    normalized: set[str] = set()
+    for token in tokens:
+        normalized.add(_normalize_preview_suffix_token(token, env_name=env_name))
+    return frozenset(normalized)
 
 
 def _sanitize_component(raw_value: str, *, default_value: str) -> str:
@@ -904,11 +969,16 @@ def _attempt_media_extraction(
     )
 
 
-def _preview_relative_cache_path(*, relative_path: str, sha256_hex: str) -> str:
+def _preview_relative_cache_path(
+    *,
+    relative_path: str,
+    sha256_hex: str,
+    preview_max_long_edge: int,
+) -> str:
     source_path = Path(relative_path)
     stem = source_path.stem or "asset"
     parent = source_path.parent.as_posix()
-    filename = f"{stem}__{sha256_hex[:12]}__w1024.jpg"
+    filename = f"{stem}__{sha256_hex[:12]}__w{preview_max_long_edge}.jpg"
     if parent and parent != ".":
         return f"{parent}/{filename}"
     return filename
@@ -919,6 +989,9 @@ def _attempt_preview_generation(
     store: UploadStateStore,
     storage_root_path: Path,
     preview_cache_root_path: Path,
+    preview_max_long_edge: int,
+    preview_passthrough_suffixes: frozenset[str],
+    preview_placeholder_suffixes: frozenset[str],
     relative_path: str,
 ) -> None:
     now = datetime.now(UTC).isoformat()
@@ -927,10 +1000,38 @@ def _attempt_preview_generation(
     if asset is None:
         return
     asset_path = storage_root_path / relative_path
+    file_suffix = Path(relative_path).suffix.lower()
+
+    if file_suffix in preview_passthrough_suffixes:
+        store.upsert_media_asset_preview(
+            relative_path=relative_path,
+            preview_status="succeeded",
+            preview_relative_path=None,
+            attempted_at_utc=now,
+            succeeded_at_utc=now,
+            failed_at_utc=None,
+            failure_detail=None,
+            recorded_at_utc=now,
+        )
+        return
+
+    if file_suffix in preview_placeholder_suffixes:
+        store.upsert_media_asset_preview(
+            relative_path=relative_path,
+            preview_status="failed",
+            preview_relative_path=None,
+            attempted_at_utc=now,
+            succeeded_at_utc=None,
+            failed_at_utc=now,
+            failure_detail=f"preview generation skipped by configuration for suffix: {file_suffix}",
+            recorded_at_utc=now,
+        )
+        return
 
     preview_relative_path = _preview_relative_cache_path(
         relative_path=relative_path,
         sha256_hex=asset.sha256_hex,
+        preview_max_long_edge=preview_max_long_edge,
     )
     preview_path = preview_cache_root_path / preview_relative_path
     preview_path.parent.mkdir(parents=True, exist_ok=True)
@@ -938,7 +1039,10 @@ def _attempt_preview_generation(
     try:
         if not preview_path.exists():
             with _render_preview_source(asset_path) as preview_image:
-                preview_image.thumbnail(_PREVIEW_MAX_SIZE, Image.Resampling.LANCZOS)
+                preview_image.thumbnail(
+                    _preview_max_size(preview_max_long_edge),
+                    Image.Resampling.LANCZOS,
+                )
                 preview_image.save(preview_path, format="JPEG", quality=85, optimize=True)
     except ValueError as exc:
         store.upsert_media_asset_preview(
@@ -1296,6 +1400,9 @@ def create_app(
     state_store: UploadStateStore | None = None,
     database_url: str | None = None,
     storage_root: str | Path | None = None,
+    preview_max_long_edge: int | None = None,
+    preview_passthrough_suffixes: list[str] | set[str] | tuple[str, ...] | None = None,
+    preview_placeholder_suffixes: list[str] | set[str] | tuple[str, ...] | None = None,
     bootstrap_token: str | None = None,
 ) -> FastAPI:
     resolved_storage_root = storage_root or os.getenv("PHOTOVAULT_API_STORAGE_ROOT")
@@ -1307,6 +1414,23 @@ def create_app(
         or str(storage_root_path.parent / ".photovault_preview_cache")
     )
     preview_cache_root_path = Path(resolved_preview_cache_root).expanduser().resolve()
+    resolved_preview_max_long_edge = _resolve_preview_max_long_edge(
+        preview_max_long_edge
+        if preview_max_long_edge is not None
+        else os.getenv("PHOTOVAULT_API_PREVIEW_MAX_LONG_EDGE")
+    )
+    resolved_preview_passthrough_suffixes = _resolve_preview_suffix_set(
+        preview_passthrough_suffixes
+        if preview_passthrough_suffixes is not None
+        else os.getenv("PHOTOVAULT_API_PREVIEW_PASSTHROUGH_SUFFIXES"),
+        env_name="PHOTOVAULT_API_PREVIEW_PASSTHROUGH_SUFFIXES",
+    )
+    resolved_preview_placeholder_suffixes = _resolve_preview_suffix_set(
+        preview_placeholder_suffixes
+        if preview_placeholder_suffixes is not None
+        else os.getenv("PHOTOVAULT_API_PREVIEW_PLACEHOLDER_SUFFIXES"),
+        env_name="PHOTOVAULT_API_PREVIEW_PLACEHOLDER_SUFFIXES",
+    )
     temp_root = storage_root_path / ".temp_uploads"
     temp_root.mkdir(parents=True, exist_ok=True)
     preview_cache_root_path.mkdir(parents=True, exist_ok=True)
@@ -1325,6 +1449,9 @@ def create_app(
     app.state.storage_root = storage_root_path
     app.state.storage_temp_root = temp_root
     app.state.preview_cache_root = preview_cache_root_path
+    app.state.preview_max_long_edge = resolved_preview_max_long_edge
+    app.state.preview_passthrough_suffixes = resolved_preview_passthrough_suffixes
+    app.state.preview_placeholder_suffixes = resolved_preview_placeholder_suffixes
     app.state.bootstrap_token = bootstrap_token or os.getenv("PHOTOVAULT_API_BOOTSTRAP_TOKEN", "")
 
     @app.get("/healthz")
@@ -1487,6 +1614,14 @@ def create_app(
     def verify_upload(payload: VerifyRequest, request: Request) -> VerifyResponse:
         store: UploadStateStore = app.state.upload_state_store
         _require_approved_client(request, store)
+
+        # Phase 3.C: check for tombstoned SHA before checking known_sha256.
+        # This prevents re-upload of deleted content.
+        if store.is_sha_tombstoned(payload.sha256_hex):
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "sha_tombstoned", "sha256_hex": payload.sha256_hex},
+            )
 
         if store.has_sha(payload.sha256_hex):
             return VerifyResponse(status="ALREADY_EXISTS")
@@ -2047,6 +2182,248 @@ def create_app(
             total=total, limit=limit, offset=offset, items=items
         )
 
+    # ---------- Phase 3.C: execute delete + tombstones ----------------------
+
+    _TRASH_RETENTION_DAYS = 14
+
+    class ExecuteRejectsRequest(BaseModel):
+        relative_paths: list[str] | None = Field(default=None, max_length=10000)
+
+    class ExecuteRejectsResponse(BaseModel):
+        executed: list[str]
+        skipped: list[str]
+
+    class ClientTombstoneReportItem(BaseModel):
+        sha256_hex: str
+        relative_path: str
+        trashed_at_utc: str
+
+    class ClientTombstoneReportRequest(BaseModel):
+        sha256_hex: list[str] = Field(min_length=0, max_length=500)
+
+    class ClientTombstoneReportResponse(BaseModel):
+        tombstoned: list[ClientTombstoneReportItem]
+
+    @app.post("/v1/admin/catalog/rejects/execute", response_model=ExecuteRejectsResponse)
+    def admin_execute_rejects(payload: ExecuteRejectsRequest) -> ExecuteRejectsResponse:
+        store: UploadStateStore = app.state.upload_state_store
+        executed: list[str] = []
+        skipped: list[str] = []
+
+        # Determine which paths to execute: payload list or entire queue.
+        if payload.relative_paths:
+            target_paths = payload.relative_paths
+        else:
+            _, all_rejected = store.list_catalog_rejects(limit=100000, offset=0)
+            target_paths = [row.relative_path for row in all_rejected]
+
+        now = datetime.now(UTC).isoformat()
+        for relative_path in target_paths:
+            safe_path = _require_safe_relative_path(relative_path)
+            # Find the rejected row for this path.
+            rejects_total, rejects_batch = store.list_catalog_rejects(limit=100000, offset=0)
+            matching_reject = next(
+                (r for r in rejects_batch if r.relative_path == safe_path), None
+            )
+            if matching_reject is None:
+                skipped.append(safe_path)
+                continue
+
+            # Move file to trash.
+            source_path = storage_root_path / safe_path
+            trashed_at = datetime.fromisoformat(now)
+            trash_year = f"{trashed_at.year:04d}"
+            trash_month = f"{trashed_at.month:02d}"
+            trash_day = f"{trashed_at.day:02d}"
+            sha_prefix = matching_reject.sha256_hex[:12]
+            trash_relative_path = f".trash/{trash_year}/{trash_month}/{trash_day}/{sha_prefix}/{safe_path}"
+            trash_path = storage_root_path / trash_relative_path
+
+            try:
+                if source_path.exists():
+                    trash_path.parent.mkdir(parents=True, exist_ok=True)
+                    try:
+                        os.replace(source_path, trash_path)
+                    except OSError:
+                        # Fallback for cross-filesystem: copy + unlink + fsync.
+                        import shutil as shutil_module
+                        shutil_module.copy2(source_path, trash_path)
+                        source_path.unlink()
+                        trash_path.parent.mkdir(parents=True, exist_ok=True)
+
+                # Record tombstone.
+                size_bytes = trash_path.stat().st_size if trash_path.exists() else 0
+                store.add_tombstone(
+                    relative_path=safe_path,
+                    sha256_hex=matching_reject.sha256_hex,
+                    trashed_at_utc=now,
+                    marked_reason=matching_reject.marked_reason,
+                    trash_relative_path=trash_relative_path,
+                    original_size_bytes=size_bytes,
+                )
+
+                # Delete the media asset row; ON DELETE CASCADE (Postgres) and the
+                # in-memory delete_media_asset implementation both remove the
+                # extraction, preview, and reject-queue rows automatically.
+                store.delete_media_asset(safe_path)
+                executed.append(safe_path)
+            except OSError:
+                skipped.append(safe_path)
+
+        return ExecuteRejectsResponse(executed=executed, skipped=skipped)
+
+    @app.post("/v1/client/tombstone-report", response_model=ClientTombstoneReportResponse)
+    def client_tombstone_report(
+        payload: ClientTombstoneReportRequest, request: Request
+    ) -> ClientTombstoneReportResponse:
+        store: UploadStateStore = app.state.upload_state_store
+        _require_approved_client(request, store)
+
+        tombstones = store.list_sha_tombstones(payload.sha256_hex)
+        items = [
+            ClientTombstoneReportItem(
+                sha256_hex=ts.sha256_hex,
+                relative_path=ts.relative_path,
+                trashed_at_utc=ts.trashed_at_utc,
+            )
+            for ts in tombstones
+        ]
+        return ClientTombstoneReportResponse(tombstoned=items)
+
+    # ---------- Phase 3.D: tombstone list + restore -------------------------
+
+    class TombstoneListItem(BaseModel):
+        relative_path: str
+        sha256_hex: str
+        trashed_at_utc: str
+        marked_reason: str | None
+        trash_relative_path: str
+        original_size_bytes: int
+        age_days: int
+        days_until_purge: int
+
+    class TombstoneListResponse(BaseModel):
+        total: int
+        limit: int
+        offset: int
+        items: list[TombstoneListItem]
+
+    class TombstoneRestoreRequest(BaseModel):
+        relative_path: str = Field(min_length=1)
+
+    class TombstoneRestoreResponse(BaseModel):
+        restored: bool
+        relative_path: str
+        sha256_hex: str
+        restored_at_utc: str
+
+    @app.get("/v1/admin/catalog/tombstones", response_model=TombstoneListResponse)
+    def admin_list_tombstones(
+        limit: int = Query(default=50, ge=1, le=500),
+        offset: int = Query(default=0, ge=0),
+        older_than_days: int | None = Query(default=None, ge=0),
+    ) -> TombstoneListResponse:
+        """List tombstoned assets, sorted oldest-first.
+
+        ``older_than_days`` filters to only tombstones whose ``trashed_at_utc``
+        is at least that many days ago — used by the UI to highlight items about
+        to be purged and by the purge worker.
+        """
+        store: UploadStateStore = app.state.upload_state_store
+        total, tombstones = store.list_tombstones(
+            limit=limit, offset=offset, older_than_days=older_than_days
+        )
+        now = datetime.now(UTC)
+        items: list[TombstoneListItem] = []
+        for ts in tombstones:
+            trashed_at = datetime.fromisoformat(ts.trashed_at_utc)
+            if trashed_at.tzinfo is None:
+                trashed_at = trashed_at.replace(tzinfo=UTC)
+            age_days = max(0, (now - trashed_at).days)
+            days_until_purge = max(0, _TRASH_RETENTION_DAYS - age_days)
+            items.append(
+                TombstoneListItem(
+                    relative_path=ts.relative_path,
+                    sha256_hex=ts.sha256_hex,
+                    trashed_at_utc=ts.trashed_at_utc,
+                    marked_reason=ts.marked_reason,
+                    trash_relative_path=ts.trash_relative_path,
+                    original_size_bytes=ts.original_size_bytes,
+                    age_days=age_days,
+                    days_until_purge=days_until_purge,
+                )
+            )
+        return TombstoneListResponse(total=total, limit=limit, offset=offset, items=items)
+
+    @app.post("/v1/admin/catalog/tombstones/restore", response_model=TombstoneRestoreResponse)
+    def admin_restore_tombstone(payload: TombstoneRestoreRequest) -> TombstoneRestoreResponse:
+        """Restore a soft-deleted asset from .trash/ back to its original path.
+
+        Atomic per-path sequence:
+        1. Look up tombstone (404 if absent).
+        2. Move file from <storage_root>/<trash_relative_path> back to
+           <storage_root>/<relative_path>. Returns 409 with code
+           ``trash_gone`` if the physical file is missing — the tombstone is
+           intentionally left intact so the operator knows the file is lost.
+        3. Defensively delete any stale api_media_assets row, then re-insert
+           with origin_kind='restored' and observed_at_utc=now.
+        4. Remove the tombstone row.
+        """
+        store: UploadStateStore = app.state.upload_state_store
+        safe_path = _require_safe_relative_path(payload.relative_path)
+
+        # 1. Read tombstone (404 if absent).
+        tombstone = store.get_tombstone_by_path(safe_path)
+        if tombstone is None:
+            raise HTTPException(status_code=404, detail="tombstone not found")
+
+        # 2. Move file back from trash.
+        trash_path = storage_root_path / tombstone.trash_relative_path
+        dest_path = storage_root_path / safe_path
+
+        if not trash_path.is_file():
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "trash_gone", "relative_path": safe_path},
+            )
+
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.replace(trash_path, dest_path)
+        except OSError:
+            # Cross-filesystem fallback: copy + fsync + unlink.
+            shutil.copy2(str(trash_path), str(dest_path))
+            try:
+                with dest_path.open("rb") as _fh:
+                    os.fsync(_fh.fileno())
+            except OSError:
+                pass
+            trash_path.unlink(missing_ok=True)
+
+        # 3. Defensively clean up any existing api_media_assets row, then
+        #    re-insert so the asset reappears in the catalog. Extraction/preview
+        #    rows are intentionally NOT recreated — they rebuild on demand via
+        #    the existing backfill paths.
+        now_utc = datetime.now(UTC).isoformat()
+        store.delete_media_asset(safe_path)
+        store.upsert_media_asset(
+            relative_path=safe_path,
+            sha256_hex=tombstone.sha256_hex,
+            size_bytes=tombstone.original_size_bytes,
+            origin_kind="restored",
+            observed_at_utc=now_utc,
+        )
+
+        # 4. Remove the tombstone row so subsequent uploads are accepted.
+        store.remove_tombstone(safe_path)
+
+        return TombstoneRestoreResponse(
+            restored=True,
+            relative_path=safe_path,
+            sha256_hex=tombstone.sha256_hex,
+            restored_at_utc=now_utc,
+        )
+
     @app.post("/v1/admin/catalog/preview/retry", response_model=AdminRetryPreviewResponse)
     def admin_retry_catalog_preview(payload: AdminRetryPreviewRequest) -> AdminRetryPreviewResponse:
         store: UploadStateStore = app.state.upload_state_store
@@ -2058,6 +2435,9 @@ def create_app(
             store=store,
             storage_root_path=storage_root_path,
             preview_cache_root_path=preview_cache_root_path,
+            preview_max_long_edge=resolved_preview_max_long_edge,
+            preview_passthrough_suffixes=resolved_preview_passthrough_suffixes,
+            preview_placeholder_suffixes=resolved_preview_placeholder_suffixes,
             relative_path=payload.relative_path,
         )
         updated = store.get_media_asset_by_path(payload.relative_path)
@@ -2071,8 +2451,19 @@ def create_app(
         record = store.get_media_asset_by_path(relative_path)
         if record is None:
             raise HTTPException(status_code=404, detail="catalog asset not found")
-        if record.preview_status != "succeeded" or not record.preview_relative_path:
+        if record.preview_status != "succeeded":
             raise HTTPException(status_code=404, detail="preview not available")
+
+        if not record.preview_relative_path:
+            source_path = (storage_root_path / record.relative_path).resolve()
+            try:
+                source_path.relative_to(storage_root_path)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail="invalid source path") from exc
+            if not source_path.is_file():
+                raise HTTPException(status_code=404, detail="source file missing")
+            media_type = mimetypes.guess_type(str(source_path.name))[0] or "application/octet-stream"
+            return FileResponse(source_path, media_type=media_type)
 
         preview_path = (preview_cache_root_path / record.preview_relative_path).resolve()
         try:
@@ -2211,6 +2602,9 @@ def create_app(
                 store=store,
                 storage_root_path=storage_root_path,
                 preview_cache_root_path=preview_cache_root_path,
+                preview_max_long_edge=resolved_preview_max_long_edge,
+                preview_passthrough_suffixes=resolved_preview_passthrough_suffixes,
+                preview_placeholder_suffixes=resolved_preview_placeholder_suffixes,
                 relative_path=candidate.relative_path,
             )
             updated = store.get_media_asset_by_path(candidate.relative_path)

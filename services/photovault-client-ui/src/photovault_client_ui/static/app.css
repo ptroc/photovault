@@ -1,0 +1,117 @@
+:root {
+  color-scheme: light;
+}
+
+body.client-shell {
+  background:
+    radial-gradient(circle at top right, rgba(13, 110, 253, 0.14), transparent 28%),
+    linear-gradient(180deg, #f8fbff 0%, #eef4fa 100%);
+  min-height: 100vh;
+}
+
+.navbar-brand {
+  letter-spacing: -0.02em;
+}
+
+.hero-panel,
+.surface-card,
+.action-card,
+.job-card,
+.partition-card,
+.summary-card {
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  box-shadow: 0 0.5rem 1.5rem rgba(15, 23, 42, 0.06);
+}
+
+.eyebrow {
+  letter-spacing: 0.08em;
+}
+
+.surface-card .card-title {
+  letter-spacing: -0.02em;
+}
+
+.metric-value {
+  letter-spacing: -0.04em;
+}
+
+.metric-card {
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.summary-card {
+  background: rgba(255, 255, 255, 0.78);
+}
+
+.badge.text-bg-primary-subtle {
+  background: rgba(13, 110, 253, 0.12) !important;
+}
+
+.technical-copy,
+.mono,
+code.inline-code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.86rem;
+  word-break: break-word;
+}
+
+.job-progress-bar {
+  height: 0.75rem;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #dbe3ef;
+}
+
+.job-progress-segment.uploaded {
+  background: #198754;
+}
+
+.job-progress-segment.ignored {
+  background: #0d6efd;
+}
+
+.job-progress-segment.failed {
+  background: #dc3545;
+}
+
+.job-progress-segment.pending {
+  background: #6c757d;
+}
+
+.muted-help {
+  color: var(--bs-secondary-color);
+}
+
+.diagnostic-block details > summary,
+.technical-summary {
+  cursor: pointer;
+  color: var(--bs-primary);
+  font-weight: 600;
+}
+
+.sticky-page-actions {
+  position: sticky;
+  top: 5.5rem;
+}
+
+.device-row + .device-row {
+  margin-top: 1rem;
+}
+
+.table thead th {
+  font-size: 0.76rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--bs-secondary-color);
+}
+
+.navbar .nav-link.active {
+  font-weight: 700;
+}
+
+@media (max-width: 991.98px) {
+  .sticky-page-actions {
+    position: static;
+  }
+}

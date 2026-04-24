@@ -1,92 +1,86 @@
 {% extends "_base.html" %}
+{% from "macros.html" import state_badge %}
 
 {% block content %}
-  <section class="section dashboard-grid">
-    <article class="card stack">
-      <h2>Diagnostics summary</h2>
-      {% if diagnostics %}
-        <div class="kpi-grid">
-          <div class="kpi-box">
-            <span class="muted">M0 foundation checks</span>
-            <span class="kpi-value {% if diagnostics.ok %}status-ok{% else %}status-error{% endif %}">
-              {% if diagnostics.ok %}PASS{% else %}FAIL{% endif %}
-            </span>
-          </div>
-          <div class="kpi-box">
-            <span class="muted">Invariant issues</span>
-            <span class="kpi-value {% if diagnostics.invariant_issue_count > 0 %}status-error{% else %}status-ok{% endif %}">
-              {{ diagnostics.invariant_issue_count }}
-            </span>
-          </div>
-          <div class="kpi-box">
-            <span class="muted">Bootstrap pending entries</span>
-            <span class="kpi-value {% if diagnostics.pending_bootstrap_entries > 0 %}status-warn{% else %}status-ok{% endif %}">
-              {{ diagnostics.pending_bootstrap_entries }}
-            </span>
-          </div>
-        </div>
-      {% else %}
-        <p class="muted">No diagnostics are available.</p>
-      {% endif %}
-      <div class="banner {% if state_guidance.kind == 'blocked' %}banner-critical{% elif state_guidance.kind == 'waiting' %}banner-warning{% else %}banner-success{% endif %}">
-        <strong>{{ state_guidance.title }}</strong>
-        <span>{{ state_guidance.summary }}</span>
-        <span>Operator action: {{ state_guidance.operator_action }}</span>
-      </div>
-    </article>
-
-    <article class="card stack">
-      <h2>Recent event digest</h2>
-      <div class="kpi-grid">
-        <div class="kpi-box">
-          <span class="muted">Errors in window</span>
-          <span class="kpi-value {% if event_summary.error_count > 0 %}status-error{% else %}status-ok{% endif %}">
-            {{ event_summary.error_count }}
-          </span>
-        </div>
-        <div class="kpi-box">
-          <span class="muted">Warnings in window</span>
-          <span class="kpi-value {% if event_summary.warn_count > 0 %}status-warn{% else %}status-ok{% endif %}">
-            {{ event_summary.warn_count }}
-          </span>
-        </div>
-      </div>
-      {% if event_summary.highlights %}
-        <ul class="list-inline">
-          {% for event in event_summary.highlights %}
-            <li>
-              <strong>{{ event.category }}</strong>
-              <span class="pill {% if event.level == 'ERROR' %}blocked{% elif event.level == 'WARN' %}active{% else %}completed{% endif %}">
-                {{ event.level }}
-              </span><br>
-              <span class="muted">{{ event.created_at_utc }}</span><br>
-              <span>{{ event.message }}</span>
-            </li>
-          {% endfor %}
-        </ul>
-      {% else %}
-        <p class="muted">No recent events to summarize.</p>
-      {% endif %}
-    </article>
+  <section class="card surface-card mb-4">
+    <div class="card-body">
+      <div class="eyebrow text-uppercase text-secondary fw-semibold small mb-2">Diagnostics</div>
+      <h2 class="card-title h3 mb-1">Diagnostics summary</h2>
+      <p class="muted-help mb-0">Deep diagnostic context remains available here instead of dominating the primary command views.</p>
+    </div>
   </section>
 
-  <section class="section card stack">
-    <h2>Detailed daemon events</h2>
-    {% if events %}
-      <ul class="list-inline">
+  <section class="row g-3 mb-4">
+    <div class="col-lg-6">
+      <article class="card surface-card h-100">
+        <div class="card-body">
+          <h2 class="card-title h4 mb-3">Diagnostics summary</h2>
+          {% if diagnostics %}
+          <div class="row row-cols-3 g-3 mb-3">
+            <div class="col"><div class="card metric-card h-100"><div class="card-body"><div class="small text-secondary text-uppercase fw-semibold">M0 foundation checks</div><div class="fw-semibold">{% if diagnostics.ok %}PASS{% else %}FAIL{% endif %}</div></div></div></div>
+            <div class="col"><div class="card metric-card h-100"><div class="card-body"><div class="small text-secondary text-uppercase fw-semibold">Invariant issues</div><div class="fw-semibold">{{ diagnostics.invariant_issue_count }}</div></div></div></div>
+            <div class="col"><div class="card metric-card h-100"><div class="card-body"><div class="small text-secondary text-uppercase fw-semibold">Bootstrap pending entries</div><div class="fw-semibold">{{ diagnostics.pending_bootstrap_entries }}</div></div></div></div>
+          </div>
+          {% else %}
+          <p class="muted-help">No diagnostics are available.</p>
+          {% endif %}
+          <div class="alert {% if state_guidance.kind == 'blocked' %}alert-danger{% elif state_guidance.kind == 'waiting' %}alert-warning{% else %}alert-success{% endif %} mb-0" role="alert">
+            <strong>{{ state_guidance.title }}</strong>
+            <div>{{ state_guidance.summary }}</div>
+            <div class="mt-2">Operator action: {{ state_guidance.operator_action }}</div>
+          </div>
+        </div>
+      </article>
+    </div>
+
+    <div class="col-lg-6">
+      <article class="card surface-card h-100">
+        <div class="card-body">
+          <h2 class="card-title h4 mb-3">Recent event digest</h2>
+          <div class="row row-cols-2 g-3 mb-3">
+            <div class="col"><div class="card metric-card h-100"><div class="card-body"><div class="small text-secondary text-uppercase fw-semibold">Errors in window</div><div class="fw-semibold">{{ event_summary.error_count }}</div></div></div></div>
+            <div class="col"><div class="card metric-card h-100"><div class="card-body"><div class="small text-secondary text-uppercase fw-semibold">Warnings in window</div><div class="fw-semibold">{{ event_summary.warn_count }}</div></div></div></div>
+          </div>
+          {% if event_summary.highlights %}
+          <div class="d-grid gap-2">
+            {% for event in event_summary.highlights %}
+            <div class="summary-card rounded-4 p-3">
+              <div class="d-flex flex-wrap gap-2 align-items-center mb-2">
+                <strong>{{ event.category }}</strong>
+                {{ state_badge(event.level|lower, event.level) }}
+              </div>
+              <div class="small text-secondary mb-1">{{ event.created_at_utc }}</div>
+              <div>{{ event.message }}</div>
+            </div>
+            {% endfor %}
+          </div>
+          {% else %}
+          <p class="muted-help mb-0">No recent events to summarize.</p>
+          {% endif %}
+        </div>
+      </article>
+    </div>
+  </section>
+
+  <section class="card surface-card">
+    <div class="card-body">
+      <h2 class="card-title h4 mb-3">Detailed daemon events</h2>
+      {% if events %}
+      <div class="d-grid gap-2">
         {% for event in events %}
-          <li class="job-card">
+        <div class="summary-card rounded-4 p-3">
+          <div class="d-flex flex-wrap gap-2 align-items-center mb-2">
             <strong>{{ event.category }}</strong>
-            <span class="pill {% if event.level == 'ERROR' %}blocked{% elif event.level == 'WARN' %}active{% else %}completed{% endif %}">
-              {{ event.level }}
-            </span>
-            <span class="muted">({{ event.created_at_utc }})</span><br>
-            <span>{{ event.message }}</span>
-          </li>
+            {{ state_badge(event.level|lower, event.level) }}
+            <span class="small text-secondary">({{ event.created_at_utc }})</span>
+          </div>
+          <div>{{ event.message }}</div>
+        </div>
         {% endfor %}
-      </ul>
-    {% else %}
-      <p class="muted">No daemon events are available.</p>
-    {% endif %}
+      </div>
+      {% else %}
+      <p class="muted-help mb-0">No daemon events are available.</p>
+      {% endif %}
+    </div>
   </section>
 {% endblock %}

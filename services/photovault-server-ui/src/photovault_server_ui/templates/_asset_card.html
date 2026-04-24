@@ -1,4 +1,4 @@
-{% from "macros.html" import status_badge %}
+{% from "macros.html" import status_badge, timestamp_stack %}
 {# Renders a single catalog asset card.
    Context: asset (dict), page (int/str), return_query (str, url-encoded query string without leading ?).
    Safe to render standalone for HTMX swaps. #}
@@ -41,7 +41,7 @@
               <span class="mx-2">·</span>
               <span>Job {{ asset.provenance_job_name or "n/a" }}</span>
               <span class="mx-2">·</span>
-              <span>Cataloged {{ asset.last_cataloged_at_utc }}</span>
+              <span class="d-inline-flex align-items-start gap-1">Cataloged {{ timestamp_stack(asset.last_cataloged_at_utc, mono=True) }}</span>
             </div>
           </div>
           <div class="asset-actions d-flex flex-wrap gap-2 align-items-start justify-content-xl-end">

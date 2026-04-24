@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "macros.html" import pager %}
+{% from "macros.html" import pager, timestamp_stack %}
 {% set title = "Files" %}
 {% block content %}
 <section class="page-hero">
@@ -35,13 +35,13 @@
           <td class="mono">{{ file.relative_path }}</td>
           <td>{{ file.size_human }}</td>
           <td>{{ file.source_kind }}</td>
-          <td class="mono">{{ file.last_seen_at_utc }}</td>
+          <td>{{ timestamp_stack(file.last_seen_at_utc, mono=True) }}</td>
           <td>
             <details>
               <summary class="small fw-semibold text-primary">Technical detail</summary>
               <div class="small pt-2 text-secondary">
                 <div><strong>SHA256:</strong> <span class="mono">{{ file.sha256_display }}</span></div>
-                <div><strong>First seen:</strong> <span class="mono">{{ file.first_seen_at_utc or "n/a" }}</span></div>
+                <div><strong>First seen:</strong> {{ timestamp_stack(file.first_seen_at_utc, mono=True) }}</div>
               </div>
             </details>
           </td>

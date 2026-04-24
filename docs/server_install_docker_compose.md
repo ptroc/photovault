@@ -65,12 +65,21 @@ PHOTOVAULT_API_DATABASE_URL=postgresql://photovault_api:change-me-strong-passwor
 PHOTOVAULT_STORAGE_HOST_ROOT=/storage/photovault
 PHOTOVAULT_STORAGE_CONTAINER_ROOT=/var/storage
 PHOTOVAULT_API_STORAGE_ROOT=/var/storage
+PHOTOVAULT_API_PREVIEW_MAX_LONG_EDGE=2048
+PHOTOVAULT_API_PREVIEW_PASSTHROUGH_SUFFIXES=.jpg,.jpeg
+PHOTOVAULT_API_PREVIEW_PLACEHOLDER_SUFFIXES=.avi,.mp4
 ENV
 ```
 
 If your DB runs on another machine, replace `host.docker.internal` with that hostname/IP.
 `PHOTOVAULT_API_STORAGE_ROOT` must be inside the container path selected by
 `PHOTOVAULT_STORAGE_CONTAINER_ROOT`.
+`PHOTOVAULT_API_PREVIEW_MAX_LONG_EDGE` is optional and caps preview JPEGs on the
+longest edge (positive integer, default `1024`).
+`PHOTOVAULT_API_PREVIEW_PASSTHROUGH_SUFFIXES` is optional; listed suffixes skip preview generation
+and are served as original files by the preview endpoint.
+`PHOTOVAULT_API_PREVIEW_PLACEHOLDER_SUFFIXES` is optional; listed suffixes skip preview generation
+and stay in placeholder mode.
 
 ## 5. Build and start services with Docker Compose
 

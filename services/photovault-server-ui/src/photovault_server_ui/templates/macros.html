@@ -26,6 +26,18 @@
   </span>
 {%- endmacro %}
 
+{% macro timestamp_stack(value, empty='n/a', mono=False) -%}
+  {% set parts = timestamp_parts(value) %}
+  {% if parts %}
+    <span class="timestamp-stack{{ ' mono' if mono else '' }}">
+      <span class="timestamp-date">{{ parts.date }}</span>
+      {% if parts.time %}<span class="timestamp-time text-secondary">{{ parts.time }}</span>{% endif %}
+    </span>
+  {% else %}
+    <span class="{{ 'mono' if mono else 'text-secondary' }}">{{ empty }}</span>
+  {% endif %}
+{%- endmacro %}
+
 {% macro pager(previous_url, next_url, page) -%}
   <nav aria-label="Pagination" class="mt-4">
     <ul class="pagination pagination-sm mb-0">

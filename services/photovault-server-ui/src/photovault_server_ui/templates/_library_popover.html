@@ -1,4 +1,4 @@
-{% from "macros.html" import status_badge %}
+{% from "macros.html" import status_badge, timestamp_stack %}
 {# Hover/focus popover fragment. Swapped into .library-tile-popover by HTMX.
    Keep it short: identity, dimensions, capture metadata, plus quick actions. #}
 <div class="library-popover-inner">
@@ -13,25 +13,46 @@
     {% if asset.is_favorite %}{{ status_badge('favorite') }}{% endif %}
     {% if asset.is_archived %}{{ status_badge('archived') }}{% endif %}
   </div>
-  <dl class="library-popover-dl small mt-2 mb-2">
-    <dt>Size</dt><dd>{{ asset.size_human }}</dd>
+  <div class="library-popover-metrics mt-3 mb-3">
+    <div class="library-popover-metric">
+      <div class="library-popover-label">Size</div>
+      <div class="fw-semibold">{{ asset.size_human }}</div>
+    </div>
     {% if asset.capture_timestamp_utc %}
-      <dt>Captured</dt><dd>{{ asset.capture_timestamp_utc }}</dd>
+    <div class="library-popover-metric">
+      <div class="library-popover-label">Captured</div>
+      {{ timestamp_stack(asset.capture_timestamp_utc, mono=True) }}
+    </div>
     {% endif %}
     {% if asset.image_width and asset.image_height %}
-      <dt>Dimensions</dt><dd>{{ asset.image_width }} × {{ asset.image_height }}</dd>
-    {% endif %}
-    {% if asset.exposure_summary %}
-      <dt>Exposure</dt><dd>{{ asset.exposure_summary }}</dd>
+    <div class="library-popover-metric">
+      <div class="library-popover-label">Dimensions</div>
+      <div class="fw-semibold">{{ asset.image_width }} × {{ asset.image_height }}</div>
+    </div>
     {% endif %}
     {% if asset.camera_make or asset.camera_model %}
-      <dt>Camera</dt><dd>{{ (asset.camera_make or '') }} {{ (asset.camera_model or '') }}</dd>
+    <div class="library-popover-metric">
+      <div class="library-popover-label">Camera</div>
+      <div class="fw-semibold">{{ (asset.camera_make or '') }} {{ (asset.camera_model or '') }}</div>
+    </div>
     {% endif %}
-    {% if asset.lens_model %}
-      <dt>Lens</dt><dd>{{ asset.lens_model }}</dd>
+    <div class="library-popover-metric">
+      <div class="library-popover-label">Cataloged</div>
+      {{ timestamp_stack(asset.last_cataloged_at_utc, mono=True) }}
+    </div>
+    {% if asset.provenance_job_name %}
+    <div class="library-popover-metric">
+      <div class="library-popover-label">Job</div>
+      <div class="fw-semibold">{{ asset.provenance_job_name }}</div>
+    </div>
     {% endif %}
-    <dt>Cataloged</dt><dd>{{ asset.last_cataloged_at_utc }}</dd>
-  </dl>
+  </div>
+  {% if asset.exposure_summary %}
+  <div class="library-popover-focus mb-3">{{ asset.exposure_summary }}</div>
+  {% endif %}
+  {% if asset.lens_model %}
+  <div class="small text-secondary mb-3">Lens {{ asset.lens_model }}</div>
+  {% endif %}
   <div class="library-popover-actions d-flex gap-2 flex-wrap">
     <a
       class="btn btn-sm btn-primary"

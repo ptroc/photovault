@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "macros.html" import status_badge %}
+{% from "macros.html" import status_badge, timestamp_stack %}
 {% set title = "Overview" %}
 {% block content %}
 <section class="page-hero">
@@ -83,11 +83,11 @@
         <div class="d-grid gap-3">
           <div class="summary-chip rounded-4 p-3">
             <div class="small text-secondary text-uppercase fw-semibold mb-1">Last indexed file</div>
-            <div class="mono">{{ overview.last_indexed_at_utc or "No indexed files yet" }}</div>
+            <div>{{ timestamp_stack(overview.last_indexed_at_utc, empty="No indexed files yet", mono=True) }}</div>
           </div>
           <div class="summary-chip rounded-4 p-3">
             <div class="small text-secondary text-uppercase fw-semibold mb-1">Last uploaded file</div>
-            <div class="mono">{{ overview.last_uploaded_at_utc or "No uploaded files yet" }}</div>
+            <div>{{ timestamp_stack(overview.last_uploaded_at_utc, empty="No uploaded files yet", mono=True) }}</div>
           </div>
         </div>
       </div>
@@ -112,7 +112,7 @@
           <div class="col">
             <div class="summary-chip rounded-4 p-3">
               <div class="small text-secondary text-uppercase fw-semibold mb-1">Completed at</div>
-              <div class="mono">{{ latest_run.completed_at_utc }}</div>
+              <div>{{ timestamp_stack(latest_run.completed_at_utc, mono=True) }}</div>
             </div>
           </div>
           <div class="col">

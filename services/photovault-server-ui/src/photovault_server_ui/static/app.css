@@ -78,6 +78,19 @@ body.server-shell {
   word-break: break-word;
 }
 
+.timestamp-stack {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.05rem;
+  line-height: 1.1;
+}
+
+.timestamp-date,
+.timestamp-time {
+  white-space: nowrap;
+}
+
 .asset-actions form,
 .inline-form {
   margin: 0;
@@ -285,6 +298,7 @@ body.server-shell {
 .library-tile:hover,
 .library-tile:focus-within {
   box-shadow: 0 0.5rem 1.25rem rgba(15, 23, 42, 0.12);
+  overflow: visible;
 }
 
 /* Phase 3.B: rejected-state outline. Kept subtle so the reviewer can still
@@ -308,6 +322,9 @@ body.server-shell {
   align-items: center;
   justify-content: center;
   overflow: hidden;
+  /* Keep image clipped to the tile's top rounded corners even when the
+     parent tile switches to overflow:visible on hover (for the popover). */
+  border-radius: calc(0.5rem - 1px) calc(0.5rem - 1px) 0 0;
 }
 
 .library-tile-frame img {
@@ -387,7 +404,8 @@ body.server-shell {
   display: none;
 }
 
-.library-tile-popover:not(:empty) {
+.library-tile:hover .library-tile-popover:not(:empty),
+.library-tile:focus-within .library-tile-popover:not(:empty) {
   display: block;
 }
 
@@ -406,6 +424,35 @@ body.server-shell {
 .library-popover-dl dd {
   margin: 0;
   word-break: break-word;
+}
+
+.library-popover-metrics {
+  display: grid;
+  gap: 0.6rem;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.library-popover-metric {
+  min-width: 0;
+  padding: 0.55rem 0.65rem;
+  border-radius: 0.6rem;
+  background: rgba(248, 251, 255, 0.95);
+  border: 1px solid rgba(15, 23, 42, 0.08);
+}
+
+.library-popover-label {
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--bs-secondary-color);
+  margin-bottom: 0.25rem;
+  font-weight: 600;
+}
+
+.library-popover-focus {
+  font-size: 0.84rem;
+  font-weight: 600;
+  color: #0b4a91;
 }
 
 /* Lightbox body layout. */
@@ -459,4 +506,9 @@ body.server-shell {
 .library-lightbox-dl dd {
   margin: 0;
   word-break: break-word;
+}
+
+.preview-frame.preview-frame-duplicate {
+  width: 100%;
+  height: 180px;
 }

@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "macros.html" import timestamp_stack %}
 {% set title = "Conflicts" %}
 {% block content %}
 <section class="page-hero">
@@ -20,7 +21,7 @@
       <div class="col">
         <div class="summary-chip rounded-4 p-3">
           <div class="small text-secondary text-uppercase fw-semibold mb-1">Completed</div>
-          <div class="mono">{{ latest_run.completed_at_utc }}</div>
+          <div>{{ timestamp_stack(latest_run.completed_at_utc, mono=True) }}</div>
         </div>
       </div>
       <div class="col">
@@ -68,7 +69,7 @@
           <div class="d-flex flex-column flex-lg-row justify-content-between gap-3">
             <div>
               <h2 class="h5 mb-1 mono">{{ conflict.relative_path }}</h2>
-              <div class="text-secondary">Detected <span class="mono">{{ conflict.detected_at_utc }}</span></div>
+              <div class="text-secondary d-flex align-items-start gap-2">Detected {{ timestamp_stack(conflict.detected_at_utc, mono=True) }}</div>
             </div>
             <details>
               <summary class="small fw-semibold text-primary">Technical detail</summary>

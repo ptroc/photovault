@@ -383,18 +383,23 @@ def test_index_route_renders_dashboard_not_raw_tables() -> None:
     body = response.get_data(as_text=True)
 
     assert response.status_code == 200
-    assert 'class="active">Overview<' in body
+    assert 'href="/static/vendor/bootstrap/css/bootstrap.min.css"' in body
+    assert 'src="/static/vendor/bootstrap/js/bootstrap.bundle.min.js"' in body
+    assert "nav-link active" in body
+    assert ">Overview<" in body
     assert "Operator dashboard" in body
     assert "Top actions" in body
     assert "Attention and blockers" in body
     assert "Recent daemon activity" in body
     assert "Create ingest job" in body
+    assert "Source path" in body
     assert "Active job summary" in body
     assert "Waiting for network connectivity" in body
-    assert "Current state: <code>WAIT_NETWORK</code>" in body
+    assert 'Current state: <code class="inline-code">WAIT_NETWORK</code>' in body
     assert "Auto progression active" in body
     assert "Waiting jobs" in body
     assert "Run daemon tick (auto progression active)" in body
+    assert "Quick routes" not in body
     assert "disabled" in body
     assert "Ingest Jobs" not in body
     assert "Recent Events" not in body
@@ -658,6 +663,8 @@ def test_block_devices_page_renders_inventory() -> None:
     assert response.status_code == 200
     assert "Block Devices" in body
     assert "/dev/sda1" in body
+    assert "Storage size" in body
+    assert "Mounted" in body
     assert "/mnt/sda_1" in body
     assert "Use as ingest source" in body
 
@@ -838,7 +845,7 @@ def test_create_ingest_job_shows_friendly_source_path_validation_error() -> None
     )
     response = app.test_client().post(
         "/ingest/jobs",
-        data={"media_label": "usb-root", "source_paths": "/mnt/usb\n/mnt/usb/missing.jpg"},
+        data={"media_label": "usb-root", "source_paths": "/mnt/usb/missing.jpg"},
     )
     body = response.get_data(as_text=True)
 
@@ -898,6 +905,27 @@ def test_create_ingest_job_notice_reports_filtered_files() -> None:
     assert "/mnt/usb/readme.txt: Skipped by ingest policy: unsupported file extension .txt" in body
 
 
+def test_create_ingest_job_rejects_multiple_paths_in_ui() -> None:
+    payloads = _overview_payloads(daemon_state="IDLE")
+
+    def fake_daemon_get(_: str, path: str) -> object:
+        return payloads[path]
+
+    app = create_app(
+        daemon_get=fake_daemon_get,
+        network_snapshot_get=_network_snapshot,
+        dependency_snapshot_get=_dependency_snapshot,
+    )
+    response = app.test_client().post(
+        "/ingest/jobs",
+        data={"media_label": "usb-root", "source_paths": "/mnt/usb\n/mnt/usb-2"},
+    )
+    body = response.get_data(as_text=True)
+
+    assert response.status_code == 200
+    assert "Use one absolute source path per ingest job." in body
+
+
 def test_network_page_and_errors_render() -> None:
     payloads = _overview_payloads()
 
@@ -911,7 +939,8 @@ def test_network_page_and_errors_render() -> None:
     )
     client = app.test_client()
     page = client.get("/network").get_data(as_text=True)
-    assert 'class="active">Network<' in page
+    assert "nav-link active" in page
+    assert ">Network<" in page
     assert "Update AP config" in page
     assert "Join upstream Wi-Fi" in page
     assert "Recheck upstream status" in page

@@ -41,9 +41,10 @@ def test_dashboard_renders_overview_metrics() -> None:
     assert "Known SHA groups" in html
     assert ">3<" in html
     assert "Last indexed file" in html
-    assert "2026-04-20T11:00:00+00:00" in html
+    assert "2026-04-20" in html
+    assert "11:00:00 UTC" in html
     assert "Latest Index Run" in html
-    assert "2026-04-20T11:05:00+00:00" in html
+    assert "11:05:00 UTC" in html
     assert "Open duplicate SHA groups" in html
 
 
@@ -293,22 +294,24 @@ def test_dashboard_error_state_is_clear() -> None:
 
 def test_duplicates_page_renders_duplicate_groups() -> None:
     def _fetcher(path: str, query: dict[str, str]) -> dict:
-        assert path == "/v1/admin/duplicates"
-        assert query == {"limit": "25", "offset": "0"}
-        return {
-            "total": 1,
-            "limit": 25,
-            "offset": 0,
-            "items": [
-                {
-                    "sha256_hex": "a" * 64,
-                    "file_count": 2,
-                    "first_seen_at_utc": "2026-04-20T09:00:00+00:00",
-                    "last_seen_at_utc": "2026-04-20T10:00:00+00:00",
-                    "relative_paths": ["2026/04/Trip/a.jpg", "2026/04/TripCopy/a.jpg"],
-                }
-            ],
-        }
+        if path == "/v1/admin/duplicates":
+            assert query == {"limit": "25", "offset": "0"}
+            return {
+                "total": 1,
+                "limit": 25,
+                "offset": 0,
+                "items": [
+                    {
+                        "sha256_hex": "a" * 64,
+                        "file_count": 2,
+                        "first_seen_at_utc": "2026-04-20T09:00:00+00:00",
+                        "last_seen_at_utc": "2026-04-20T10:00:00+00:00",
+                        "relative_paths": ["2026/04/Trip/a.jpg", "2026/04/TripCopy/a.jpg"],
+                    }
+                ],
+            }
+        assert path == "/v1/admin/catalog/asset"
+        return {"item": _library_catalog_item(query["relative_path"])}
 
     app = create_app(api_fetcher=_fetcher)
     response = app.test_client().get("/duplicates")
@@ -318,6 +321,8 @@ def test_duplicates_page_renders_duplicate_groups() -> None:
     assert "2026/04/Trip/a.jpg" in html
     assert "2026/04/TripCopy/a.jpg" in html
     assert "2 path(s)" in html
+    assert 'src="/catalog/preview?relative_path=2026/04/Trip/a.jpg"' in html
+    assert "Mark for deletion" in html
     assert ("a" * 64) not in html
     assert "Technical detail" in html
 
@@ -359,7 +364,8 @@ def test_conflicts_page_renders_conflict_history_and_latest_run() -> None:
     html = response.get_data(as_text=True)
     assert "Path Conflict History" in html
     assert "2026/04/Trip/photo.jpg" in html
-    assert "2026-04-20T11:31:00+00:00" in html
+    assert "2026-04-20" in html
+    assert "11:31:00 UTC" in html
     assert "No path conflicts have been recorded." not in html
 
 
@@ -778,7 +784,8 @@ def test_catalog_page_renders_backfill_controls_and_latest_run_summary() -> None
     assert "Run Preview Backfill" in html
     assert "remaining pending 3, failed 2" in html
     assert "remaining pending 2, failed 1" in html
-    assert "2026-04-22T11:05:00+00:00" in html
+    assert "2026-04-22" in html
+    assert "11:05:00 UTC" in html
 
 
 def test_catalog_backfill_action_posts_filters_and_shows_outcome_message() -> None:
@@ -1127,6 +1134,8 @@ def test_library_page_renders_tree_and_grid() -> None:
             }
         if path == "/v1/admin/catalog/rejects":
             return {"total": 0, "limit": 1, "offset": 0, "items": []}
+        if path == "/v1/admin/catalog/tombstones":
+            return {"total": 0, "limit": 1, "offset": 0, "items": []}
         assert path == "/v1/admin/catalog"
         # Default view has no prefix filter.
         assert query == {"limit": "60", "offset": "0"}
@@ -1179,6 +1188,8 @@ def test_library_page_filters_by_selected_folder() -> None:
             }
         if path == "/v1/admin/catalog/rejects":
             return {"total": 0, "limit": 1, "offset": 0, "items": []}
+        if path == "/v1/admin/catalog/tombstones":
+            return {"total": 0, "limit": 1, "offset": 0, "items": []}
         assert path == "/v1/admin/catalog"
         # The selected folder must be forwarded to the API as the prefix filter.
         assert query == {
@@ -1214,6 +1225,8 @@ def test_library_page_rejects_path_traversal_in_folder_arg() -> None:
         if path == "/v1/admin/catalog/folders":
             return {"folders": []}
         if path == "/v1/admin/catalog/rejects":
+            return {"total": 0, "limit": 1, "offset": 0, "items": []}
+        if path == "/v1/admin/catalog/tombstones":
             return {"total": 0, "limit": 1, "offset": 0, "items": []}
         forwarded["query"] = dict(query)
         return {"total": 0, "limit": 60, "offset": 0, "items": []}
@@ -1685,3 +1698,212 @@ def test_library_reject_unmark_action_posts_and_redirects() -> None:
     assert observed["path"] == "/v1/admin/catalog/reject/unmark"
     assert observed["payload"] == {"relative_path": "2026/04/Job_A/a.jpg"}
     assert "/library/rejects" in response.headers.get("Location", "")
+
+
+# ---------------------------------------------------------------------------
+# Phase 3.C: execute delete + tombstones
+# ---------------------------------------------------------------------------
+
+
+def test_library_rejects_page_delete_button_is_armed_when_queue_nonempty() -> None:
+    """Delete button should not have disabled attribute when queue has items."""
+    def _fetcher(path: str, query: dict[str, str]) -> dict:
+        if path == "/v1/admin/catalog/rejects":
+            return {
+                "total": 3,
+                "limit": 60,
+                "offset": 0,
+                "items": [
+                    {
+                        "relative_path": "2026/04/Job_A/a.jpg",
+                        "sha256_hex": "a" * 64,
+                        "marked_at_utc": "2026-04-22T10:00:00+00:00",
+                        "marked_reason": "blurry",
+                        "item": None,
+                    }
+                ],
+            }
+        return {"folders": []}
+
+    app = create_app(api_fetcher=_fetcher)
+    response = app.test_client().get("/library/rejects")
+    assert response.status_code == 200
+    html = response.get_data(as_text=True)
+    # Delete button should be present and NOT disabled.
+    assert "Delete rejected media (3)" in html
+    # The form wrapper signals the button is now armed.
+    assert 'action="/library/actions/rejects/execute"' in html
+
+
+def test_library_rejects_page_delete_button_stays_disabled_when_queue_empty() -> None:
+    """Delete button should have disabled attribute when queue is empty."""
+    def _fetcher(path: str, query: dict[str, str]) -> dict:
+        return {
+            "total": 0,
+            "limit": 60,
+            "offset": 0,
+            "items": [],
+        }
+
+    app = create_app(api_fetcher=_fetcher)
+    response = app.test_client().get("/library/rejects")
+    assert response.status_code == 200
+    html = response.get_data(as_text=True)
+    assert "Delete rejected media (0)" in html
+    assert "disabled" in html
+
+
+def test_library_rejects_execute_action_posts_to_api_and_redirects() -> None:
+    """Execute delete action POSTs to API and redirects with success message."""
+    observed: dict[str, object] = {}
+
+    def _fetcher(path: str, query: dict[str, str]) -> dict:
+        return {"total": 0, "limit": 60, "offset": 0, "items": []}
+
+    def _poster(path: str, payload: dict) -> dict:
+        observed["path"] = path
+        observed["payload"] = payload
+        return {
+            "executed": ["2026/04/Job_A/a.jpg", "2026/04/Job_A/b.jpg"],
+            "skipped": [],
+        }
+
+    app = create_app(api_fetcher=_fetcher, api_poster=_poster)
+    response = app.test_client().post("/library/actions/rejects/execute")
+    assert response.status_code in (301, 302, 303)
+    assert observed["path"] == "/v1/admin/catalog/rejects/execute"
+    # API is called with the request to execute all (None means drain queue).
+    assert observed["payload"] == {"relative_paths": None}
+    # Redirect includes success message.
+    location = response.headers.get("Location", "")
+    assert "/library/rejects" in location
+    assert "action_message" in location or "Deleted" in location
+
+
+# ---------------------------------------------------------------------------
+# Phase 3.D: trash triage page + library header pill
+# ---------------------------------------------------------------------------
+
+
+def _make_library_fetcher(*, reject_count: int = 0, trash_count: int = 0):
+    """Build a fetcher stub that returns controlled counts for the library page."""
+
+    def _fetcher(path: str, query: dict[str, str]) -> dict:
+        if path == "/v1/admin/catalog":
+            return {"total": 0, "limit": 60, "offset": 0, "items": []}
+        if path == "/v1/admin/catalog/folders":
+            return {"folders": []}
+        if path == "/v1/admin/catalog/rejects":
+            return {"total": reject_count, "limit": 1, "offset": 0, "items": []}
+        if path == "/v1/admin/catalog/tombstones":
+            return {"total": trash_count, "limit": 1, "offset": 0, "items": []}
+        return {}
+
+    return _fetcher
+
+
+def test_library_page_shows_trash_count_pill_zero() -> None:
+    """When trash is empty the pill should use btn-outline-secondary and show '0 in trash'."""
+    app = create_app(api_fetcher=_make_library_fetcher(reject_count=0, trash_count=0))
+    response = app.test_client().get("/library")
+    assert response.status_code == 200
+    html = response.get_data(as_text=True)
+    assert "0 in trash" in html
+    assert "library-trash-badge" in html
+    assert "btn-outline-secondary" in html
+
+
+def test_library_page_shows_trash_count_pill_nonzero() -> None:
+    """When trash has items the pill switches to btn-outline-warning."""
+    app = create_app(api_fetcher=_make_library_fetcher(reject_count=0, trash_count=3))
+    response = app.test_client().get("/library")
+    assert response.status_code == 200
+    html = response.get_data(as_text=True)
+    assert "3 in trash" in html
+    assert "btn-outline-warning" in html
+
+
+def test_library_trash_page_renders_rows_and_restore_form() -> None:
+    """Trash page lists tombstoned assets with Restore form per row."""
+
+    def _fetcher(path: str, query: dict[str, str]) -> dict:
+        if path == "/v1/admin/catalog/tombstones":
+            return {
+                "total": 1,
+                "limit": 60,
+                "offset": 0,
+                "items": [
+                    {
+                        "relative_path": "2026/04/Job_A/a.jpg",
+                        "sha256_hex": "a" * 64,
+                        "trashed_at_utc": "2026-04-10T03:15:00+00:00",
+                        "marked_reason": "blurry",
+                        "trash_relative_path": ".trash/2026/04/10/aaa/2026/04/Job_A/a.jpg",
+                        "original_size_bytes": 1024,
+                        "age_days": 14,
+                        "days_until_purge": 0,
+                    }
+                ],
+            }
+        return {}
+
+    app = create_app(api_fetcher=_fetcher)
+    response = app.test_client().get("/library/trash")
+    assert response.status_code == 200
+    html = response.get_data(as_text=True)
+    assert "2026/04/Job_A/a.jpg" in html
+    # Restore form must target the correct action endpoint.
+    assert 'action="/library/actions/trash/restore"' in html
+    # "Purge pending" label appears when days_until_purge == 0.
+    assert "Purge pending" in html
+
+
+def test_library_trash_page_renders_empty_state() -> None:
+    """Trash page shows empty-state alert when there are no tombstones."""
+
+    def _fetcher(path: str, query: dict[str, str]) -> dict:
+        return {"total": 0, "limit": 60, "offset": 0, "items": []}
+
+    app = create_app(api_fetcher=_fetcher)
+    response = app.test_client().get("/library/trash")
+    assert response.status_code == 200
+    html = response.get_data(as_text=True)
+    assert "trash is empty" in html.lower()
+
+
+def test_library_trash_restore_action_posts_to_api_and_redirects() -> None:
+    """Restore action POSTs to the API restore endpoint and redirects to /library/trash."""
+    observed: dict[str, object] = {}
+
+    def _fetcher(path: str, query: dict[str, str]) -> dict:
+        return {"total": 0, "limit": 60, "offset": 0, "items": []}
+
+    def _poster(path: str, payload: dict) -> dict:
+        observed["path"] = path
+        observed["payload"] = payload
+        return {"restored": True, "relative_path": "2026/04/Job_A/a.jpg",
+                "sha256_hex": "a" * 64, "restored_at_utc": "2026-04-24T03:00:00+00:00"}
+
+    app = create_app(api_fetcher=_fetcher, api_poster=_poster)
+    response = app.test_client().post(
+        "/library/actions/trash/restore",
+        data={"relative_path": "2026/04/Job_A/a.jpg", "page": "1"},
+    )
+    assert response.status_code in (301, 302, 303)
+    assert observed["path"] == "/v1/admin/catalog/tombstones/restore"
+    assert observed["payload"] == {"relative_path": "2026/04/Job_A/a.jpg"}
+    location = response.headers.get("Location", "")
+    assert "/library/trash" in location
+
+
+def test_library_rejects_page_links_to_trash_page() -> None:
+    """The rejects page must contain a link to /library/trash."""
+
+    def _fetcher(path: str, query: dict[str, str]) -> dict:
+        return {"total": 0, "limit": 60, "offset": 0, "items": []}
+
+    app = create_app(api_fetcher=_fetcher)
+    response = app.test_client().get("/library/rejects")
+    assert response.status_code == 200
+    html = response.get_data(as_text=True)
+    assert "/library/trash" in html

@@ -1,6 +1,6 @@
 {% extends "base.html" %}
-{% from "macros.html" import status_badge, timestamp_stack %}
-{% set title = "Reject queue" %}
+{% from "macros.html" import timestamp_stack %}
+{% set title = "Trash" %}
 {% block content %}
 {% if action_message %}
   <div class="alert alert-success alert-dismissible fade show mb-3" role="alert">
@@ -11,34 +11,20 @@
 <section class="page-hero">
   <div class="d-flex flex-column flex-lg-row justify-content-between gap-3 align-items-lg-end">
     <div>
-      <div class="eyebrow text-uppercase text-secondary fw-semibold small mb-2">Mark for deletion</div>
-      <h1 class="display-5 fw-semibold mb-2">Reject queue</h1>
+      <div class="eyebrow text-uppercase text-secondary fw-semibold small mb-2">Trash</div>
+      <h1 class="display-5 fw-semibold mb-2">Soft-deleted assets</h1>
       <p class="lead text-secondary mb-0">
-        Assets marked for deletion via the lightbox.
-        Restore removes an item from the queue; the destructive action
-        ships in a later phase.
+        Assets moved to trash by the delete action. Restore to return a file
+        to the library; otherwise it is hard-deleted when the purge script runs
+        after 14 days.
       </p>
     </div>
     <div class="d-flex gap-2 align-items-center">
+      <a class="btn btn-outline-secondary btn-sm" href="/library/rejects">← Reject queue</a>
       <a class="btn btn-outline-secondary btn-sm" href="/library">← Back to library</a>
-      <form method="post" action="/library/actions/rejects/execute" style="display: inline;">
-        <button
-          class="btn btn-danger btn-sm"
-          type="submit"
-          {% if total == 0 %}disabled{% endif %}
-          aria-disabled="{% if total == 0 %}true{% else %}false{% endif %}"
-          onclick="return confirm('Delete {{ total }} rejected asset(s)? This action cannot be undone.');"
-        >
-          Delete rejected media ({{ total }})
-        </button>
-      </form>
     </div>
   </div>
 </section>
-
-<p class="text-secondary small mt-2">
-  Need to undo a recent delete? <a href="/library/trash">View trash →</a>
-</p>
 
 {% if total > 0 %}
   <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
@@ -56,43 +42,42 @@
   </div>
 
   <div class="library-grid" role="list">
-    {% for row in reject_rows %}
-      {% set asset = row.item %}
+    {% for row in trash_rows %}
       <article
-        class="library-tile library-tile--rejected"
+        class="library-tile library-tile--trashed"
         role="listitem"
         data-relative-path="{{ row.relative_path }}"
       >
         <div class="library-tile-frame">
-          {% if asset and asset.preview_status == "succeeded" %}
-            <img
-              loading="lazy"
-              src="/catalog/preview?relative_path={{ row.relative_path | urlencode }}"
-              alt="Preview for {{ asset.filename }}"
-            >
-          {% else %}
-            <div class="library-tile-placeholder">
-              <span class="small">{{ (asset.preview_summary if asset else 'Preview unavailable') }}</span>
-            </div>
-          {% endif %}
+          <div class="library-tile-placeholder">
+            <span class="small text-secondary">Trashed</span>
+          </div>
         </div>
         <div class="library-tile-caption">
           <div class="library-tile-name" title="{{ row.relative_path }}">
-            {{ (asset.filename if asset else row.relative_path) }}
+            {{ row.relative_path.split('/')[-1] }}
           </div>
           <div class="library-tile-badges">
-            {% if asset %}
-              {{ status_badge(asset.media_type) }}
-            {% endif %}
-            <span class="badge rounded-pill text-bg-danger">Rejected</span>
+            <span class="badge rounded-pill text-bg-secondary">Trash</span>
           </div>
           <div class="small text-secondary mt-1">
-            Marked {{ timestamp_stack(row.marked_at_utc, mono=True) }}
+            Trashed {{ timestamp_stack(row.trashed_at_utc, mono=True) }}
             {% if row.marked_reason %} · {{ row.marked_reason }}{% endif %}
+          </div>
+          <div class="small mt-1
+            {% if row.days_until_purge == 0 %}text-danger fw-semibold
+            {% elif row.days_until_purge <= 3 %}text-warning
+            {% else %}text-secondary{% endif %}
+          ">
+            {% if row.days_until_purge == 0 %}
+              Purge pending
+            {% else %}
+              Expires in {{ row.days_until_purge }} day{{ 's' if row.days_until_purge != 1 else '' }}
+            {% endif %}
           </div>
           <form
             method="post"
-            action="/library/actions/reject/unmark"
+            action="/library/actions/trash/restore"
             class="inline-form mt-2"
           >
             <input type="hidden" name="relative_path" value="{{ row.relative_path }}">
@@ -119,9 +104,8 @@
   </div>
 {% else %}
   <div class="alert alert-info">
-    The reject queue is empty. Open the library, focus an asset in the
-    lightbox, and press <kbd>X</kbd> (or click <strong>Reject</strong>) to
-    add it here.
+    The trash is empty. Assets moved here via the reject-queue delete action
+    appear here for 14 days before being permanently purged.
   </div>
 {% endif %}
 {% endblock %}

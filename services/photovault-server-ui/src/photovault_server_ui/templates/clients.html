@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "macros.html" import pager, status_badge %}
+{% from "macros.html" import pager, status_badge, timestamp_stack %}
 {% set title = "Clients" %}
 {% block content %}
 <section class="page-hero">
@@ -131,7 +131,7 @@
       </div>
       <dl class="row mb-3">
         <dt class="col-4 text-secondary">Last seen</dt>
-        <dd class="col-8 mono">{{ client.heartbeat_last_seen_at_utc or "n/a" }}</dd>
+        <dd class="col-8">{{ timestamp_stack(client.heartbeat_last_seen_at_utc, mono=True) }}</dd>
         <dt class="col-4 text-secondary">Daemon</dt>
         <dd class="col-8 mono">{{ client.heartbeat_daemon_state or "n/a" }}</dd>
         <dt class="col-4 text-secondary">Active job</dt>
@@ -140,10 +140,10 @@
       <details>
         <summary class="small fw-semibold text-primary">Technical detail</summary>
         <div class="pt-3 small text-secondary d-grid gap-2">
-          <div><strong>First seen:</strong> <span class="mono">{{ client.first_seen_at_utc }}</span></div>
-          <div><strong>Last enrolled:</strong> <span class="mono">{{ client.last_enrolled_at_utc }}</span></div>
-          <div><strong>Approved at:</strong> <span class="mono">{{ client.approved_at_utc or "-" }}</span></div>
-          <div><strong>Revoked at:</strong> <span class="mono">{{ client.revoked_at_utc or "-" }}</span></div>
+          <div><strong>First seen:</strong> {{ timestamp_stack(client.first_seen_at_utc, mono=True) }}</div>
+          <div><strong>Last enrolled:</strong> {{ timestamp_stack(client.last_enrolled_at_utc, mono=True) }}</div>
+          <div><strong>Approved at:</strong> {{ timestamp_stack(client.approved_at_utc, empty="-", mono=True) }}</div>
+          <div><strong>Revoked at:</strong> {{ timestamp_stack(client.revoked_at_utc, empty="-", mono=True) }}</div>
           <div><strong>Token:</strong> {{ "issued" if client.auth_token else "-" }}</div>
           <div><strong>Retry/backoff:</strong> {{ client.heartbeat_retry_backoff_summary or "n/a" }}</div>
           <div><strong>Auth block:</strong> {{ client.heartbeat_auth_block_reason or "n/a" }}</div>
@@ -202,10 +202,10 @@
             <details class="mt-2">
               <summary class="small fw-semibold text-primary">Technical detail</summary>
               <div class="pt-2 small text-secondary d-grid gap-1">
-                <div><strong>First seen:</strong> <span class="mono">{{ client.first_seen_at_utc }}</span></div>
-                <div><strong>Last enrolled:</strong> <span class="mono">{{ client.last_enrolled_at_utc }}</span></div>
-                <div><strong>Approved at:</strong> <span class="mono">{{ client.approved_at_utc or "-" }}</span></div>
-                <div><strong>Revoked at:</strong> <span class="mono">{{ client.revoked_at_utc or "-" }}</span></div>
+                <div><strong>First seen:</strong> {{ timestamp_stack(client.first_seen_at_utc, mono=True) }}</div>
+                <div><strong>Last enrolled:</strong> {{ timestamp_stack(client.last_enrolled_at_utc, mono=True) }}</div>
+                <div><strong>Approved at:</strong> {{ timestamp_stack(client.approved_at_utc, empty="-", mono=True) }}</div>
+                <div><strong>Revoked at:</strong> {{ timestamp_stack(client.revoked_at_utc, empty="-", mono=True) }}</div>
                 <div><strong>Token:</strong> {{ "issued" if client.auth_token else "-" }}</div>
                 <div><strong>Daemon:</strong> <span class="mono">{{ client.heartbeat_daemon_state or "n/a" }}</span></div>
                 <div><strong>Retry/backoff:</strong> {{ client.heartbeat_retry_backoff_summary or "n/a" }}</div>
@@ -218,7 +218,7 @@
           <td>
             <div class="d-flex flex-column gap-1">
               {{ status_badge(client.heartbeat_presence_status) }}
-              <span class="mono text-secondary small">{{ client.heartbeat_last_seen_at_utc or "n/a" }}</span>
+              {{ timestamp_stack(client.heartbeat_last_seen_at_utc, mono=True) }}
             </div>
           </td>
           <td>
@@ -227,7 +227,7 @@
               <span class="mono text-secondary small">{{ client.heartbeat_daemon_state or "n/a" }}</span>
             </div>
           </td>
-          <td class="mono">{{ client.heartbeat_last_seen_at_utc or "n/a" }}</td>
+          <td>{{ timestamp_stack(client.heartbeat_last_seen_at_utc, mono=True) }}</td>
           <td>
             <div class="d-flex flex-wrap gap-2">
               <form method="post" action="/clients/actions/approve" class="inline-form">

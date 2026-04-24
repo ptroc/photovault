@@ -4,539 +4,72 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>photovault client UI</title>
-    <style>
-      :root {
-        color-scheme: light;
-        --bg: #edf2f7;
-        --surface: #ffffff;
-        --surface-muted: #f4f7fb;
-        --ink: #1a2535;
-        --muted: #56647a;
-        --line: #d6deea;
-        --primary: #0062c4;
-        --primary-ink: #ffffff;
-        --ok: #0c6b3e;
-        --warn: #915700;
-        --danger: #b1291f;
-        --shadow-1: 0 2px 8px rgba(7, 27, 53, 0.08);
-        --shadow-2: 0 14px 36px rgba(7, 27, 53, 0.12);
-      }
-
-      * {
-        box-sizing: border-box;
-      }
-
-      body {
-        margin: 0;
-        color: var(--ink);
-        font-family: "Avenir Next", "Segoe UI", "Noto Sans", "Liberation Sans", sans-serif;
-        background:
-          radial-gradient(circle at top right, rgba(0, 98, 196, 0.2), transparent 35%),
-          linear-gradient(180deg, #f8fbff 0%, var(--bg) 100%);
-      }
-
-      main {
-        max-width: 1180px;
-        margin: 0 auto;
-        padding: 26px 18px 44px;
-      }
-
-      h1,
-      h2,
-      h3,
-      p,
-      ul {
-        margin-top: 0;
-      }
-
-      h1,
-      h2,
-      h3 {
-        letter-spacing: 0.01em;
-      }
-
-      .hero {
-        background: var(--surface);
-        border: 1px solid var(--line);
-        border-radius: 18px;
-        box-shadow: var(--shadow-2);
-        padding: 20px;
-      }
-
-      .hero-title {
-        display: flex;
-        justify-content: space-between;
-        gap: 12px;
-        align-items: center;
-      }
-
-      .hero-title h1 {
-        margin-bottom: 6px;
-        font-size: clamp(1.3rem, 2vw, 1.6rem);
-      }
-
-      .hero-meta {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 8px;
-        margin-top: 8px;
-      }
-
-      .chip {
-        border: 1px solid var(--line);
-        background: var(--surface-muted);
-        border-radius: 999px;
-        padding: 5px 10px;
-        font-size: 0.82rem;
-      }
-
-      .chip strong {
-        margin-right: 4px;
-      }
-
-      .nav {
-        display: flex;
-        gap: 8px;
-        margin-top: 16px;
-        flex-wrap: wrap;
-      }
-
-      .nav a {
-        text-decoration: none;
-        border-radius: 999px;
-        border: 1px solid #b9c8de;
-        background: #f3f7fc;
-        color: var(--ink);
-        font-weight: 600;
-        font-size: 0.92rem;
-        padding: 8px 12px;
-      }
-
-      .nav a.active {
-        background: var(--primary);
-        color: var(--primary-ink);
-        border-color: var(--primary);
-      }
-
-      .section {
-        margin-top: 16px;
-      }
-
-      .section-title {
-        display: flex;
-        justify-content: space-between;
-        align-items: baseline;
-        gap: 10px;
-      }
-
-      .card {
-        background: var(--surface);
-        border: 1px solid var(--line);
-        border-radius: 14px;
-        padding: 16px;
-        box-shadow: var(--shadow-1);
-      }
-
-      .card h2 {
-        font-size: 1.02rem;
-        margin-bottom: 10px;
-      }
-
-      .dashboard-grid {
-        display: grid;
-        grid-template-columns: 1.4fr 1fr;
-        gap: 14px;
-      }
-
-      .kpi-grid {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(145px, 1fr));
-        gap: 10px;
-      }
-
-      .kpi-box {
-        border: 1px solid var(--line);
-        background: var(--surface-muted);
-        border-radius: 10px;
-        padding: 10px;
-      }
-
-      .kpi-value {
-        display: block;
-        font-weight: 700;
-        font-size: 1.35rem;
-      }
-
-      .muted {
-        color: var(--muted);
-      }
-
-      .status-ok {
-        color: var(--ok);
-      }
-
-      .status-warn {
-        color: var(--warn);
-      }
-
-      .status-error {
-        color: var(--danger);
-      }
-
-      .status-active {
-        color: var(--primary);
-      }
-
-      .banner {
-        border-radius: 11px;
-        border: 1px solid var(--line);
-        padding: 10px 12px;
-        margin-top: 10px;
-        display: grid;
-        gap: 4px;
-      }
-
-      .banner strong {
-        font-size: 0.94rem;
-      }
-
-      .banner-critical {
-        background: #fff2f0;
-        border-color: #eebdba;
-        color: var(--danger);
-      }
-
-      .banner-warning {
-        background: #fff8ea;
-        border-color: #ead3a8;
-        color: var(--warn);
-      }
-
-      .banner-success {
-        background: #ecf8f1;
-        border-color: #bfddcd;
-        color: var(--ok);
-      }
-
-      .action-row {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 8px;
-        margin-top: 8px;
-      }
-
-      .action-row form {
-        margin: 0;
-      }
-
-      .btn,
-      button,
-      input,
-      textarea,
-      select {
-        font: inherit;
-      }
-
-      .btn,
-      button {
-        border: 1px solid var(--primary);
-        border-radius: 10px;
-        background: var(--primary);
-        color: var(--primary-ink);
-        padding: 9px 12px;
-        font-weight: 600;
-        cursor: pointer;
-      }
-
-      .btn.secondary,
-      button.secondary {
-        background: #f3f6fc;
-        color: var(--ink);
-        border-color: #b9c8de;
-      }
-
-      .btn.link {
-        text-decoration: none;
-        display: inline-block;
-      }
-
-      button:disabled {
-        opacity: 0.65;
-        cursor: not-allowed;
-      }
-
-      .button-link {
-        display: inline-flex;
-        align-items: center;
-        text-decoration: none;
-        border: 1px solid #b9c8de;
-        border-radius: 10px;
-        padding: 9px 12px;
-        font-weight: 600;
-        color: var(--ink);
-        background: #f3f6fc;
-      }
-
-      .form-grid {
-        display: grid;
-        gap: 10px;
-      }
-
-      label {
-        display: block;
-        font-weight: 700;
-        font-size: 0.9rem;
-        margin-bottom: 4px;
-      }
-
-      input,
-      textarea,
-      select {
-        width: 100%;
-        border: 1px solid #b9c8de;
-        border-radius: 9px;
-        padding: 9px 10px;
-        color: var(--ink);
-        background: var(--surface);
-      }
-
-      textarea {
-        min-height: 90px;
-        resize: vertical;
-      }
-
-      .list-inline {
-        list-style: none;
-        margin: 0;
-        padding: 0;
-        display: grid;
-        gap: 8px;
-      }
-
-      .pill {
-        display: inline-block;
-        padding: 4px 8px;
-        border-radius: 999px;
-        border: 1px solid var(--line);
-        background: var(--surface-muted);
-        font-size: 0.78rem;
-      }
-
-      .pill.active {
-        color: #ffffff;
-        border-color: #0058af;
-        background: #0062c4;
-        font-weight: 700;
-      }
-
-      .pill.blocked {
-        color: #ffffff;
-        border-color: #8f1f18;
-        background: #b1291f;
-        font-weight: 700;
-      }
-
-      .pill.completed {
-        color: #ffffff;
-        border-color: #0b5d37;
-        background: #0c6b3e;
-        font-weight: 700;
-      }
-
-      .jobs-list {
-        display: grid;
-        gap: 10px;
-      }
-
-      .job-card {
-        border: 1px solid var(--line);
-        border-radius: 11px;
-        padding: 12px;
-        background: var(--surface-muted);
-      }
-
-      .job-card-head {
-        display: flex;
-        justify-content: space-between;
-        align-items: flex-start;
-        gap: 10px;
-      }
-
-      .job-progress {
-        margin-top: 10px;
-        border: 1px solid var(--line);
-        border-radius: 10px;
-        padding: 8px 10px;
-        background: #f9fbff;
-      }
-
-      .job-progress-head {
-        display: flex;
-        justify-content: space-between;
-        gap: 8px;
-        font-size: 0.86rem;
-      }
-
-      .progress-track {
-        margin-top: 8px;
-        display: flex;
-        width: 100%;
-        height: 10px;
-        border-radius: 999px;
-        overflow: hidden;
-        background: #ced8e8;
-      }
-
-      .progress-segment {
-        display: block;
-        height: 100%;
-      }
-
-      .progress-uploaded {
-        background: #0c6b3e;
-      }
-
-      .progress-ignored {
-        background: #0062c4;
-      }
-
-      .progress-failed {
-        background: #b1291f;
-      }
-
-      .progress-pending {
-        background: #7b8798;
-      }
-
-      .progress-legend {
-        margin-top: 7px;
-        font-size: 0.8rem;
-      }
-
-      .table-wrap {
-        overflow-x: auto;
-      }
-
-      table {
-        width: 100%;
-        border-collapse: collapse;
-      }
-
-      th,
-      td {
-        text-align: left;
-        padding: 9px 10px;
-        border-bottom: 1px solid #e1e7f1;
-        vertical-align: top;
-      }
-
-      th {
-        font-size: 0.78rem;
-        text-transform: uppercase;
-        letter-spacing: 0.04em;
-        color: var(--muted);
-      }
-
-      code {
-        font-family: "SFMono-Regular", "Menlo", monospace;
-        font-size: 0.84rem;
-        background: #eaf1fb;
-        border-radius: 6px;
-        padding: 2px 5px;
-      }
-
-      .filters {
-        display: flex;
-        gap: 8px;
-        flex-wrap: wrap;
-      }
-
-      .filter-link {
-        text-decoration: none;
-        border-radius: 999px;
-        border: 1px solid #b9c8de;
-        padding: 6px 10px;
-        color: var(--ink);
-        background: #f3f6fc;
-        font-size: 0.9rem;
-      }
-
-      .filter-link.active {
-        background: var(--primary);
-        border-color: var(--primary);
-        color: var(--primary-ink);
-      }
-
-      .stack {
-        display: grid;
-        gap: 10px;
-      }
-
-      .meta-details code {
-        display: inline-block;
-        margin-top: 4px;
-        white-space: pre-wrap;
-      }
-
-      a {
-        color: var(--primary);
-      }
-
-      @media (max-width: 800px) {
-        main {
-          padding: 14px 12px 30px;
-        }
-
-        .hero {
-          padding: 14px;
-          border-radius: 14px;
-        }
-
-        .dashboard-grid {
-          grid-template-columns: 1fr;
-        }
-      }
-    </style>
+    <link rel="stylesheet" href="{{ url_for('static', filename='vendor/bootstrap/css/bootstrap.min.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
   </head>
-  <body>
-    <main>
-      <section class="hero">
-        <div class="hero-title">
-          <div>
-            <h1>photovault appliance control surface</h1>
-            <p class="muted">State-machine status, operator actions, and diagnostics.</p>
-          </div>
-        </div>
-        <div class="hero-meta">
-          <span class="chip"><strong>Daemon API</strong><code>{{ daemon_base_url }}</code></span>
-          {% if state %}
-            <span class="chip"><strong>State</strong>{{ state.current_state }}</span>
-          {% endif %}
-        </div>
-
-        {% if daemon_error %}
-          <div class="banner banner-critical">
-            <strong>Daemon unreachable</strong>
-            <span>{{ daemon_error }}</span>
-            {% if daemon_error_detail %}
-              <details class="meta-details">
-                <summary>Debug detail</summary>
-                <code>{{ daemon_error_detail }}</code>
-              </details>
+  <body class="client-shell">
+    {% from "macros.html" import nav_link %}
+    <nav class="navbar navbar-expand-lg bg-white border-bottom shadow-sm sticky-top">
+      <div class="container-xxl">
+        <a class="navbar-brand fw-semibold" href="/">photovault appliance</a>
+        <button
+          class="navbar-toggler"
+          type="button"
+          data-bs-toggle="collapse"
+          data-bs-target="#clientNav"
+          aria-controls="clientNav"
+          aria-expanded="false"
+          aria-label="Toggle navigation"
+        >
+          <span class="navbar-toggler-icon"></span>
+        </button>
+        <div class="collapse navbar-collapse" id="clientNav">
+          <ul class="navbar-nav me-auto mb-2 mb-lg-0">
+            {{ nav_link('/', 'Overview', active_page, 'overview') }}
+            {{ nav_link('/jobs', 'Jobs', active_page, 'jobs') }}
+            {{ nav_link('/network', 'Network', active_page, 'network') }}
+            {{ nav_link('/block-devices', 'Block Devices', active_page, 'block_devices') }}
+            {{ nav_link('/events', 'Diagnostics', active_page, 'events', True) }}
+          </ul>
+          <div class="d-flex flex-wrap gap-2 align-items-center small">
+            <span class="badge text-bg-light border">Daemon API {{ daemon_base_url }}</span>
+            {% if state %}
+            <span class="badge text-bg-secondary">State {{ state.current_state }}</span>
             {% endif %}
           </div>
-        {% endif %}
+        </div>
+      </div>
+    </nav>
 
-        <nav class="nav">
-          <a href="/" class="{% if active_page == 'overview' %}active{% endif %}">Overview</a>
-          <a href="/block-devices" class="{% if active_page == 'block_devices' %}active{% endif %}">Block Devices</a>
-          <a href="/jobs" class="{% if active_page == 'jobs' %}active{% endif %}">Jobs</a>
-          <a href="/events" class="{% if active_page == 'events' %}active{% endif %}">Diagnostics</a>
-          <a href="/network" class="{% if active_page == 'network' %}active{% endif %}">Network</a>
-        </nav>
+    <main class="container-xxl py-4 py-lg-5">
+      <section class="card hero-panel mb-4">
+        <div class="card-body py-4">
+          <div class="eyebrow text-uppercase text-secondary fw-semibold small mb-2">Client Control Surface</div>
+          <div class="d-flex flex-column flex-lg-row justify-content-between gap-3 align-items-lg-end">
+            <div>
+              <h1 class="display-6 fw-semibold mb-2">photovault appliance control surface</h1>
+              <p class="lead text-secondary mb-0">State-machine status, operator actions, and diagnostics.</p>
+            </div>
+          </div>
+
+          {% if daemon_error %}
+          <div class="alert alert-danger mt-4 mb-0" role="alert">
+            <strong>Daemon unreachable.</strong> {{ daemon_error }}
+            {% if daemon_error_detail %}
+            <details class="mt-2">
+              <summary class="technical-summary">Debug detail</summary>
+              <div class="technical-copy mt-2">{{ daemon_error_detail }}</div>
+            </details>
+            {% endif %}
+          </div>
+          {% endif %}
+        </div>
       </section>
+
       {% block content %}{% endblock %}
     </main>
+
+    <script src="{{ url_for('static', filename='vendor/bootstrap/js/bootstrap.bundle.min.js') }}"></script>
     <script>
       (() => {
         const ajaxHeader = {"X-Requested-With": "XMLHttpRequest"};

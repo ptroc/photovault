@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "macros.html" import status_badge %}
+{% from "macros.html" import status_badge, timestamp_stack %}
 {% set title = "Library Asset" %}
 {% block content %}
 <section class="page-hero">
@@ -126,8 +126,8 @@
             <div><strong>provenance_original_filename</strong> {{ asset.provenance_original_filename or "n/a" }}</div>
           </div>
           <div class="col-md-6">
-            <div><strong>first_cataloged_at_utc</strong> <span class="mono">{{ asset.first_cataloged_at_utc }}</span></div>
-            <div><strong>last_cataloged_at_utc</strong> <span class="mono">{{ asset.last_cataloged_at_utc }}</span></div>
+            <div><strong>first_cataloged_at_utc</strong> {{ timestamp_stack(asset.first_cataloged_at_utc, mono=True) }}</div>
+            <div><strong>last_cataloged_at_utc</strong> {{ timestamp_stack(asset.last_cataloged_at_utc, mono=True) }}</div>
           </div>
         </div>
       </div>
@@ -144,12 +144,12 @@
         <div class="mb-3">{{ status_badge(asset.extraction_status) }}</div>
         <div class="row g-3">
           <div class="col-md-6">
-            <div><strong>attempted</strong> <span class="mono">{{ asset.extraction_last_attempted_at_utc or "n/a" }}</span></div>
-            <div><strong>succeeded</strong> <span class="mono">{{ asset.extraction_last_succeeded_at_utc or "n/a" }}</span></div>
-            <div><strong>failed</strong> <span class="mono">{{ asset.extraction_last_failed_at_utc or "n/a" }}</span></div>
+            <div><strong>attempted</strong> {{ timestamp_stack(asset.extraction_last_attempted_at_utc, mono=True) }}</div>
+            <div><strong>succeeded</strong> {{ timestamp_stack(asset.extraction_last_succeeded_at_utc, mono=True) }}</div>
+            <div><strong>failed</strong> {{ timestamp_stack(asset.extraction_last_failed_at_utc, mono=True) }}</div>
           </div>
           <div class="col-md-6">
-            <div><strong>capture_timestamp_utc</strong> {{ asset.capture_timestamp_utc or "n/a" }}</div>
+            <div><strong>capture_timestamp_utc</strong> {{ timestamp_stack(asset.capture_timestamp_utc, mono=True) }}</div>
             <div><strong>camera_make</strong> {{ asset.camera_make or "n/a" }}</div>
             <div><strong>camera_model</strong> {{ asset.camera_model or "n/a" }}</div>
             <div><strong>lens_model</strong> {{ asset.lens_model or "n/a" }}</div>
@@ -175,9 +175,9 @@
         <div class="mb-3">{{ status_badge(asset.preview_status) }}</div>
         <div class="row g-3">
           <div class="col-md-6">
-            <div><strong>attempted</strong> <span class="mono">{{ asset.preview_last_attempted_at_utc or "n/a" }}</span></div>
-            <div><strong>succeeded</strong> <span class="mono">{{ asset.preview_last_succeeded_at_utc or "n/a" }}</span></div>
-            <div><strong>failed</strong> <span class="mono">{{ asset.preview_last_failed_at_utc or "n/a" }}</span></div>
+            <div><strong>attempted</strong> {{ timestamp_stack(asset.preview_last_attempted_at_utc, mono=True) }}</div>
+            <div><strong>succeeded</strong> {{ timestamp_stack(asset.preview_last_succeeded_at_utc, mono=True) }}</div>
+            <div><strong>failed</strong> {{ timestamp_stack(asset.preview_last_failed_at_utc, mono=True) }}</div>
           </div>
           <div class="col-md-6">
             <div><strong>preview_relative_path</strong> {{ asset.preview_relative_path or "n/a" }}</div>

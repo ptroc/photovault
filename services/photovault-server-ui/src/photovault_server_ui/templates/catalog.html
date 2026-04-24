@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "macros.html" import pager %}
+{% from "macros.html" import pager, timestamp_stack %}
 {% set title = "Library" %}
 {% block content %}
 <section class="page-hero">
@@ -188,7 +188,7 @@
           </form>
           {% if extraction_run %}
           <div class="small">
-            <div><strong>last run</strong> <span class="mono">{{ extraction_run.completed_at_utc }}</span></div>
+            <div><strong>last run</strong> {{ timestamp_stack(extraction_run.completed_at_utc, mono=True) }}</div>
             <div>selected {{ extraction_run.selected_count }}, processed {{ extraction_run.processed_count }}</div>
             <div>succeeded {{ extraction_run.succeeded_count }}, failed {{ extraction_run.failed_count }}</div>
             <div>remaining pending {{ extraction_run.remaining_pending_count }}, failed {{ extraction_run.remaining_failed_count }}</div>
@@ -222,7 +222,7 @@
           </form>
           {% if preview_run %}
           <div class="small">
-            <div><strong>last run</strong> <span class="mono">{{ preview_run.completed_at_utc }}</span></div>
+            <div><strong>last run</strong> {{ timestamp_stack(preview_run.completed_at_utc, mono=True) }}</div>
             <div>selected {{ preview_run.selected_count }}, processed {{ preview_run.processed_count }}</div>
             <div>succeeded {{ preview_run.succeeded_count }}, failed {{ preview_run.failed_count }}</div>
             <div>remaining pending {{ preview_run.remaining_pending_count }}, failed {{ preview_run.remaining_failed_count }}</div>

@@ -1592,6 +1592,94 @@ def test_admin_retry_preview_generates_cache_for_raw_via_embedded_preview(
     assert item["preview_failure_detail"] is None
 
 
+def test_admin_retry_preview_honors_configured_max_long_edge(tmp_path: Path) -> None:
+    image_path = tmp_path / "2026" / "04" / "Job_A" / "large.jpg"
+    image_path.parent.mkdir(parents=True, exist_ok=True)
+    large_image = Image.new("RGB", (4096, 1024), color=(12, 34, 56))
+    large_image.save(image_path, format="JPEG")
+
+    client = TestClient(create_app(storage_root=tmp_path, preview_max_long_edge=2048))
+    index_response = client.post("/v1/storage/index")
+    assert index_response.status_code == 200
+
+    retry_response = client.post(
+        "/v1/admin/catalog/preview/retry",
+        json={"relative_path": "2026/04/Job_A/large.jpg"},
+    )
+    assert retry_response.status_code == 200
+    item = retry_response.json()["item"]
+    assert item["preview_status"] == "succeeded"
+    assert item["preview_relative_path"] == "2026/04/Job_A/large__" + item["sha256_hex"][:12] + "__w2048.jpg"
+
+    preview_cache_root = tmp_path.parent / ".photovault_preview_cache"
+    preview_file = preview_cache_root / str(item["preview_relative_path"])
+    assert preview_file.is_file()
+    with Image.open(preview_file) as preview_image:
+        assert max(preview_image.size) == 2048
+        assert preview_image.size == (2048, 512)
+
+
+def test_admin_retry_preview_passthrough_suffix_serves_original_file(tmp_path: Path) -> None:
+    image_path = tmp_path / "2026" / "04" / "Job_A" / "passthrough.jpg"
+    image_path.parent.mkdir(parents=True, exist_ok=True)
+    original_bytes = _jpeg_with_exif_bytes(width=64, height=32)
+    image_path.write_bytes(original_bytes)
+
+    client = TestClient(create_app(storage_root=tmp_path, preview_passthrough_suffixes={".jpg"}))
+    index_response = client.post("/v1/storage/index")
+    assert index_response.status_code == 200
+
+    retry_response = client.post(
+        "/v1/admin/catalog/preview/retry",
+        json={"relative_path": "2026/04/Job_A/passthrough.jpg"},
+    )
+    assert retry_response.status_code == 200
+    item = retry_response.json()["item"]
+    assert item["preview_status"] == "succeeded"
+    assert item["preview_relative_path"] is None
+    assert item["preview_failure_detail"] is None
+
+    preview_response = client.get(
+        "/v1/admin/catalog/preview",
+        params={"relative_path": "2026/04/Job_A/passthrough.jpg"},
+    )
+    assert preview_response.status_code == 200
+    assert preview_response.headers["content-type"] == "image/jpeg"
+    assert preview_response.content == original_bytes
+
+    preview_cache_root = tmp_path.parent / ".photovault_preview_cache"
+    expected_cached = list(
+        preview_cache_root.rglob(f"passthrough__{item['sha256_hex'][:12]}__w*.jpg")
+    )
+    assert expected_cached == []
+
+
+def test_admin_retry_preview_placeholder_suffix_skips_generation(tmp_path: Path) -> None:
+    image_path = tmp_path / "2026" / "04" / "Job_A" / "placeholder.jpg"
+    image_path.parent.mkdir(parents=True, exist_ok=True)
+    image_path.write_bytes(_jpeg_with_exif_bytes(width=40, height=20))
+
+    client = TestClient(create_app(storage_root=tmp_path, preview_placeholder_suffixes={".jpg"}))
+    index_response = client.post("/v1/storage/index")
+    assert index_response.status_code == 200
+
+    retry_response = client.post(
+        "/v1/admin/catalog/preview/retry",
+        json={"relative_path": "2026/04/Job_A/placeholder.jpg"},
+    )
+    assert retry_response.status_code == 200
+    item = retry_response.json()["item"]
+    assert item["preview_status"] == "failed"
+    assert item["preview_relative_path"] is None
+    assert "skipped by configuration for suffix: .jpg" in str(item["preview_failure_detail"])
+
+    preview_response = client.get(
+        "/v1/admin/catalog/preview",
+        params={"relative_path": "2026/04/Job_A/placeholder.jpg"},
+    )
+    assert preview_response.status_code == 404
+
+
 def test_admin_retry_preview_persists_failure_for_raw_embedded_preview_errors(
     tmp_path: Path,
     monkeypatch,
@@ -2390,6 +2478,46 @@ def test_create_app_requires_storage_root_when_not_provided(monkeypatch) -> None
         assert "PHOTOVAULT_API_STORAGE_ROOT" in str(exc)
 
 
+def test_create_app_uses_preview_max_long_edge_from_env(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("PHOTOVAULT_API_STORAGE_ROOT", str(tmp_path))
+    monkeypatch.setenv("PHOTOVAULT_API_PREVIEW_MAX_LONG_EDGE", "2048")
+
+    app = create_app()
+    assert app.state.preview_max_long_edge == 2048
+
+
+def test_create_app_rejects_invalid_preview_max_long_edge_env(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("PHOTOVAULT_API_STORAGE_ROOT", str(tmp_path))
+    monkeypatch.setenv("PHOTOVAULT_API_PREVIEW_MAX_LONG_EDGE", "0")
+
+    try:
+        create_app()
+        raise AssertionError("expected RuntimeError for invalid preview max long edge")
+    except RuntimeError as exc:
+        assert "PHOTOVAULT_API_PREVIEW_MAX_LONG_EDGE" in str(exc)
+
+
+def test_create_app_reads_preview_suffix_sets_from_env(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("PHOTOVAULT_API_STORAGE_ROOT", str(tmp_path))
+    monkeypatch.setenv("PHOTOVAULT_API_PREVIEW_PASSTHROUGH_SUFFIXES", "jpg,.jpeg")
+    monkeypatch.setenv("PHOTOVAULT_API_PREVIEW_PLACEHOLDER_SUFFIXES", ".avi, mp4")
+
+    app = create_app()
+    assert app.state.preview_passthrough_suffixes == frozenset({".jpg", ".jpeg"})
+    assert app.state.preview_placeholder_suffixes == frozenset({".avi", ".mp4"})
+
+
+def test_create_app_rejects_invalid_preview_suffix_set_env(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("PHOTOVAULT_API_STORAGE_ROOT", str(tmp_path))
+    monkeypatch.setenv("PHOTOVAULT_API_PREVIEW_PASSTHROUGH_SUFFIXES", "bad/suffix")
+
+    try:
+        create_app()
+        raise AssertionError("expected RuntimeError for invalid preview suffix configuration")
+    except RuntimeError as exc:
+        assert "PHOTOVAULT_API_PREVIEW_PASSTHROUGH_SUFFIXES" in str(exc)
+
+
 def test_create_app_uses_postgres_store_when_database_url_env_set(monkeypatch, tmp_path: Path) -> None:
     class _FakePostgresStore:
         def __init__(self, *, database_url: str) -> None:
@@ -2902,3 +3030,484 @@ def test_reject_queue_list_paginates(tmp_path: Path) -> None:
     assert client.get("/v1/admin/catalog/rejects?limit=0").status_code == 422
     assert client.get("/v1/admin/catalog/rejects?limit=1000").status_code == 422
     assert client.get("/v1/admin/catalog/rejects?offset=-1").status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# Phase 3.C: execute delete, SHA tombstones, client handshake
+# ---------------------------------------------------------------------------
+
+
+def test_tombstone_created_by_execute_move_and_row_inserted(tmp_path: Path) -> None:
+    """Happy path: execute on a single queued path moves the file to .trash,
+    removes the api_media_assets row, and inserts a tombstone row with the
+    correct sha256_hex."""
+    store = _seed_reject_queue_store()
+    client = TestClient(create_app(state_store=store, storage_root=tmp_path))
+
+    # Create the physical file inside tmp_path so the move can succeed.
+    source_file = tmp_path / "2026" / "04" / "Job_A" / "a.jpg"
+    source_file.parent.mkdir(parents=True, exist_ok=True)
+    source_file.write_bytes(b"fake-image-data")
+
+    # Mark the asset as rejected first.
+    mark = client.post(
+        "/v1/admin/catalog/reject",
+        json={"relative_path": "2026/04/Job_A/a.jpg", "marked_reason": "blurry"},
+    )
+    assert mark.status_code == 200
+
+    # Execute the delete.
+    resp = client.post(
+        "/v1/admin/catalog/rejects/execute",
+        json={"relative_paths": ["2026/04/Job_A/a.jpg"]},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "2026/04/Job_A/a.jpg" in body["executed"]
+    assert body["skipped"] == []
+
+    # Source file must be gone from the catalog subtree.
+    assert not source_file.exists()
+
+    # A file must appear somewhere under .trash/.
+    trash_root = tmp_path / ".trash"
+    trash_files = list(trash_root.rglob("a.jpg"))
+    assert len(trash_files) == 1, f"expected 1 trashed file, found {trash_files}"
+
+    # api_media_assets row must be gone (get_media_asset_by_path returns None).
+    assert store.get_media_asset_by_path("2026/04/Job_A/a.jpg") is None
+
+    # Tombstone row must be present with the correct sha.
+    assert store.is_sha_tombstoned("a" * 64)
+    tombstones = store.list_sha_tombstones(["a" * 64])
+    assert len(tombstones) == 1
+    assert tombstones[0].sha256_hex == "a" * 64
+    assert tombstones[0].relative_path == "2026/04/Job_A/a.jpg"
+
+
+def test_execute_is_idempotent_for_missing_source_file(tmp_path: Path) -> None:
+    """If the source file was already removed out of band, execute still records
+    the tombstone and clears the reject-queue row — it does NOT raise an error."""
+    store = _seed_reject_queue_store()
+    client = TestClient(create_app(state_store=store, storage_root=tmp_path))
+
+    # Mark as rejected — but do NOT create the physical file (simulates OOB deletion).
+    mark = client.post(
+        "/v1/admin/catalog/reject",
+        json={"relative_path": "2026/04/Job_A/a.jpg", "marked_reason": "already gone"},
+    )
+    assert mark.status_code == 200
+
+    resp = client.post(
+        "/v1/admin/catalog/rejects/execute",
+        json={"relative_paths": ["2026/04/Job_A/a.jpg"]},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "2026/04/Job_A/a.jpg" in body["executed"]
+    assert body["skipped"] == []
+
+    # Tombstone must still be written.
+    assert store.is_sha_tombstoned("a" * 64)
+
+    # Queue must be cleared.
+    total, rows = store.list_catalog_rejects(limit=50, offset=0)
+    paths_in_queue = [r.relative_path for r in rows]
+    assert "2026/04/Job_A/a.jpg" not in paths_in_queue
+
+
+def test_execute_rejects_unsafe_relative_paths(tmp_path: Path) -> None:
+    """Path traversal and other unsafe inputs must be rejected with 400/422."""
+    store = _seed_reject_queue_store()
+    client = TestClient(create_app(state_store=store, storage_root=tmp_path))
+
+    for unsafe in ["../escape.jpg", "/leading/slash.jpg", "bad\\segment.jpg", "a/./b.jpg"]:
+        resp = client.post(
+            "/v1/admin/catalog/rejects/execute",
+            json={"relative_paths": [unsafe]},
+        )
+        assert resp.status_code in (400, 422), (
+            f"expected 400/422 for {unsafe!r}, got {resp.status_code}"
+        )
+
+
+def test_execute_without_request_body_drains_whole_queue(tmp_path: Path) -> None:
+    """Posting with an empty body (no relative_paths key) executes ALL queued rejects."""
+    store = _seed_reject_queue_store()
+    client = TestClient(create_app(state_store=store, storage_root=tmp_path))
+
+    # Mark both assets.
+    for path in ("2026/04/Job_A/a.jpg", "2026/04/Job_B/b.jpg"):
+        assert (
+            client.post("/v1/admin/catalog/reject", json={"relative_path": path}).status_code == 200
+        )
+
+    # Execute with no relative_paths supplied (drain all).
+    resp = client.post("/v1/admin/catalog/rejects/execute", json={})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert set(body["executed"]) == {"2026/04/Job_A/a.jpg", "2026/04/Job_B/b.jpg"}
+    assert body["skipped"] == []
+
+    # Queue must now be empty.
+    total, _ = store.list_catalog_rejects(limit=50, offset=0)
+    assert total == 0
+
+    # Both SHAs tombstoned.
+    assert store.is_sha_tombstoned("a" * 64)
+    assert store.is_sha_tombstoned("b" * 64)
+
+
+def test_upload_verify_returns_409_for_tombstoned_sha(tmp_path: Path) -> None:
+    store = InMemoryUploadStateStore()
+    content = b"test content"
+    sha256_hex = hashlib.sha256(content).hexdigest()
+
+    # Pre-seed a tombstone for this SHA.
+    store.add_tombstone(
+        relative_path="2026/04/Job_A/a.jpg",
+        sha256_hex=sha256_hex,
+        trashed_at_utc="2026-04-22T10:00:00+00:00",
+        marked_reason="test deletion",
+        trash_relative_path=".trash/2026/04/22/aabbccdd/2026/04/Job_A/a.jpg",
+        original_size_bytes=len(content),
+    )
+
+    client = TestClient(
+        create_app(state_store=store, storage_root=tmp_path, bootstrap_token="bootstrap-123")
+    )
+    auth_headers = _approve_upload_client(client)
+
+    # Upload and verify should fail with 409 Conflict.
+    verify_response = client.post(
+        "/v1/upload/verify",
+        headers=auth_headers,
+        json={"sha256_hex": sha256_hex, "size_bytes": len(content)},
+    )
+    assert verify_response.status_code == 409
+    body = verify_response.json()
+    assert "sha_tombstoned" in str(body.get("detail", {}))
+
+
+def test_client_tombstone_report_returns_matches_only_for_reported_shas(
+    tmp_path: Path,
+) -> None:
+    store = InMemoryUploadStateStore()
+    client = TestClient(create_app(state_store=store, storage_root=tmp_path, bootstrap_token="bootstrap-123"))
+
+    auth_headers = _approve_upload_client(client)
+
+    # Seed two tombstones.
+    store.add_tombstone(
+        relative_path="2026/04/Job_A/a.jpg",
+        sha256_hex="a" * 64,
+        trashed_at_utc="2026-04-22T10:00:00+00:00",
+        marked_reason="test",
+        trash_relative_path=".trash/2026/04/22/aaaa/2026/04/Job_A/a.jpg",
+        original_size_bytes=100,
+    )
+    store.add_tombstone(
+        relative_path="2026/04/Job_B/b.jpg",
+        sha256_hex="b" * 64,
+        trashed_at_utc="2026-04-22T10:00:00+00:00",
+        marked_reason="test",
+        trash_relative_path=".trash/2026/04/22/bbbb/2026/04/Job_B/b.jpg",
+        original_size_bytes=200,
+    )
+
+    # Report SHAs: include "a", "b", and a non-existent one.
+    response = client.post(
+        "/v1/client/tombstone-report",
+        headers=auth_headers,
+        json={"sha256_hex": ["a" * 64, "c" * 64]},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["tombstoned"]) == 1
+    assert body["tombstoned"][0]["sha256_hex"] == "a" * 64
+    # "b" is not reported since it wasn't queried; "c" is simply not in the DB.
+
+
+def test_client_tombstone_report_requires_client_auth(tmp_path: Path) -> None:
+    store = InMemoryUploadStateStore()
+    client = TestClient(
+        create_app(state_store=store, storage_root=tmp_path, bootstrap_token="bootstrap-123")
+    )
+
+    # No auth headers.
+    response = client.post(
+        "/v1/client/tombstone-report",
+        json={"sha256_hex": ["a" * 64]},
+    )
+    assert response.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# Phase 3.D: tombstone list + restore
+# ---------------------------------------------------------------------------
+
+
+def _seed_tombstone_store(tmp_path: Path) -> tuple[InMemoryUploadStateStore, Path]:
+    """Create a store with two tombstoned assets and their physical trash files."""
+    store = InMemoryUploadStateStore()
+    now = "2026-04-10T03:15:00+00:00"  # 14 days before 2026-04-24
+
+    for rel_path, sha, trash_rel in [
+        (
+            "2026/04/Job_A/a.jpg",
+            "a" * 64,
+            ".trash/2026/04/10/aaaaaaaaaaaa/2026/04/Job_A/a.jpg",
+        ),
+        (
+            "2026/04/Job_B/b.jpg",
+            "b" * 64,
+            ".trash/2026/04/10/bbbbbbbbbbbb/2026/04/Job_B/b.jpg",
+        ),
+    ]:
+        trash_path = tmp_path / trash_rel
+        trash_path.parent.mkdir(parents=True, exist_ok=True)
+        trash_path.write_bytes(b"fake-image-data")
+
+        store.add_tombstone(
+            relative_path=rel_path,
+            sha256_hex=sha,
+            trashed_at_utc=now,
+            marked_reason="test",
+            trash_relative_path=trash_rel,
+            original_size_bytes=100,
+        )
+
+    return store, tmp_path
+
+
+def test_admin_catalog_tombstones_list_returns_rows_sorted_oldest_first(
+    tmp_path: Path,
+) -> None:
+    store = InMemoryUploadStateStore()
+    # Insert two tombstones with different trashed_at times.
+    store.add_tombstone(
+        relative_path="2026/04/Job_B/b.jpg",
+        sha256_hex="b" * 64,
+        trashed_at_utc="2026-04-12T00:00:00+00:00",
+        marked_reason=None,
+        trash_relative_path=".trash/2026/04/12/bbb/2026/04/Job_B/b.jpg",
+        original_size_bytes=200,
+    )
+    store.add_tombstone(
+        relative_path="2026/04/Job_A/a.jpg",
+        sha256_hex="a" * 64,
+        trashed_at_utc="2026-04-10T00:00:00+00:00",
+        marked_reason=None,
+        trash_relative_path=".trash/2026/04/10/aaa/2026/04/Job_A/a.jpg",
+        original_size_bytes=100,
+    )
+
+    client = TestClient(create_app(state_store=store, storage_root=tmp_path))
+    resp = client.get("/v1/admin/catalog/tombstones")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["total"] == 2
+    items = body["items"]
+    assert len(items) == 2
+    # Oldest first.
+    assert items[0]["relative_path"] == "2026/04/Job_A/a.jpg"
+    assert items[1]["relative_path"] == "2026/04/Job_B/b.jpg"
+    # Both items have age_days and days_until_purge.
+    assert "age_days" in items[0]
+    assert "days_until_purge" in items[0]
+
+
+def test_admin_catalog_tombstones_list_filters_by_older_than_days(
+    tmp_path: Path,
+) -> None:
+    store = InMemoryUploadStateStore()
+    # "old" row: 20 days ago; "new" row: 5 days ago.
+    from datetime import UTC, datetime, timedelta
+
+    old_ts = (datetime.now(UTC) - timedelta(days=20)).isoformat()
+    new_ts = (datetime.now(UTC) - timedelta(days=5)).isoformat()
+
+    store.add_tombstone(
+        relative_path="2026/04/Job_A/a.jpg",
+        sha256_hex="a" * 64,
+        trashed_at_utc=old_ts,
+        marked_reason=None,
+        trash_relative_path=".trash/old/a.jpg",
+        original_size_bytes=100,
+    )
+    store.add_tombstone(
+        relative_path="2026/04/Job_B/b.jpg",
+        sha256_hex="b" * 64,
+        trashed_at_utc=new_ts,
+        marked_reason=None,
+        trash_relative_path=".trash/new/b.jpg",
+        original_size_bytes=200,
+    )
+
+    client = TestClient(create_app(state_store=store, storage_root=tmp_path))
+    # Filtering for tombstones older than 14 days: only the 20-day one matches.
+    resp = client.get("/v1/admin/catalog/tombstones?older_than_days=14")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["total"] == 1
+    assert body["items"][0]["relative_path"] == "2026/04/Job_A/a.jpg"
+
+
+def test_admin_catalog_tombstones_restore_round_trip(tmp_path: Path) -> None:
+    """Tombstone a file via execute, then restore via the restore endpoint.
+
+    Verifies:
+    - Physical file returns to its original relative_path.
+    - api_media_assets row is re-inserted with origin_kind='restored'.
+    - Tombstone row is removed.
+    """
+    store = _seed_reject_queue_store()
+    client = TestClient(create_app(state_store=store, storage_root=tmp_path))
+
+    source_file = tmp_path / "2026" / "04" / "Job_A" / "a.jpg"
+    source_file.parent.mkdir(parents=True, exist_ok=True)
+    source_file.write_bytes(b"fake-image-data")
+
+    # Mark and execute.
+    assert (
+        client.post(
+            "/v1/admin/catalog/reject",
+            json={"relative_path": "2026/04/Job_A/a.jpg"},
+        ).status_code
+        == 200
+    )
+    exec_resp = client.post(
+        "/v1/admin/catalog/rejects/execute",
+        json={"relative_paths": ["2026/04/Job_A/a.jpg"]},
+    )
+    assert exec_resp.status_code == 200
+    assert not source_file.exists()
+    assert store.is_sha_tombstoned("a" * 64)
+
+    # Restore.
+    restore_resp = client.post(
+        "/v1/admin/catalog/tombstones/restore",
+        json={"relative_path": "2026/04/Job_A/a.jpg"},
+    )
+    assert restore_resp.status_code == 200
+    body = restore_resp.json()
+    assert body["restored"] is True
+    assert body["relative_path"] == "2026/04/Job_A/a.jpg"
+    assert body["sha256_hex"] == "a" * 64
+
+    # Physical file must be back at its original location.
+    assert source_file.is_file()
+    assert source_file.read_bytes() == b"fake-image-data"
+
+    # api_media_assets row must be back with origin_kind='restored'.
+    asset = store.get_media_asset_by_path("2026/04/Job_A/a.jpg")
+    assert asset is not None
+    assert asset.origin_kind == "restored"
+
+    # Tombstone must be gone — re-upload of the same SHA is now accepted.
+    assert not store.is_sha_tombstoned("a" * 64)
+
+
+def test_admin_catalog_tombstones_restore_returns_409_when_trash_file_missing(
+    tmp_path: Path,
+) -> None:
+    """If the physical trash file is missing, restore returns 409 with trash_gone
+    and leaves the tombstone intact (operator must investigate)."""
+    store = InMemoryUploadStateStore()
+    store.add_tombstone(
+        relative_path="2026/04/Job_A/a.jpg",
+        sha256_hex="a" * 64,
+        trashed_at_utc="2026-04-10T00:00:00+00:00",
+        marked_reason=None,
+        # Points to a non-existent file.
+        trash_relative_path=".trash/2026/04/10/aaa/2026/04/Job_A/a.jpg",
+        original_size_bytes=100,
+    )
+
+    client = TestClient(create_app(state_store=store, storage_root=tmp_path))
+    resp = client.post(
+        "/v1/admin/catalog/tombstones/restore",
+        json={"relative_path": "2026/04/Job_A/a.jpg"},
+    )
+    assert resp.status_code == 409
+    body = resp.json()
+    assert body["detail"]["code"] == "trash_gone"
+
+    # Tombstone must still be intact.
+    assert store.is_sha_tombstoned("a" * 64)
+
+
+def test_admin_catalog_tombstones_restore_rejects_unsafe_relative_paths(
+    tmp_path: Path,
+) -> None:
+    """Path-traversal attempts in restore must be rejected with 400."""
+    store = InMemoryUploadStateStore()
+    client = TestClient(create_app(state_store=store, storage_root=tmp_path))
+
+    for unsafe in ["../escape.jpg", "/leading/slash.jpg", "bad\\segment.jpg"]:
+        resp = client.post(
+            "/v1/admin/catalog/tombstones/restore",
+            json={"relative_path": unsafe},
+        )
+        assert resp.status_code in (400, 422), (
+            f"expected 400/422 for {unsafe!r}, got {resp.status_code}"
+        )
+
+
+def test_upload_verify_accepts_sha_again_after_restore(tmp_path: Path) -> None:
+    """After restoring a tombstoned asset the tombstone row is removed, so
+    the strict-permanence rule is explicitly relaxed: a subsequent verify for
+    the same SHA must succeed (returning ALREADY_EXISTS) rather than 409.
+
+    This is by design — restore is an operator decision to reverse the
+    soft-delete and re-admit the content.
+    """
+    store = _seed_reject_queue_store()
+    # Seed the SHA into known_sha256 so has_sha() returns True after restore,
+    # as it would in production after a successful upload+verify cycle.
+    store.mark_sha_verified("a" * 64)
+    client = TestClient(
+        create_app(state_store=store, storage_root=tmp_path, bootstrap_token="bootstrap-123")
+    )
+
+    # Approve a client so upload/verify is accessible (standard pattern).
+    auth_headers = _approve_upload_client(client, client_id="restore-client")
+
+    # Delete the file via the reject-execute path.
+    source_file = tmp_path / "2026" / "04" / "Job_A" / "a.jpg"
+    source_file.parent.mkdir(parents=True, exist_ok=True)
+    source_file.write_bytes(b"fake-image-data")
+
+    client.post(
+        "/v1/admin/catalog/reject",
+        json={"relative_path": "2026/04/Job_A/a.jpg"},
+    )
+    client.post(
+        "/v1/admin/catalog/rejects/execute",
+        json={"relative_paths": ["2026/04/Job_A/a.jpg"]},
+    )
+    assert store.is_sha_tombstoned("a" * 64)
+
+    # Verify must now return 409 (tombstoned).
+    verify_tombstoned = client.post(
+        "/v1/upload/verify",
+        headers=auth_headers,
+        json={"sha256_hex": "a" * 64, "size_bytes": 100},
+    )
+    assert verify_tombstoned.status_code == 409
+
+    # Restore the asset.
+    restore_resp = client.post(
+        "/v1/admin/catalog/tombstones/restore",
+        json={"relative_path": "2026/04/Job_A/a.jpg"},
+    )
+    assert restore_resp.status_code == 200
+
+    # Now verify must succeed (tombstone removed, SHA still known).
+    verify_after_restore = client.post(
+        "/v1/upload/verify",
+        headers=auth_headers,
+        json={"sha256_hex": "a" * 64, "size_bytes": 100},
+    )
+    assert verify_after_restore.status_code == 200
+    assert verify_after_restore.json()["status"] == "ALREADY_EXISTS"

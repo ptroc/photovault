@@ -143,6 +143,23 @@ class RejectedAssetRecord:
 
 
 @dataclass(frozen=True)
+class TombstoneRecord:
+    """Catalog tombstone row (Phase 3.C).
+
+    Records a SHA that has been deleted and moved to trash. Prevents
+    re-uploading the same content after deletion. Stays indefinitely unless
+    explicitly cleared by an admin.
+    """
+
+    relative_path: str
+    sha256_hex: str
+    trashed_at_utc: str
+    marked_reason: str | None
+    trash_relative_path: str
+    original_size_bytes: int
+
+
+@dataclass(frozen=True)
 class DuplicateShaGroup:
     sha256_hex: str
     file_count: int
@@ -340,6 +357,66 @@ class UploadStateStore(Protocol):
         self, *, limit: int, offset: int
     ) -> tuple[int, list[RejectedAssetRecord]]: ...
 
+    # -------- Phase 3.C: tombstones -----------------------------------
+    def add_tombstone(
+        self,
+        *,
+        relative_path: str,
+        sha256_hex: str,
+        trashed_at_utc: str,
+        marked_reason: str | None,
+        trash_relative_path: str,
+        original_size_bytes: int,
+    ) -> TombstoneRecord: ...
+
+    def is_sha_tombstoned(self, sha256_hex: str) -> bool: ...
+
+    def list_sha_tombstones(self, shas: list[str]) -> list[TombstoneRecord]: ...
+
+    def get_tombstone_by_path(self, relative_path: str) -> TombstoneRecord | None: ...
+
+    def remove_tombstone(self, relative_path: str) -> bool: ...
+
+    # -------- Phase 3.D: tombstone list + purge ----------------------------
+    def list_tombstones(
+        self,
+        *,
+        limit: int,
+        offset: int,
+        older_than_days: int | None = None,
+    ) -> tuple[int, list[TombstoneRecord]]:
+        """Return (total, page) of tombstones sorted by trashed_at_utc ASC.
+
+        When ``older_than_days`` is given, only tombstones whose
+        ``trashed_at_utc`` is older than that many days are included.
+        This is used by the UI to highlight assets that are about to be
+        purged and by the purge worker to identify candidates.
+        """
+        ...
+
+    def purge_tombstones(
+        self,
+        *,
+        older_than_days: int,
+        max_batch: int,
+    ) -> list[TombstoneRecord]:
+        """Select up to ``max_batch`` tombstones older than ``older_than_days``
+        days, delete them from the store, and return the deleted records.
+
+        The Postgres implementation uses ``SELECT … FOR UPDATE SKIP LOCKED``
+        so that two concurrent cron invocations cannot double-purge the same
+        row.  The caller is responsible for removing the physical files.
+        """
+        ...
+
+    def delete_media_asset(self, relative_path: str) -> bool:
+        """Remove an asset and its dependents (extraction, preview, reject-queue row).
+
+        Returns True if a row was deleted, False if the path was not found.
+        Added in Phase 3.C to support the execute-delete path.
+        """
+        ...
+
     def list_media_assets_for_extraction(
         self,
         *,
@@ -500,6 +577,7 @@ class InMemoryUploadStateStore:
     media_asset_extractions: dict[str, MediaExtractionRecord] = field(default_factory=dict)
     media_asset_previews: dict[str, MediaPreviewRecord] = field(default_factory=dict)
     media_asset_rejects: dict[str, RejectedAssetRecord] = field(default_factory=dict)
+    tombstones: dict[str, TombstoneRecord] = field(default_factory=dict)
     clients: dict[str, ClientRecord] = field(default_factory=dict)
     client_heartbeats: dict[str, ClientHeartbeatRecord] = field(default_factory=dict)
     path_conflicts: list[PathConflictRecord] = field(default_factory=list)
@@ -913,6 +991,101 @@ class InMemoryUploadStateStore:
             if offset < 0:
                 offset = 0
             return total, rows[offset : offset + limit]
+
+    # -------- Phase 3.C: tombstones -----------------------------------
+    def add_tombstone(
+        self,
+        *,
+        relative_path: str,
+        sha256_hex: str,
+        trashed_at_utc: str,
+        marked_reason: str | None,
+        trash_relative_path: str,
+        original_size_bytes: int,
+    ) -> TombstoneRecord:
+        with self._lock:
+            record = TombstoneRecord(
+                relative_path=relative_path,
+                sha256_hex=sha256_hex,
+                trashed_at_utc=trashed_at_utc,
+                marked_reason=marked_reason,
+                trash_relative_path=trash_relative_path,
+                original_size_bytes=original_size_bytes,
+            )
+            self.tombstones[sha256_hex] = record
+            return record
+
+    def is_sha_tombstoned(self, sha256_hex: str) -> bool:
+        with self._lock:
+            return sha256_hex in self.tombstones
+
+    def list_sha_tombstones(self, shas: list[str]) -> list[TombstoneRecord]:
+        with self._lock:
+            return [self.tombstones[sha] for sha in shas if sha in self.tombstones]
+
+    def get_tombstone_by_path(self, relative_path: str) -> TombstoneRecord | None:
+        with self._lock:
+            for record in self.tombstones.values():
+                if record.relative_path == relative_path:
+                    return record
+            return None
+
+    def remove_tombstone(self, relative_path: str) -> bool:
+        with self._lock:
+            for sha, record in list(self.tombstones.items()):
+                if record.relative_path == relative_path:
+                    del self.tombstones[sha]
+                    return True
+            return False
+
+    def list_tombstones(
+        self,
+        *,
+        limit: int,
+        offset: int,
+        older_than_days: int | None = None,
+    ) -> tuple[int, list[TombstoneRecord]]:
+        with self._lock:
+            rows = sorted(self.tombstones.values(), key=lambda r: r.trashed_at_utc)
+            if older_than_days is not None:
+                cutoff = (datetime.now(UTC) - timedelta(days=older_than_days)).isoformat()
+                rows = [r for r in rows if r.trashed_at_utc <= cutoff]
+            total = len(rows)
+            return total, rows[offset : offset + limit]
+
+    def purge_tombstones(
+        self,
+        *,
+        older_than_days: int,
+        max_batch: int,
+    ) -> list[TombstoneRecord]:
+        with self._lock:
+            cutoff = (datetime.now(UTC) - timedelta(days=older_than_days)).isoformat()
+            candidates = sorted(
+                [r for r in self.tombstones.values() if r.trashed_at_utc <= cutoff],
+                key=lambda r: r.trashed_at_utc,
+            )[:max_batch]
+            for record in candidates:
+                self.tombstones.pop(record.sha256_hex, None)
+            return candidates
+
+    def delete_media_asset(self, relative_path: str) -> bool:
+        """Remove the media asset row and its dependents from the in-memory store.
+
+        Mirrors ON DELETE CASCADE behaviour from Postgres:
+        - api_media_assets row removed
+        - api_media_asset_extractions row removed (if present)
+        - api_media_asset_previews row removed (if present)
+        - api_catalog_reject_queue row removed (if present, via cascade from assets)
+        """
+        with self._lock:
+            if relative_path not in self.media_assets:
+                return False
+            del self.media_assets[relative_path]
+            self.media_asset_extractions.pop(relative_path, None)
+            self.media_asset_previews.pop(relative_path, None)
+            self.media_asset_rejects.pop(relative_path, None)
+            return True
 
     def _filter_assets_for_backfill(
         self,
@@ -1642,6 +1815,26 @@ class PostgresUploadStateStore:
                         marked_at_utc TEXT NOT NULL,
                         marked_reason TEXT
                     );
+                    """
+                )
+                # Phase 3.C: tombstones. Records deleted SHAs to prevent re-upload.
+                # Stays indefinitely unless explicitly cleared by an admin.
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS api_catalog_tombstones (
+                        relative_path TEXT PRIMARY KEY,
+                        sha256_hex TEXT NOT NULL,
+                        trashed_at_utc TEXT NOT NULL,
+                        marked_reason TEXT,
+                        trash_relative_path TEXT NOT NULL,
+                        original_size_bytes BIGINT
+                    );
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_catalog_tombstones_sha
+                    ON api_catalog_tombstones(sha256_hex);
                     """
                 )
                 cur.execute(
@@ -2481,6 +2674,233 @@ class PostgresUploadStateStore:
             for row in rows
         ]
         return total, items
+
+    # -------- Phase 3.C: tombstones -----------------------------------
+    def add_tombstone(
+        self,
+        *,
+        relative_path: str,
+        sha256_hex: str,
+        trashed_at_utc: str,
+        marked_reason: str | None,
+        trash_relative_path: str,
+        original_size_bytes: int,
+    ) -> TombstoneRecord:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO api_catalog_tombstones (
+                        relative_path, sha256_hex, trashed_at_utc, marked_reason,
+                        trash_relative_path, original_size_bytes
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (relative_path) DO UPDATE
+                    SET sha256_hex = EXCLUDED.sha256_hex,
+                        trashed_at_utc = EXCLUDED.trashed_at_utc,
+                        marked_reason = EXCLUDED.marked_reason,
+                        trash_relative_path = EXCLUDED.trash_relative_path,
+                        original_size_bytes = EXCLUDED.original_size_bytes;
+                    """,
+                    (
+                        relative_path,
+                        sha256_hex,
+                        trashed_at_utc,
+                        marked_reason,
+                        trash_relative_path,
+                        original_size_bytes,
+                    ),
+                )
+            conn.commit()
+        return TombstoneRecord(
+            relative_path=relative_path,
+            sha256_hex=sha256_hex,
+            trashed_at_utc=trashed_at_utc,
+            marked_reason=marked_reason,
+            trash_relative_path=trash_relative_path,
+            original_size_bytes=original_size_bytes,
+        )
+
+    def is_sha_tombstoned(self, sha256_hex: str) -> bool:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT 1 FROM api_catalog_tombstones WHERE sha256_hex = %s LIMIT 1;
+                    """,
+                    (sha256_hex,),
+                )
+                return cur.fetchone() is not None
+
+    def list_sha_tombstones(self, shas: list[str]) -> list[TombstoneRecord]:
+        if not shas:
+            return []
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT relative_path, sha256_hex, trashed_at_utc, marked_reason,
+                           trash_relative_path, original_size_bytes
+                    FROM api_catalog_tombstones
+                    WHERE sha256_hex = ANY(%s);
+                    """,
+                    (shas,),
+                )
+                rows = cur.fetchall()
+        return [
+            TombstoneRecord(
+                relative_path=str(row[0]),
+                sha256_hex=str(row[1]),
+                trashed_at_utc=str(row[2]),
+                marked_reason=str(row[3]) if row[3] is not None else None,
+                trash_relative_path=str(row[4]),
+                original_size_bytes=int(row[5]),
+            )
+            for row in rows
+        ]
+
+    def remove_tombstone(self, relative_path: str) -> bool:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    DELETE FROM api_catalog_tombstones WHERE relative_path = %s;
+                    """,
+                    (relative_path,),
+                )
+                removed = cur.rowcount > 0
+            conn.commit()
+        return removed
+
+    def get_tombstone_by_path(self, relative_path: str) -> TombstoneRecord | None:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT relative_path, sha256_hex, trashed_at_utc, marked_reason,
+                           trash_relative_path, original_size_bytes
+                    FROM api_catalog_tombstones
+                    WHERE relative_path = %s;
+                    """,
+                    (relative_path,),
+                )
+                row = cur.fetchone()
+        if row is None:
+            return None
+        return TombstoneRecord(
+            relative_path=str(row[0]),
+            sha256_hex=str(row[1]),
+            trashed_at_utc=str(row[2]),
+            marked_reason=str(row[3]) if row[3] is not None else None,
+            trash_relative_path=str(row[4]),
+            original_size_bytes=int(row[5]),
+        )
+
+    def list_tombstones(
+        self,
+        *,
+        limit: int,
+        offset: int,
+        older_than_days: int | None = None,
+    ) -> tuple[int, list[TombstoneRecord]]:
+        where_clauses: list[str] = []
+        params: list[object] = []
+        if older_than_days is not None:
+            cutoff = (datetime.now(UTC) - timedelta(days=older_than_days)).isoformat()
+            where_clauses.append("trashed_at_utc <= %s")
+            params.append(cutoff)
+        where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT COUNT(*) FROM api_catalog_tombstones {where_sql};",
+                    params,
+                )
+                row = cur.fetchone()
+                total = int(row[0]) if row else 0
+                cur.execute(
+                    f"""
+                    SELECT relative_path, sha256_hex, trashed_at_utc, marked_reason,
+                           trash_relative_path, original_size_bytes
+                    FROM api_catalog_tombstones
+                    {where_sql}
+                    ORDER BY trashed_at_utc ASC
+                    LIMIT %s OFFSET %s;
+                    """,
+                    [*params, limit, offset],
+                )
+                rows = cur.fetchall()
+        return total, [
+            TombstoneRecord(
+                relative_path=str(r[0]),
+                sha256_hex=str(r[1]),
+                trashed_at_utc=str(r[2]),
+                marked_reason=str(r[3]) if r[3] is not None else None,
+                trash_relative_path=str(r[4]),
+                original_size_bytes=int(r[5]),
+            )
+            for r in rows
+        ]
+
+    def purge_tombstones(
+        self,
+        *,
+        older_than_days: int,
+        max_batch: int,
+    ) -> list[TombstoneRecord]:
+        cutoff = (datetime.now(UTC) - timedelta(days=older_than_days)).isoformat()
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT relative_path, sha256_hex, trashed_at_utc, marked_reason,
+                           trash_relative_path, original_size_bytes
+                    FROM api_catalog_tombstones
+                    WHERE trashed_at_utc <= %s
+                    ORDER BY trashed_at_utc ASC
+                    FOR UPDATE SKIP LOCKED
+                    LIMIT %s;
+                    """,
+                    (cutoff, max_batch),
+                )
+                rows = cur.fetchall()
+                if rows:
+                    relative_paths = [str(r[0]) for r in rows]
+                    cur.execute(
+                        "DELETE FROM api_catalog_tombstones WHERE relative_path = ANY(%s);",
+                        (relative_paths,),
+                    )
+            conn.commit()
+        return [
+            TombstoneRecord(
+                relative_path=str(r[0]),
+                sha256_hex=str(r[1]),
+                trashed_at_utc=str(r[2]),
+                marked_reason=str(r[3]) if r[3] is not None else None,
+                trash_relative_path=str(r[4]),
+                original_size_bytes=int(r[5]),
+            )
+            for r in rows
+        ]
+
+    def delete_media_asset(self, relative_path: str) -> bool:
+        """Delete the api_media_assets row (ON DELETE CASCADE removes extraction,
+        preview, and reject-queue rows automatically).
+
+        Returns True if a row was deleted, False if the path was not found.
+        Added in Phase 3.C to support the execute-delete path.
+        """
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    DELETE FROM api_media_assets WHERE relative_path = %s;
+                    """,
+                    (relative_path,),
+                )
+                deleted = cur.rowcount > 0
+            conn.commit()
+        return deleted
 
     def _row_to_media_asset_record(self, row: tuple[object, ...]) -> MediaAssetRecord:
         return MediaAssetRecord(
