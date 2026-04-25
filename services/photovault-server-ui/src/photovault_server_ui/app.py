@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 from datetime import datetime, timezone
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 from urllib.error import URLError
 from urllib.parse import parse_qsl, urlencode
@@ -284,6 +284,17 @@ def _decorate_catalog_item(item: dict[str, Any]) -> dict[str, Any]:
         item["preview_summary"] = "Preview failed"
     else:
         item["preview_summary"] = "Preview pending"
+    preview_relative_path = str(item.get("preview_relative_path") or "").strip()
+    preview_cache_root = (
+        os.getenv("PHOTOVAULT_SERVER_UI_PREVIEW_CACHE_ROOT", "").strip()
+        or os.getenv("PHOTOVAULT_API_PREVIEW_CACHE_ROOT", "").strip()
+    )
+    if preview_cache_root and preview_relative_path:
+        preview_root_path = Path(preview_cache_root).expanduser()
+        preview_relative_posix = PurePosixPath(preview_relative_path)
+        item["preview_full_path"] = str(preview_root_path.joinpath(*preview_relative_posix.parts))
+    else:
+        item["preview_full_path"] = None
     item["filename"] = PurePosixPath(str(item.get("relative_path", ""))).name
     sha_hex = str(item.get("sha256_hex") or "")
     item["sha256_display"] = _format_sha_for_display(sha_hex)
@@ -946,10 +957,7 @@ def create_app(*, api_fetcher: ApiFetcher | None = None, api_poster: ApiPoster |
 
         item = payload.get("item")
         if item is not None:
-            size_bytes = int(item.get("size_bytes", 0))
-            item["size_human"] = _format_size_bytes(size_bytes)
-            item["metadata_summary"] = _catalog_metadata_summary(item)
-            item["filename"] = PurePosixPath(str(item.get("relative_path", ""))).name
+            item = _decorate_catalog_item(item)
 
         catalog_query_state = _catalog_query_state_from_args()
 

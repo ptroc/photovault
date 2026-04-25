@@ -979,7 +979,9 @@ def test_catalog_backfill_action_posts_filters_and_shows_outcome_message() -> No
     )
 
 
-def test_catalog_asset_detail_renders_preview_status_and_operator_metadata() -> None:
+def test_catalog_asset_detail_renders_preview_status_and_operator_metadata(monkeypatch) -> None:
+    monkeypatch.setenv("PHOTOVAULT_SERVER_UI_PREVIEW_CACHE_ROOT", "/var/lib/photovault-preview-cache")
+
     def _fetcher(path: str, query: dict[str, str]) -> dict:
         assert path == "/v1/admin/catalog/asset"
         assert query == {"relative_path": "2026/04/Job_A/a.jpg"}
@@ -1031,6 +1033,8 @@ def test_catalog_asset_detail_renders_preview_status_and_operator_metadata() -> 
     assert "preview_capability" in html
     assert "previewable" in html
     assert ("a" * 64) in html
+    assert "preview_full_path" in html
+    assert "/var/lib/photovault-preview-cache/2026/04/Job_A/a__abc__w1024.jpg" in html
     assert "preview_last_succeeded_at_utc" not in html
     assert 'src="/catalog/preview?relative_path=2026/04/Job_A/a.jpg"' in html
     assert "favorite" in html

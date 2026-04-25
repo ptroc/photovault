@@ -67,9 +67,11 @@ PHOTOVAULT_API_BOOTSTRAP_TOKEN=change-me-bootstrap-token
 PHOTOVAULT_STORAGE_HOST_ROOT=/storage/photovault
 PHOTOVAULT_STORAGE_CONTAINER_ROOT=/var/storage
 PHOTOVAULT_API_STORAGE_ROOT=/var/storage
+PHOTOVAULT_API_PREVIEW_CACHE_ROOT=/var/.photovault_preview_cache
 PHOTOVAULT_API_PREVIEW_MAX_LONG_EDGE=2048
 PHOTOVAULT_API_PREVIEW_PASSTHROUGH_SUFFIXES=.jpg,.jpeg
 PHOTOVAULT_API_PREVIEW_PLACEHOLDER_SUFFIXES=.avi,.mp4
+PHOTOVAULT_SERVER_UI_PREVIEW_CACHE_ROOT=/var/.photovault_preview_cache
 # Optional: override if host port 80 is already in use.
 PHOTOVAULT_NGINX_HTTP_PORT=80
 ENV
@@ -80,12 +82,16 @@ If your DB runs on another machine, replace `host.docker.internal` with that hos
 the API returns `503 bootstrap enrollment is disabled`.
 `PHOTOVAULT_API_STORAGE_ROOT` must be inside the container path selected by
 `PHOTOVAULT_STORAGE_CONTAINER_ROOT`.
+`PHOTOVAULT_API_PREVIEW_CACHE_ROOT` is optional and sets where generated preview
+JPEGs are cached inside the API container (default `/var/.photovault_preview_cache`).
 `PHOTOVAULT_API_PREVIEW_MAX_LONG_EDGE` is optional and caps preview JPEGs on the
 longest edge (positive integer, default `1024`).
 `PHOTOVAULT_API_PREVIEW_PASSTHROUGH_SUFFIXES` is optional; listed suffixes skip preview generation
 and are served as original files by the preview endpoint.
 `PHOTOVAULT_API_PREVIEW_PLACEHOLDER_SUFFIXES` is optional; listed suffixes skip preview generation
 and stay in placeholder mode.
+`PHOTOVAULT_SERVER_UI_PREVIEW_CACHE_ROOT` is optional and controls the full preview-path
+value shown in server UI asset detail; keep it aligned with `PHOTOVAULT_API_PREVIEW_CACHE_ROOT`.
 
 ## 5. Create server UI basic auth file
 

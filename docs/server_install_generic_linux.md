@@ -95,6 +95,7 @@ Create `/etc/photovault/photovault-api.env`:
 sudo tee /etc/photovault/photovault-api.env >/dev/null <<'ENV'
 PHOTOVAULT_API_DATABASE_URL=postgresql://photovault_api:change-me-strong-password@127.0.0.1:5432/photovault
 PHOTOVAULT_API_STORAGE_ROOT=/storage/photovault
+PHOTOVAULT_API_PREVIEW_CACHE_ROOT=/var/.photovault_preview_cache
 PHOTOVAULT_API_PREVIEW_MAX_LONG_EDGE=2048
 PHOTOVAULT_API_PREVIEW_PASSTHROUGH_SUFFIXES=.jpg,.jpeg
 PHOTOVAULT_API_PREVIEW_PLACEHOLDER_SUFFIXES=.avi,.mp4
@@ -103,6 +104,8 @@ ENV
 
 `PHOTOVAULT_API_PREVIEW_MAX_LONG_EDGE` controls preview JPEG size by longest edge.
 It must be a positive integer. If omitted, the API defaults to `1024`.
+`PHOTOVAULT_API_PREVIEW_CACHE_ROOT` controls where preview JPEGs are cached on disk.
+If omitted, the API defaults to a sibling directory next to storage root (`<storage_root_parent>/.photovault_preview_cache`).
 `PHOTOVAULT_API_PREVIEW_PASSTHROUGH_SUFFIXES` disables preview generation for listed suffixes and
 serves the original file from `/v1/admin/catalog/preview` (e.g. `.jpg,.jpeg`).
 `PHOTOVAULT_API_PREVIEW_PLACEHOLDER_SUFFIXES` disables preview generation and keeps placeholder
@@ -113,6 +116,7 @@ Create `/etc/photovault/photovault-server-ui.env` (currently optional but requir
 ```bash
 sudo tee /etc/photovault/photovault-server-ui.env >/dev/null <<'ENV'
 # reserved for photovault-server-ui runtime variables
+PHOTOVAULT_SERVER_UI_PREVIEW_CACHE_ROOT=/var/.photovault_preview_cache
 ENV
 ```
 
