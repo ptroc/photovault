@@ -376,4 +376,52 @@
     </div>
   </section>
 
+  <section class="row g-3 mb-4">
+    <div class="col-12">
+      <article class="card surface-card">
+        <div class="card-body">
+          <div class="d-flex justify-content-between align-items-start gap-3 mb-3">
+            <div>
+              <h2 class="card-title h4 mb-1">Network at a glance</h2>
+              <p class="muted-help mb-0">Current IP addresses and active connections for all network interfaces.</p>
+            </div>
+            <a class="btn btn-outline-secondary btn-sm" href="/network">Network settings</a>
+          </div>
+          {% if interface_addresses %}
+          <div class="row row-cols-1 row-cols-md-2 row-cols-xl-3 g-3">
+            {% for iface in interface_addresses %}
+            <div class="col">
+              <div class="summary-card rounded-4 p-3 h-100">
+                <div class="d-flex justify-content-between align-items-start gap-2 mb-2">
+                  <code class="inline-code fw-semibold">{{ iface.interface }}</code>
+                  {% if iface.connection %}
+                  {{ state_badge('ok', iface.connection) }}
+                  {% else %}
+                  {{ state_badge('waiting', 'no connection') }}
+                  {% endif %}
+                </div>
+                {% if iface.addresses %}
+                <div class="d-flex flex-column gap-1">
+                  {% for addr in iface.addresses %}
+                  <code class="inline-code small">{{ addr }}</code>
+                  {% endfor %}
+                </div>
+                {% else %}
+                <div class="small text-secondary">No IP assigned</div>
+                {% endif %}
+              </div>
+            </div>
+            {% endfor %}
+          </div>
+          {% else %}
+          <div class="alert alert-warning mb-0" role="alert">
+            <strong>Interface data unavailable.</strong>
+            <div>The <code class="inline-code">ip</code> command (iproute2) is not available on this host. Check the <a href="/network">Network page</a> for connectivity details.</div>
+          </div>
+          {% endif %}
+        </div>
+      </article>
+    </div>
+  </section>
+
 </section>

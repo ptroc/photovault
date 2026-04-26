@@ -831,12 +831,14 @@ def create_app(
             return {
                 "current_state": ClientState.ERROR_DAEMON.value,
                 "updated_at_utc": "",
+                "server_base_url": resolved_server_base_url,
                 "server_auth": auth_state,
                 "server_heartbeat": heartbeat_state,
             }
         return {
             "current_state": row[0],
             "updated_at_utc": row[1],
+            "server_base_url": resolved_server_base_url,
             "server_auth": auth_state,
             "server_heartbeat": heartbeat_state,
         }

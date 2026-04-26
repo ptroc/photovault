@@ -51,7 +51,7 @@ def _network_snapshot() -> dict[str, object]:
     }
 
 
-def _dependency_snapshot() -> list[dict[str, str]]:
+def _dependency_snapshot(*, server_api_url: str = "") -> list[dict[str, str]]:
     return [
         {
             "name": "SQLite",
@@ -101,6 +101,7 @@ def _overview_payloads(
         "/state": {
             "current_state": daemon_state,
             "updated_at_utc": "2026-04-19T16:51:44.120670+00:00",
+            "server_base_url": "https://photovault.intern.troc-tech.de/",
             "server_auth": effective_server_auth,
         },
         "/diagnostics/m0": {
@@ -1350,3 +1351,57 @@ def test_network_portal_handoff_start_and_stop_error_render() -> None:
     assert "Failed to start portal handoff: daemon API returned HTTP 503" in start_error
     stop_error = app.test_client().post("/network/portal-handoff/stop").get_data(as_text=True)
     assert "Failed to stop portal handoff: daemon API returned HTTP 503" in stop_error
+
+
+def test_overview_renders_network_at_a_glance_with_interface_data() -> None:
+    payloads = _overview_payloads()
+
+    def fake_daemon_get(_: str, path: str) -> object:
+        return payloads[path]
+
+    def fake_interface_addresses() -> list[dict[str, object]]:
+        return [
+            {
+                "interface": "eth0",
+                "addresses": ["192.168.1.10/24", "fe80::1/64"],
+                "connection": "Wired connection 1",
+            },
+            {"interface": "wlan0", "addresses": ["10.0.0.55/24"], "connection": "studio-wifi"},
+            {"interface": "wlan1", "addresses": [], "connection": None},
+        ]
+
+    app = create_app(
+        daemon_get=fake_daemon_get,
+        dependency_snapshot_get=_dependency_snapshot,
+        interface_addresses_get=fake_interface_addresses,
+    )
+    body = app.test_client().get("/").get_data(as_text=True)
+
+    assert "Network at a glance" in body
+    assert "eth0" in body
+    assert "192.168.1.10/24" in body
+    assert "Wired connection 1" in body
+    assert "wlan0" in body
+    assert "10.0.0.55/24" in body
+    assert "studio-wifi" in body
+    assert "wlan1" in body
+    assert "No IP assigned" in body
+    assert "no connection" in body
+    assert "Interface data unavailable" not in body
+
+
+def test_overview_renders_network_at_a_glance_fallback_when_no_interface_data() -> None:
+    payloads = _overview_payloads()
+
+    def fake_daemon_get(_: str, path: str) -> object:
+        return payloads[path]
+
+    app = create_app(
+        daemon_get=fake_daemon_get,
+        dependency_snapshot_get=_dependency_snapshot,
+        interface_addresses_get=lambda: [],
+    )
+    body = app.test_client().get("/").get_data(as_text=True)
+
+    assert "Network at a glance" in body
+    assert "Interface data unavailable" in body

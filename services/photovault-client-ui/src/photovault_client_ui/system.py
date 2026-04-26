@@ -1,4 +1,5 @@
 """OS/System dependency helpers (NetworkManager, systemd)."""
+import json
 import os
 import sqlite3
 import subprocess
@@ -136,7 +137,7 @@ def _systemd_service_state(
         return stderr or stdout or f"exit {exc.returncode}"
 
 
-def _get_dependency_snapshot() -> list[dict[str, str]]:
+def _get_dependency_snapshot(server_api_url: str = DEFAULT_SERVER_API_URL) -> list[dict[str, str]]:
     dependencies: list[dict[str, str]] = []
 
     if DEFAULT_CLIENT_DB_PATH.exists():
@@ -188,8 +189,60 @@ def _get_dependency_snapshot() -> list[dict[str, str]]:
         {
             "name": "photovault-api.service",
             "status": _systemd_service_state("photovault-api.service"),
-            "detail": f"server upload and verify API at {DEFAULT_SERVER_API_URL}",
+            "detail": f"server upload and verify API at {server_api_url}",
         }
     )
 
     return dependencies
+
+
+def _get_interface_addresses(
+    command_runner: Callable[[list[str]], str] = _run_command,
+) -> list[dict[str, Any]]:
+    """Return per-interface IP addresses using `ip -j addr`.
+
+    Falls back to an empty list if the command fails or is unavailable.
+    Each entry: {"interface": str, "addresses": [str], "connection": str | None}.
+    """
+    # -- gather IPs via `ip -j addr` -------------------------------------------
+    interfaces: dict[str, list[str]] = {}
+    try:
+        raw = command_runner(["ip", "-j", "addr"])
+        parsed = json.loads(raw)
+        for iface_data in parsed:
+            ifname = str(iface_data.get("ifname", "")).strip()
+            if not ifname or ifname == "lo":
+                continue
+            addrs: list[str] = []
+            for addr_info in iface_data.get("addr_info", []):
+                local = str(addr_info.get("local", "")).strip()
+                prefix = addr_info.get("prefixlen", "")
+                family = str(addr_info.get("family", "")).strip()
+                if local and family in {"inet", "inet6"}:
+                    addrs.append(f"{local}/{prefix}")
+            interfaces[ifname] = addrs
+    except (FileNotFoundError, subprocess.CalledProcessError, json.JSONDecodeError, ValueError):
+        return []
+
+    # -- overlay the active nmcli connection name per device -------------------
+    connection_map: dict[str, str] = {}
+    try:
+        nmcli_out = command_runner(
+            ["nmcli", "-m", "multiline", "-f", "DEVICE,CONNECTION", "device", "status"]
+        )
+        for record in _parse_nmcli_multiline(nmcli_out):
+            dev = str(record.get("DEVICE", "")).strip()
+            conn = str(record.get("CONNECTION", "")).strip()
+            if dev and conn and conn != "--":
+                connection_map[dev] = conn
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        pass
+
+    return [
+        {
+            "interface": ifname,
+            "addresses": addrs,
+            "connection": connection_map.get(ifname),
+        }
+        for ifname, addrs in interfaces.items()
+    ]

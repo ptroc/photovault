@@ -14,10 +14,11 @@ from .api_client import (
 )
 from .constants import (
     DEFAULT_DAEMON_BASE_URL,
+    DEFAULT_SERVER_API_URL,
     DEFAULT_TICK_STATUS_REFRESH_MS,
     DEFAULT_TICK_TIMEOUT_SECONDS,
 )
-from .system import _get_dependency_snapshot
+from .system import _get_dependency_snapshot, _get_interface_addresses
 from .view_models import (
     _annotate_job_record,
     _block_partition_ingest_prefill,
@@ -39,7 +40,8 @@ def create_app(
     network_snapshot_get: Callable[[], dict[str, Any]] | None = None,
     network_connect: Callable[[str, str | None], None] | None = None,
     network_scan: Callable[[], None] | None = None,
-    dependency_snapshot_get: Callable[[], list[dict[str, str]]] = _get_dependency_snapshot,
+    dependency_snapshot_get: Callable[..., list[dict[str, str]]] = _get_dependency_snapshot,
+    interface_addresses_get: Callable[[], list[dict[str, Any]]] = _get_interface_addresses,
 ) -> Flask:
     app = Flask(__name__)
 
@@ -128,7 +130,10 @@ def create_app(
             ingest_form.update(form_data)
         context = _load_daemon_context()
         context["jobs"] = [_annotate_job_record(job) for job in context["jobs"]]
-        dependencies = dependency_snapshot_get()
+        server_base_url_from_daemon = (
+            context["state"].get("server_base_url", "") if isinstance(context.get("state"), dict) else ""
+        ) or DEFAULT_SERVER_API_URL
+        dependencies = dependency_snapshot_get(server_api_url=server_base_url_from_daemon)
         ingest_gate = _build_ingest_gate(context["state"])
         overview_metrics = _build_overview_metrics(
             jobs=context["jobs"],
@@ -138,9 +143,11 @@ def create_app(
             dependencies=dependencies,
             events=context["events"],
         )
+        interface_addresses = interface_addresses_get()
         context.update(
             {
                 "dependencies": dependencies,
+                "interface_addresses": interface_addresses,
                 "overview_metrics": overview_metrics,
                 "daemon_progress": _derive_daemon_progress_view(context["state"]),
                 "daemon_base_url": daemon_base_url,
