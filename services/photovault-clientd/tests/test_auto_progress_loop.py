@@ -5,6 +5,7 @@ from threading import Event, Thread
 
 from fastapi.testclient import TestClient
 from photovault_clientd import engine
+from photovault_clientd.engine import core
 from photovault_clientd.app import create_app
 from photovault_clientd.db import open_db, set_daemon_state
 from photovault_clientd.state_machine import ClientState
@@ -266,7 +267,7 @@ def test_auto_progress_advances_offline_ingest_pipeline_without_manual_ticks(
     source.parent.mkdir(parents=True, exist_ok=True)
     source.write_bytes(b"auto-offline-pipeline")
 
-    monkeypatch.setattr(engine, "_network_is_online", lambda: False)
+    monkeypatch.setattr(core, "_network_is_online", lambda: False)
 
     app = create_app(
         db_path=db_path,
@@ -308,21 +309,18 @@ def test_auto_progress_drains_online_pipeline_to_idle_without_manual_ticks(
     staged_file.parent.mkdir(parents=True, exist_ok=True)
     staged_file.write_bytes(b"autodrain")
 
-    monkeypatch.setattr(engine, "_network_is_online", lambda: True)
-    monkeypatch.setattr(
-        engine,
+    monkeypatch.setattr(core, "_network_is_online", lambda: True)
+    monkeypatch.setattr(core,
         "_post_metadata_handshake",
         lambda *, server_base_url, files, timeout_seconds=5.0: {
             int(item["file_id"]): "UPLOAD_REQUIRED" for item in files
         },
     )
-    monkeypatch.setattr(
-        engine,
+    monkeypatch.setattr(core,
         "_upload_file_content",
         lambda *, server_base_url, sha256_hex, size_bytes, content, timeout_seconds=5.0: "STORED_TEMP",
     )
-    monkeypatch.setattr(
-        engine,
+    monkeypatch.setattr(core,
         "_post_server_verify",
         lambda *, server_base_url, sha256_hex, size_bytes, timeout_seconds=5.0: "VERIFIED",
     )
@@ -366,7 +364,7 @@ def test_auto_progress_stops_at_wait_network_when_offline(tmp_path: Path, monkey
     staged_file.parent.mkdir(parents=True, exist_ok=True)
     staged_file.write_bytes(b"offline")
 
-    monkeypatch.setattr(engine, "_network_is_online", lambda: False)
+    monkeypatch.setattr(core, "_network_is_online", lambda: False)
     _seed_job(
         db_path,
         job_status=ClientState.WAIT_NETWORK.value,
@@ -406,21 +404,18 @@ def test_auto_progress_continues_to_next_ready_file_after_cleanup(
     first_file.write_bytes(b"first")
     second_file.write_bytes(b"second")
 
-    monkeypatch.setattr(engine, "_network_is_online", lambda: True)
-    monkeypatch.setattr(
-        engine,
+    monkeypatch.setattr(core, "_network_is_online", lambda: True)
+    monkeypatch.setattr(core,
         "_post_metadata_handshake",
         lambda *, server_base_url, files, timeout_seconds=5.0: {
             int(item["file_id"]): "UPLOAD_REQUIRED" for item in files
         },
     )
-    monkeypatch.setattr(
-        engine,
+    monkeypatch.setattr(core,
         "_upload_file_content",
         lambda *, server_base_url, sha256_hex, size_bytes, content, timeout_seconds=5.0: "STORED_TEMP",
     )
-    monkeypatch.setattr(
-        engine,
+    monkeypatch.setattr(core,
         "_post_server_verify",
         lambda *, server_base_url, sha256_hex, size_bytes, timeout_seconds=5.0: "VERIFIED",
     )
@@ -481,9 +476,8 @@ def test_auto_progress_stops_at_error_file_when_retries_exhausted(
     staged_file.parent.mkdir(parents=True, exist_ok=True)
     staged_file.write_bytes(b"retry-fail")
 
-    monkeypatch.setattr(engine, "_network_is_online", lambda: True)
-    monkeypatch.setattr(
-        engine,
+    monkeypatch.setattr(core, "_network_is_online", lambda: True)
+    monkeypatch.setattr(core,
         "_post_server_verify",
         lambda *, server_base_url, sha256_hex, size_bytes, timeout_seconds=5.0: "VERIFY_FAILED",
     )

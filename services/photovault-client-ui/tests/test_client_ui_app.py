@@ -1,5 +1,7 @@
 import httpx
-from photovault_client_ui.app import _derive_job_operator_view, _parse_nmcli_multiline, create_app
+from photovault_client_ui.app import create_app
+from photovault_client_ui.system import _parse_nmcli_multiline
+from photovault_client_ui.view_models import _derive_job_operator_view
 
 
 def _network_snapshot() -> dict[str, object]:

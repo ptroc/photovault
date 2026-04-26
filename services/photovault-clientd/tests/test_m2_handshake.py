@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from photovault_api.app import create_app as create_api_app
 from photovault_api.state_store import InMemoryUploadStateStore
 from photovault_clientd import engine
+from photovault_clientd.engine import core
 from photovault_clientd.app import create_app
 
 ORIGINAL_NETWORK_IS_ONLINE = engine._network_is_online
@@ -17,7 +18,7 @@ ORIGINAL_NETWORK_IS_ONLINE = engine._network_is_online
 
 @pytest.fixture(autouse=True)
 def _default_network_online(monkeypatch):
-    monkeypatch.setattr(engine, "_network_is_online", lambda: True)
+    monkeypatch.setattr(core, "_network_is_online", lambda: True)
 
 
 def _write_source_file(path: Path, content: bytes) -> None:
@@ -85,7 +86,7 @@ def test_wait_network_handshake_marks_server_existing_file_as_duplicate_global(
     def fake_handshake(*, server_base_url: str, files: list[dict[str, object]], timeout_seconds: float = 5.0):
         return {int(item["file_id"]): "ALREADY_EXISTS" for item in files}
 
-    monkeypatch.setattr(engine, "_post_metadata_handshake", fake_handshake)
+    monkeypatch.setattr(core, "_post_metadata_handshake", fake_handshake)
 
     app = create_app(db_path=db_path, staging_root=staging_root, server_base_url="http://fake")
     with TestClient(app) as client:
@@ -124,7 +125,7 @@ def test_wait_network_handshake_keeps_upload_required_file_ready_and_moves_to_up
     def fake_handshake(*, server_base_url: str, files: list[dict[str, object]], timeout_seconds: float = 5.0):
         return {int(item["file_id"]): "UPLOAD_REQUIRED" for item in files}
 
-    monkeypatch.setattr(engine, "_post_metadata_handshake", fake_handshake)
+    monkeypatch.setattr(core, "_post_metadata_handshake", fake_handshake)
 
     app = create_app(db_path=db_path, staging_root=staging_root, server_base_url="http://fake")
     with TestClient(app) as client:
@@ -164,7 +165,7 @@ def test_wait_network_handshake_network_failure_is_retry_safe_and_deterministic(
             raise URLError("offline")
         return {int(item["file_id"]): "UPLOAD_REQUIRED" for item in files}
 
-    monkeypatch.setattr(engine, "_post_metadata_handshake", fake_handshake)
+    monkeypatch.setattr(core, "_post_metadata_handshake", fake_handshake)
 
     app = create_app(db_path=db_path, staging_root=staging_root, server_base_url="http://fake")
     with TestClient(app) as client:
@@ -215,7 +216,7 @@ def test_wait_network_stays_put_while_offline_even_when_retry_due(tmp_path: Path
     source = tmp_path / "media" / "sd" / "offline-due.jpg"
     _write_source_file(source, b"offline-due")
 
-    monkeypatch.setattr(engine, "_network_is_online", lambda: False)
+    monkeypatch.setattr(core, "_network_is_online", lambda: False)
 
     app = create_app(db_path=db_path, staging_root=staging_root, server_base_url="http://fake")
     with TestClient(app) as client:
@@ -244,7 +245,7 @@ def test_wait_network_stays_put_when_nmcli_unavailable(tmp_path: Path, monkeypat
     def missing_nmcli(*_args, **_kwargs):
         raise FileNotFoundError("nmcli")
 
-    monkeypatch.setattr(engine, "_network_is_online", ORIGINAL_NETWORK_IS_ONLINE)
+    monkeypatch.setattr(core, "_network_is_online", ORIGINAL_NETWORK_IS_ONLINE)
     monkeypatch.setattr(subprocess, "run", missing_nmcli)
 
     app = create_app(db_path=db_path, staging_root=staging_root, server_base_url="http://fake")
@@ -270,7 +271,7 @@ def test_wait_network_advances_only_when_online_and_retry_due(tmp_path: Path, mo
     source = tmp_path / "media" / "sd" / "online-due.jpg"
     _write_source_file(source, b"online-due")
 
-    monkeypatch.setattr(engine, "_network_is_online", lambda: True)
+    monkeypatch.setattr(core, "_network_is_online", lambda: True)
 
     app = create_app(db_path=db_path, staging_root=staging_root, server_base_url="http://fake")
     with TestClient(app) as client:
@@ -317,7 +318,7 @@ def test_restart_safety_preserves_handshake_classification(tmp_path: Path, monke
     def fake_handshake(*, server_base_url: str, files: list[dict[str, object]], timeout_seconds: float = 5.0):
         return {int(item["file_id"]): "ALREADY_EXISTS" for item in files}
 
-    monkeypatch.setattr(engine, "_post_metadata_handshake", fake_handshake)
+    monkeypatch.setattr(core, "_post_metadata_handshake", fake_handshake)
 
     first_app = create_app(db_path=db_path, staging_root=staging_root, server_base_url="http://fake")
     with TestClient(first_app) as client:
@@ -355,20 +356,17 @@ def test_upload_file_and_server_verify_mark_file_verified_remote(tmp_path: Path,
     source = tmp_path / "media" / "sd" / "upload-ok.jpg"
     _write_source_file(source, b"upload-ok")
 
-    monkeypatch.setattr(
-        engine,
+    monkeypatch.setattr(core,
         "_post_metadata_handshake",
         lambda *, server_base_url, files, timeout_seconds=5.0: {
             int(item["file_id"]): "UPLOAD_REQUIRED" for item in files
         },
     )
-    monkeypatch.setattr(
-        engine,
+    monkeypatch.setattr(core,
         "_upload_file_content",
         lambda *, server_base_url, sha256_hex, size_bytes, content, timeout_seconds=5.0: "STORED_TEMP",
     )
-    monkeypatch.setattr(
-        engine,
+    monkeypatch.setattr(core,
         "_post_server_verify",
         lambda *, server_base_url, sha256_hex, size_bytes, timeout_seconds=5.0: "VERIFIED",
     )
@@ -410,8 +408,7 @@ def test_upload_file_failure_retries_from_ready_to_upload(tmp_path: Path, monkey
     _write_source_file(source, b"upload-retry")
     call_count = {"upload": 0}
 
-    monkeypatch.setattr(
-        engine,
+    monkeypatch.setattr(core,
         "_post_metadata_handshake",
         lambda *, server_base_url, files, timeout_seconds=5.0: {
             int(item["file_id"]): "UPLOAD_REQUIRED" for item in files
@@ -424,9 +421,8 @@ def test_upload_file_failure_retries_from_ready_to_upload(tmp_path: Path, monkey
             raise URLError("upload offline")
         return "STORED_TEMP"
 
-    monkeypatch.setattr(engine, "_upload_file_content", fake_upload)
-    monkeypatch.setattr(
-        engine,
+    monkeypatch.setattr(core, "_upload_file_content", fake_upload)
+    monkeypatch.setattr(core,
         "_post_server_verify",
         lambda *, server_base_url, sha256_hex, size_bytes, timeout_seconds=5.0: "VERIFIED",
     )
@@ -471,20 +467,17 @@ def test_server_verify_failure_moves_file_back_to_ready_to_upload(tmp_path: Path
     source = tmp_path / "media" / "sd" / "verify-retry.jpg"
     _write_source_file(source, b"verify-retry")
 
-    monkeypatch.setattr(
-        engine,
+    monkeypatch.setattr(core,
         "_post_metadata_handshake",
         lambda *, server_base_url, files, timeout_seconds=5.0: {
             int(item["file_id"]): "UPLOAD_REQUIRED" for item in files
         },
     )
-    monkeypatch.setattr(
-        engine,
+    monkeypatch.setattr(core,
         "_upload_file_content",
         lambda *, server_base_url, sha256_hex, size_bytes, content, timeout_seconds=5.0: "STORED_TEMP",
     )
-    monkeypatch.setattr(
-        engine,
+    monkeypatch.setattr(core,
         "_post_server_verify",
         lambda *, server_base_url, sha256_hex, size_bytes, timeout_seconds=5.0: "VERIFY_FAILED",
     )
@@ -528,20 +521,17 @@ def test_reupload_or_quarantine_marks_error_file_when_retries_exhausted(
     source = tmp_path / "media" / "sd" / "verify-exhausted.jpg"
     _write_source_file(source, b"verify-exhausted")
 
-    monkeypatch.setattr(
-        engine,
+    monkeypatch.setattr(core,
         "_post_metadata_handshake",
         lambda *, server_base_url, files, timeout_seconds=5.0: {
             int(item["file_id"]): "UPLOAD_REQUIRED" for item in files
         },
     )
-    monkeypatch.setattr(
-        engine,
+    monkeypatch.setattr(core,
         "_upload_file_content",
         lambda *, server_base_url, sha256_hex, size_bytes, content, timeout_seconds=5.0: "STORED_TEMP",
     )
-    monkeypatch.setattr(
-        engine,
+    monkeypatch.setattr(core,
         "_post_server_verify",
         lambda *, server_base_url, sha256_hex, size_bytes, timeout_seconds=5.0: "VERIFY_FAILED",
     )
@@ -657,8 +647,7 @@ def test_wait_network_applies_backoff_for_ready_to_upload_retry(tmp_path: Path, 
     source = tmp_path / "media" / "sd" / "ready-backoff.jpg"
     _write_source_file(source, b"ready-backoff")
 
-    monkeypatch.setattr(
-        engine,
+    monkeypatch.setattr(core,
         "_post_metadata_handshake",
         lambda *, server_base_url, files, timeout_seconds=5.0: (_ for _ in ()).throw(
             URLError("network down")
@@ -702,20 +691,17 @@ def test_wait_network_applies_backoff_for_uploaded_verify_retry(tmp_path: Path, 
     source = tmp_path / "media" / "sd" / "uploaded-backoff.jpg"
     _write_source_file(source, b"uploaded-backoff")
 
-    monkeypatch.setattr(
-        engine,
+    monkeypatch.setattr(core,
         "_post_metadata_handshake",
         lambda *, server_base_url, files, timeout_seconds=5.0: {
             int(item["file_id"]): "UPLOAD_REQUIRED" for item in files
         },
     )
-    monkeypatch.setattr(
-        engine,
+    monkeypatch.setattr(core,
         "_upload_file_content",
         lambda *, server_base_url, sha256_hex, size_bytes, content, timeout_seconds=5.0: "STORED_TEMP",
     )
-    monkeypatch.setattr(
-        engine,
+    monkeypatch.setattr(core,
         "_post_server_verify",
         lambda *, server_base_url, sha256_hex, size_bytes, timeout_seconds=5.0: (_ for _ in ()).throw(
             URLError("verify network down")
@@ -761,20 +747,17 @@ def test_operator_can_requeue_error_file_upload(tmp_path: Path, monkeypatch) -> 
     source = tmp_path / "media" / "sd" / "operator-requeue.jpg"
     _write_source_file(source, b"operator-requeue")
 
-    monkeypatch.setattr(
-        engine,
+    monkeypatch.setattr(core,
         "_post_metadata_handshake",
         lambda *, server_base_url, files, timeout_seconds=5.0: {
             int(item["file_id"]): "UPLOAD_REQUIRED" for item in files
         },
     )
-    monkeypatch.setattr(
-        engine,
+    monkeypatch.setattr(core,
         "_upload_file_content",
         lambda *, server_base_url, sha256_hex, size_bytes, content, timeout_seconds=5.0: "STORED_TEMP",
     )
-    monkeypatch.setattr(
-        engine,
+    monkeypatch.setattr(core,
         "_post_server_verify",
         lambda *, server_base_url, sha256_hex, size_bytes, timeout_seconds=5.0: "VERIFY_FAILED",
     )
@@ -826,20 +809,17 @@ def test_restart_safety_with_uploaded_file_resumes_server_verify(tmp_path: Path,
     source = tmp_path / "media" / "sd" / "verify-restart.jpg"
     _write_source_file(source, b"verify-restart")
 
-    monkeypatch.setattr(
-        engine,
+    monkeypatch.setattr(core,
         "_post_metadata_handshake",
         lambda *, server_base_url, files, timeout_seconds=5.0: {
             int(item["file_id"]): "UPLOAD_REQUIRED" for item in files
         },
     )
-    monkeypatch.setattr(
-        engine,
+    monkeypatch.setattr(core,
         "_upload_file_content",
         lambda *, server_base_url, sha256_hex, size_bytes, content, timeout_seconds=5.0: "STORED_TEMP",
     )
-    monkeypatch.setattr(
-        engine,
+    monkeypatch.setattr(core,
         "_post_server_verify",
         lambda *, server_base_url, sha256_hex, size_bytes, timeout_seconds=5.0: "VERIFIED",
     )
@@ -881,20 +861,17 @@ def test_verify_success_transitions_through_post_and_cleanup_states(tmp_path: Pa
     source = tmp_path / "media" / "sd" / "post-cleanup.jpg"
     _write_source_file(source, b"post-cleanup")
 
-    monkeypatch.setattr(
-        engine,
+    monkeypatch.setattr(core,
         "_post_metadata_handshake",
         lambda *, server_base_url, files, timeout_seconds=5.0: {
             int(item["file_id"]): "UPLOAD_REQUIRED" for item in files
         },
     )
-    monkeypatch.setattr(
-        engine,
+    monkeypatch.setattr(core,
         "_upload_file_content",
         lambda *, server_base_url, sha256_hex, size_bytes, content, timeout_seconds=5.0: "STORED_TEMP",
     )
-    monkeypatch.setattr(
-        engine,
+    monkeypatch.setattr(core,
         "_post_server_verify",
         lambda *, server_base_url, sha256_hex, size_bytes, timeout_seconds=5.0: "VERIFIED",
     )
@@ -928,20 +905,17 @@ def test_cleanup_staging_retains_files_when_policy_true(tmp_path: Path, monkeypa
     source = tmp_path / "media" / "sd" / "cleanup-retain.jpg"
     _write_source_file(source, b"cleanup-retain")
 
-    monkeypatch.setattr(
-        engine,
+    monkeypatch.setattr(core,
         "_post_metadata_handshake",
         lambda *, server_base_url, files, timeout_seconds=5.0: {
             int(item["file_id"]): "UPLOAD_REQUIRED" for item in files
         },
     )
-    monkeypatch.setattr(
-        engine,
+    monkeypatch.setattr(core,
         "_upload_file_content",
         lambda *, server_base_url, sha256_hex, size_bytes, content, timeout_seconds=5.0: "STORED_TEMP",
     )
-    monkeypatch.setattr(
-        engine,
+    monkeypatch.setattr(core,
         "_post_server_verify",
         lambda *, server_base_url, sha256_hex, size_bytes, timeout_seconds=5.0: "VERIFIED",
     )
@@ -1068,9 +1042,9 @@ def test_m4_end_to_end_acceptance_path_upload_finalize_index_and_admin_visibilit
             assert response.status_code == 200
             return str(response.json()["status"])
 
-        monkeypatch.setattr(engine, "_post_metadata_handshake", _api_handshake)
-        monkeypatch.setattr(engine, "_upload_file_content", _api_upload)
-        monkeypatch.setattr(engine, "_post_server_verify", _api_verify)
+        monkeypatch.setattr(core, "_post_metadata_handshake", _api_handshake)
+        monkeypatch.setattr(core, "_upload_file_content", _api_upload)
+        monkeypatch.setattr(core, "_post_server_verify", _api_verify)
 
         clientd_app = create_app(
             db_path=client_db_path,
@@ -1191,20 +1165,17 @@ def test_cleanup_staging_deletes_files_when_policy_false(tmp_path: Path, monkeyp
     source = tmp_path / "media" / "sd" / "cleanup-delete.jpg"
     _write_source_file(source, b"cleanup-delete")
 
-    monkeypatch.setattr(
-        engine,
+    monkeypatch.setattr(core,
         "_post_metadata_handshake",
         lambda *, server_base_url, files, timeout_seconds=5.0: {
             int(item["file_id"]): "UPLOAD_REQUIRED" for item in files
         },
     )
-    monkeypatch.setattr(
-        engine,
+    monkeypatch.setattr(core,
         "_upload_file_content",
         lambda *, server_base_url, sha256_hex, size_bytes, content, timeout_seconds=5.0: "STORED_TEMP",
     )
-    monkeypatch.setattr(
-        engine,
+    monkeypatch.setattr(core,
         "_post_server_verify",
         lambda *, server_base_url, sha256_hex, size_bytes, timeout_seconds=5.0: "VERIFIED",
     )
@@ -1249,20 +1220,17 @@ def test_cleanup_staging_transitions_paused_storage_on_delete_failure(
     source = tmp_path / "media" / "sd" / "cleanup-fail.jpg"
     _write_source_file(source, b"cleanup-fail")
 
-    monkeypatch.setattr(
-        engine,
+    monkeypatch.setattr(core,
         "_post_metadata_handshake",
         lambda *, server_base_url, files, timeout_seconds=5.0: {
             int(item["file_id"]): "UPLOAD_REQUIRED" for item in files
         },
     )
-    monkeypatch.setattr(
-        engine,
+    monkeypatch.setattr(core,
         "_upload_file_content",
         lambda *, server_base_url, sha256_hex, size_bytes, content, timeout_seconds=5.0: "STORED_TEMP",
     )
-    monkeypatch.setattr(
-        engine,
+    monkeypatch.setattr(core,
         "_post_server_verify",
         lambda *, server_base_url, sha256_hex, size_bytes, timeout_seconds=5.0: "VERIFIED",
     )

@@ -8,6 +8,7 @@ from urllib.error import HTTPError
 import pytest
 from fastapi.testclient import TestClient
 from photovault_clientd import engine
+from photovault_clientd.engine import core
 from photovault_clientd.app import create_app
 from photovault_clientd.db import fetch_server_auth_state, open_db
 
@@ -28,7 +29,7 @@ class _FakeResponse:
 
 @pytest.fixture(autouse=True)
 def _network_online(monkeypatch):
-    monkeypatch.setattr(engine, "_network_is_online", lambda: True)
+    monkeypatch.setattr(core, "_network_is_online", lambda: True)
 
 
 def _write_source(path: Path, content: bytes) -> None:
@@ -73,7 +74,7 @@ def test_pending_enrollment_persists_and_blocks_privileged_work(tmp_path: Path, 
             return _FakeResponse({"results": []})
         raise AssertionError(f"unexpected URL: {request.full_url}")
 
-    monkeypatch.setattr(engine, "urlopen", fake_urlopen)
+    monkeypatch.setattr(core, "urlopen", fake_urlopen)
 
     db_path = tmp_path / "state.sqlite3"
     source = tmp_path / "media" / "pending.jpg"
@@ -130,7 +131,7 @@ def test_revoked_enrollment_persists_and_blocks_privileged_work(tmp_path: Path, 
             )
         raise AssertionError(f"unexpected URL: {request.full_url}")
 
-    monkeypatch.setattr(engine, "urlopen", fake_urlopen)
+    monkeypatch.setattr(core, "urlopen", fake_urlopen)
 
     source = tmp_path / "media" / "revoked.jpg"
     _write_source(source, b"revoked")
@@ -213,7 +214,7 @@ def test_approved_client_uses_auth_headers_for_handshake_and_upload_flow(tmp_pat
             return _FakeResponse({"status": "VERIFIED"})
         raise AssertionError(f"unexpected URL: {request.full_url}")
 
-    monkeypatch.setattr(engine, "urlopen", fake_urlopen)
+    monkeypatch.setattr(core, "urlopen", fake_urlopen)
 
     source = tmp_path / "media" / "approved.jpg"
     _write_source(source, b"approved-flow")
@@ -303,7 +304,7 @@ def test_heartbeat_sender_is_deterministic_and_does_not_break_upload_flow(
             return _FakeResponse({"status": "VERIFIED"})
         raise AssertionError(f"unexpected URL: {request.full_url}")
 
-    monkeypatch.setattr(engine, "urlopen", fake_urlopen)
+    monkeypatch.setattr(core, "urlopen", fake_urlopen)
 
     source = tmp_path / "media" / "heartbeat.jpg"
     _write_source(source, b"heartbeat-flow")
@@ -379,7 +380,7 @@ def test_invalid_auth_error_blocks_privileged_work_and_persists_reason(tmp_path:
             )
         raise AssertionError(f"unexpected URL: {request.full_url}")
 
-    monkeypatch.setattr(engine, "urlopen", fake_urlopen)
+    monkeypatch.setattr(core, "urlopen", fake_urlopen)
 
     source = tmp_path / "media" / "invalid-auth.jpg"
     _write_source(source, b"invalid-auth")
@@ -443,7 +444,7 @@ def test_pending_auth_state_reenrolls_and_picks_up_approval_token(tmp_path: Path
         payload = responses.pop(0)
         return _FakeResponse(payload)
 
-    monkeypatch.setattr(engine, "urlopen", fake_urlopen)
+    monkeypatch.setattr(core, "urlopen", fake_urlopen)
 
     conn = open_db(tmp_path / "state.sqlite3")
     try:
