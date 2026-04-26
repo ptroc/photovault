@@ -21,7 +21,7 @@
           - python3-pip
           - sqlite3
           - sudo
-          - dcraw
+          - libimage-exiftool-perl
         state: present
 
     - name: Ensure photovault group exists

@@ -828,24 +828,22 @@ def _extract_raw_embedded_preview_bytes(path: Path) -> bytes:
     raise ValueError("RAW embedded preview unavailable: no embedded preview data found")
 
 
-def _render_raw_preview_source_via_dcraw(path: Path) -> Image.Image:
-    converter_path = _find_executable("dcraw")
-    if converter_path is None:
-        raise ValueError("dcraw fallback unavailable: dcraw is not installed")
+def _render_raw_preview_source_via_libraw(path: Path) -> Image.Image:
+    try:
+        import rawpy  # type: ignore[import-untyped]
+    except ImportError as exc:
+        raise ValueError(f"libraw fallback unavailable: rawpy is not installed: {exc}") from exc
 
     try:
-        result = _run_external_command([converter_path, "-c", "-w", str(path)])
-    except OSError as exc:
-        raise ValueError(f"dcraw fallback execution failed: {exc}") from exc
+        with rawpy.imread(str(path)) as raw:
+            rgb = raw.postprocess(use_camera_wb=True, output_bps=8)
+    except (rawpy.LibRawError, OSError, ValueError) as exc:
+        raise ValueError(f"libraw fallback failed: {exc}") from exc
 
-    if result.returncode != 0:
-        raise ValueError(f"dcraw fallback failed: {_decode_process_stderr(result.stderr)}")
-    if not result.stdout:
-        raise ValueError("dcraw fallback failed: converter did not produce preview output")
     try:
-        return _open_rgb_image_from_bytes(result.stdout)
-    except (UnidentifiedImageError, OSError, SyntaxError, ValueError) as exc:
-        raise ValueError(f"dcraw fallback produced invalid preview data: {exc}") from exc
+        return Image.fromarray(rgb, mode="RGB")
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"libraw fallback produced invalid preview data: {exc}") from exc
 
 
 def _render_raw_preview_source(path: Path) -> Image.Image:
@@ -860,11 +858,11 @@ def _render_raw_preview_source(path: Path) -> Image.Image:
         embedded_preview_error_detail = f"RAW embedded preview extraction failed: {exc}"
 
     try:
-        return _render_raw_preview_source_via_dcraw(path)
+        return _render_raw_preview_source_via_libraw(path)
     except ValueError as exc:
         if embedded_preview_error_detail is None:
-            raise ValueError(f"RAW dcraw fallback failed: {exc}") from exc
-        raise ValueError(f"{embedded_preview_error_detail}; RAW dcraw fallback failed: {exc}") from exc
+            raise ValueError(f"RAW libraw fallback failed: {exc}") from exc
+        raise ValueError(f"{embedded_preview_error_detail}; RAW libraw fallback failed: {exc}") from exc
 
 
 def _render_preview_source(path: Path) -> Image.Image:

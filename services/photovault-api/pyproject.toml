@@ -9,8 +9,10 @@ description = "photovault server API"
 requires-python = ">=3.11"
 dependencies = [
   "fastapi>=0.115,<1",
+  "numpy>=1.26,<3",
   "Pillow>=10,<12",
   "psycopg[binary]>=3.1,<4",
+  "rawpy>=0.21,<1",
   "uvicorn>=0.30,<1"
 ]
 

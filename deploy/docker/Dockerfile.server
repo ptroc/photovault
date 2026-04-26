@@ -6,7 +6,8 @@ ENV PYTHONDONTWRITEBYTECODE=1
 WORKDIR /opt/photovault
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends dcraw \
+    && apt-get install -y --no-install-recommends \
+        libimage-exiftool-perl \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy repository content into the image and install project dependencies.

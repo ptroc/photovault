@@ -1593,7 +1593,7 @@ def test_admin_retry_preview_generates_cache_for_raw_via_embedded_preview(
     assert item["preview_failure_detail"] is None
 
 
-def test_admin_retry_preview_generates_cache_for_raw_via_dcraw_fallback_when_embedded_preview_missing(
+def test_admin_retry_preview_generates_cache_for_raw_via_libraw_fallback_when_embedded_preview_missing(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -1601,23 +1601,17 @@ def test_admin_retry_preview_generates_cache_for_raw_via_dcraw_fallback_when_emb
     image_path.parent.mkdir(parents=True, exist_ok=True)
     image_path.write_bytes(b"fake-raf-content")
 
-    converted_bytes = _jpeg_with_exif_bytes(width=24, height=16)
+    rendered_image = Image.new("RGB", (24, 16), color=(50, 90, 130))
 
     def _raise_missing_embedded_preview(path: Path) -> bytes:
         raise ValueError("RAW embedded preview unavailable: no embedded preview data found")
 
-    def _fake_find_executable(name: str) -> str | None:
-        if name == "dcraw":
-            return "/usr/local/bin/dcraw"
-        return None
-
-    def _fake_run_external_command(command: list[str]):
-        assert command == ["/usr/local/bin/dcraw", "-c", "-w", str(image_path)]
-        return SimpleNamespace(returncode=0, stdout=converted_bytes, stderr=b"")
+    def _fake_render_via_libraw(path: Path) -> Image.Image:
+        assert Path(path) == image_path
+        return rendered_image.copy()
 
     monkeypatch.setattr(app_module, "_extract_raw_embedded_preview_bytes", _raise_missing_embedded_preview)
-    monkeypatch.setattr(app_module, "_find_executable", _fake_find_executable)
-    monkeypatch.setattr(app_module, "_run_external_command", _fake_run_external_command)
+    monkeypatch.setattr(app_module, "_render_raw_preview_source_via_libraw", _fake_render_via_libraw)
 
     client = TestClient(create_app(storage_root=tmp_path))
     index_response = client.post("/v1/storage/index")
@@ -1733,8 +1727,11 @@ def test_admin_retry_preview_persists_failure_for_raw_embedded_preview_errors(
     def _raise_missing_embedded_preview(path: Path) -> bytes:
         raise ValueError("RAW embedded preview unavailable: no embedded preview data found")
 
+    def _raise_libraw_unavailable(path: Path) -> Image.Image:
+        raise ValueError("libraw fallback unavailable: rawpy is not installed")
+
     monkeypatch.setattr(app_module, "_extract_raw_embedded_preview_bytes", _raise_missing_embedded_preview)
-    monkeypatch.setattr(app_module, "_find_executable", lambda name: None)
+    monkeypatch.setattr(app_module, "_render_raw_preview_source_via_libraw", _raise_libraw_unavailable)
 
     client = TestClient(create_app(storage_root=tmp_path))
     index_response = client.post("/v1/storage/index")
@@ -1749,7 +1746,7 @@ def test_admin_retry_preview_persists_failure_for_raw_embedded_preview_errors(
     assert item["preview_status"] == "failed"
     assert item["preview_last_failed_at_utc"] is not None
     assert "RAW embedded preview unavailable" in str(item["preview_failure_detail"])
-    assert "dcraw fallback unavailable" in str(item["preview_failure_detail"])
+    assert "libraw fallback unavailable" in str(item["preview_failure_detail"])
 
 
 def test_admin_retry_preview_persists_failure_for_unsupported_media(tmp_path: Path) -> None:
