@@ -1,12 +1,9 @@
 """Server-side API skeleton for photovault."""
-
 import hashlib
 import io
 import logging
-import math
 import mimetypes
 import os
-import re
 import secrets
 import shutil
 import subprocess
@@ -32,730 +29,101 @@ from photovault_api.state_store import (
     StorageSummary,
     UploadStateStore,
 )
+from .models import (
+    AdminBackfillCatalogRequest,
+    AdminBackfillCatalogResponse,
+    AdminCatalogAssetResponse,
+    AdminCatalogFolderItem,
+    AdminCatalogFoldersResponse,
+    AdminCatalogItem,
+    AdminCatalogListResponse,
+    AdminCatalogOrganizationRequest,
+    AdminCatalogOrganizationResponse,
+    AdminCatalogRejectQueueItem,
+    AdminCatalogRejectRequest,
+    AdminCatalogRejectQueueResponse,
+    AdminCatalogRejectResponse,
+    AdminCatalogRejectUnmarkResponse,
+    AdminClientActionResponse,
+    AdminClientListResponse,
+    AdminFileItem,
+    AdminFileListResponse,
+    AdminLatestCatalogBackfillRunsResponse,
+    AdminOverviewResponse,
+    AdminRetryExtractionRequest,
+    AdminRetryExtractionResponse,
+    AdminRetryPreviewRequest,
+    AdminRetryPreviewResponse,
+    BootstrapEnrollRequest,
+    BootstrapEnrollResponse,
+    ClientEnrollmentStatus,
+    ClientHeartbeatRequest,
+    ClientHeartbeatResponse,
+    ClientPresenceStatus,
+    ClientWorkloadStatus,
+    DuplicateShaGroupItem,
+    DuplicateShaGroupListResponse,
+    HandshakeDecision,
+    HandshakeFileResult,
+    HandshakeFileRequest,
+    IndexStorageResponse,
+    LatestIndexRunEnvelope,
+    LatestIndexRunResponse,
+    MetadataHandshakeRequest,
+    MetadataHandshakeResponse,
+    PathConflictItem,
+    PathConflictListResponse,
+    UploadContentResponse,
+    VerifyRequest,
+    VerifyResponse,
+)
+from .media import (
+    _compute_sha256,
+    _iter_storage_files,
+    _catalog_origin_for_source_kind,
+    _media_type_for_relative_path,
+    _preview_capability_for_relative_path,
+    _preview_max_size,
+    _resolve_preview_max_long_edge,
+    _resolve_preview_suffix_set,
+    _sanitize_component,
+    _normalize_exif_iso_speed,
+    _normalize_exif_rational,
+    _extract_media_metadata,
+    _ALLOWED_EXTRACTION_STATUS,
+    _ALLOWED_MEDIA_TYPE,
+    _ALLOWED_ORIGIN_KIND,
+    _ALLOWED_PREVIEW_CAPABILITY,
+    _ALLOWED_PREVIEW_STATUS,
+    _DEFAULT_PREVIEW_MAX_LONG_EDGE,
+    _HEARTBEAT_ONLINE_MAX_AGE_SECONDS,
+    _CLIENT_LIST_SCAN_MAX,
+    _CLIENT_LIST_SCAN_PAGE_SIZE,
+    _MEDIA_TYPE_SUFFIXES,
+    _PREVIEWABLE_SUFFIXES,
+    _PREVIEW_HEIC_SUFFIXES,
+    _PREVIEW_RASTER_SUFFIXES,
+    _PREVIEW_RAW_SUFFIXES,
+)
+from .storage_ops import (
+    _heartbeat_presence_status,
+    _list_clients_for_admin_view,
+    _normalize_catalog_folder_prefix,
+    _parse_boolean_filter,
+    _presence_sort_rank,
+    _require_approved_client,
+    _to_admin_catalog_item,
+    _to_admin_client_item,
+    _to_backfill_run_summary,
+    _validate_backfill_target_statuses,
+    _validate_catalog_filter_selection,
+    _workload_sort_rank,
+)
+
 
 APP_LOGGER = logging.getLogger("photovault-api.app")
 
-
-class HandshakeDecision(StrEnum):
-    ALREADY_EXISTS = "ALREADY_EXISTS"
-    UPLOAD_REQUIRED = "UPLOAD_REQUIRED"
-
-
-class HandshakeFileRequest(BaseModel):
-    client_file_id: int = Field(ge=1)
-    sha256_hex: str = Field(min_length=64, max_length=64)
-    size_bytes: int = Field(ge=0)
-
-
-class MetadataHandshakeRequest(BaseModel):
-    files: list[HandshakeFileRequest] = Field(min_length=1)
-
-
-class HandshakeFileResult(BaseModel):
-    client_file_id: int
-    decision: HandshakeDecision
-
-
-class MetadataHandshakeResponse(BaseModel):
-    results: list[HandshakeFileResult]
-
-
-class UploadContentResponse(BaseModel):
-    status: str
-
-
-class VerifyRequest(BaseModel):
-    sha256_hex: str = Field(min_length=64, max_length=64)
-    size_bytes: int = Field(ge=0)
-
-
-class VerifyResponse(BaseModel):
-    status: str
-
-
-class IndexStorageResponse(BaseModel):
-    scanned_files: int
-    indexed_files: int
-    new_sha_entries: int
-    existing_sha_matches: int
-    path_conflicts: int
-    errors: int
-
-
-class AdminOverviewResponse(BaseModel):
-    total_known_sha256: int
-    total_stored_files: int
-    indexed_files: int
-    uploaded_files: int
-    duplicate_file_paths: int
-    recent_indexed_files_24h: int
-    recent_uploaded_files_24h: int
-    last_indexed_at_utc: str | None
-    last_uploaded_at_utc: str | None
-
-
-class AdminFileItem(BaseModel):
-    relative_path: str
-    sha256_hex: str
-    size_bytes: int
-    source_kind: str
-    first_seen_at_utc: str
-    last_seen_at_utc: str
-
-
-class AdminFileListResponse(BaseModel):
-    total: int
-    limit: int
-    offset: int
-    items: list[AdminFileItem]
-
-
-class AdminCatalogItem(BaseModel):
-    relative_path: str
-    sha256_hex: str
-    size_bytes: int
-    media_type: str
-    preview_capability: str
-    origin_kind: str
-    last_observed_origin_kind: str
-    provenance_job_name: str | None
-    provenance_original_filename: str | None
-    first_cataloged_at_utc: str
-    last_cataloged_at_utc: str
-    extraction_status: str
-    extraction_last_attempted_at_utc: str | None
-    extraction_last_succeeded_at_utc: str | None
-    extraction_last_failed_at_utc: str | None
-    extraction_failure_detail: str | None
-    preview_status: str
-    preview_relative_path: str | None
-    preview_last_attempted_at_utc: str | None
-    preview_last_succeeded_at_utc: str | None
-    preview_last_failed_at_utc: str | None
-    preview_failure_detail: str | None
-    capture_timestamp_utc: str | None
-    camera_make: str | None
-    camera_model: str | None
-    image_width: int | None
-    image_height: int | None
-    orientation: int | None
-    lens_model: str | None
-    exposure_time_s: float | None = None
-    f_number: float | None = None
-    iso_speed: int | None = None
-    focal_length_mm: float | None = None
-    focal_length_35mm_mm: int | None = None
-    is_favorite: bool = False
-    is_archived: bool = False
-    is_rejected: bool = False
-
-
-class AdminCatalogListResponse(BaseModel):
-    total: int
-    limit: int
-    offset: int
-    items: list[AdminCatalogItem]
-
-
-class AdminRetryExtractionRequest(BaseModel):
-    relative_path: str = Field(min_length=1)
-
-
-class AdminRetryExtractionResponse(BaseModel):
-    item: AdminCatalogItem
-
-
-class AdminRetryPreviewRequest(BaseModel):
-    relative_path: str = Field(min_length=1)
-
-
-class AdminRetryPreviewResponse(BaseModel):
-    item: AdminCatalogItem
-
-
-class AdminCatalogAssetResponse(BaseModel):
-    item: AdminCatalogItem
-
-
-class AdminCatalogFolderItem(BaseModel):
-    """One folder in the catalog folder index.
-
-    `path` is the forward-slash-joined directory portion of the asset's
-    relative_path, e.g. ``2026/04/Job_A`` for an asset at
-    ``2026/04/Job_A/IMG_0001.jpg``. `depth` is the number of path
-    segments (``2026`` → 1, ``2026/04`` → 2, ``2026/04/Job_A`` → 3).
-    `direct_count` is the number of assets whose folder exactly equals
-    ``path``; `total_count` includes assets in subfolders. Clients use
-    this to render a folder tree and show counts at every depth.
-    """
-
-    path: str
-    depth: int
-    direct_count: int
-    total_count: int
-
-
-class AdminCatalogFoldersResponse(BaseModel):
-    folders: list[AdminCatalogFolderItem]
-
-
-class AdminCatalogOrganizationRequest(BaseModel):
-    relative_path: str = Field(min_length=1)
-
-
-class AdminCatalogOrganizationResponse(BaseModel):
-    item: AdminCatalogItem
-
-
-# ----- Phase 3.B: reject queue models -------------------------------------
-class AdminCatalogRejectRequest(BaseModel):
-    relative_path: str = Field(min_length=1)
-    marked_reason: str | None = Field(default=None, max_length=500)
-
-
-class AdminCatalogRejectResponse(BaseModel):
-    relative_path: str
-    sha256_hex: str
-    marked_at_utc: str
-    marked_reason: str | None = None
-    is_rejected: bool = True
-
-
-class AdminCatalogRejectUnmarkResponse(BaseModel):
-    relative_path: str
-    is_rejected: bool = False
-
-
-class AdminCatalogRejectQueueItem(BaseModel):
-    """A reject-queue row plus the matching catalog item.
-
-    The UI needs thumbnails + filenames to let the reviewer restore specific
-    items, so we always ship the catalog item in-band. If a catalog row has
-    disappeared under the queue (should not happen outside of a Phase 3.C
-    delete), the item is ``None`` and the UI falls back to the bare relative
-    path rendered from the queue row.
-    """
-
-    relative_path: str
-    sha256_hex: str
-    marked_at_utc: str
-    marked_reason: str | None = None
-    item: AdminCatalogItem | None = None
-
-
-class AdminCatalogRejectQueueResponse(BaseModel):
-    total: int
-    limit: int
-    offset: int
-    items: list[AdminCatalogRejectQueueItem]
-
-
-class AdminBackfillCatalogRequest(BaseModel):
-    target_statuses: list[str] = Field(default_factory=lambda: ["pending", "failed"], min_length=1)
-    limit: int = Field(default=100, ge=1, le=500)
-    origin_kind: str | None = None
-    media_type: str | None = None
-    preview_capability: str | None = None
-    cataloged_since_utc: str | None = None
-    cataloged_before_utc: str | None = None
-
-
-class AdminCatalogBackfillRunSummary(BaseModel):
-    backfill_kind: str
-    requested_statuses: list[str]
-    limit: int
-    origin_kind: str | None
-    media_type: str | None
-    preview_capability: str | None
-    cataloged_since_utc: str | None
-    cataloged_before_utc: str | None
-    selected_count: int
-    processed_count: int
-    succeeded_count: int
-    failed_count: int
-    remaining_pending_count: int
-    remaining_failed_count: int
-    completed_at_utc: str
-
-
-class AdminBackfillCatalogResponse(BaseModel):
-    run: AdminCatalogBackfillRunSummary
-    items: list[AdminCatalogItem]
-
-
-class AdminLatestCatalogBackfillRunsResponse(BaseModel):
-    extraction_run: AdminCatalogBackfillRunSummary | None
-    preview_run: AdminCatalogBackfillRunSummary | None
-
-
-class LatestIndexRunResponse(BaseModel):
-    scanned_files: int
-    indexed_files: int
-    new_sha_entries: int
-    existing_sha_matches: int
-    path_conflicts: int
-    errors: int
-    completed_at_utc: str
-
-
-class LatestIndexRunEnvelope(BaseModel):
-    latest_run: LatestIndexRunResponse | None
-
-
-class DuplicateShaGroupItem(BaseModel):
-    sha256_hex: str
-    file_count: int
-    first_seen_at_utc: str
-    last_seen_at_utc: str
-    relative_paths: list[str]
-
-
-class DuplicateShaGroupListResponse(BaseModel):
-    total: int
-    limit: int
-    offset: int
-    items: list[DuplicateShaGroupItem]
-
-
-class PathConflictItem(BaseModel):
-    relative_path: str
-    previous_sha256_hex: str
-    current_sha256_hex: str
-    detected_at_utc: str
-
-
-class PathConflictListResponse(BaseModel):
-    total: int
-    limit: int
-    offset: int
-    items: list[PathConflictItem]
-
-
-class ClientEnrollmentStatus(StrEnum):
-    PENDING = "pending"
-    APPROVED = "approved"
-    REVOKED = "revoked"
-
-
-class ClientWorkloadStatus(StrEnum):
-    IDLE = "idle"
-    WORKING = "working"
-    WAITING = "waiting"
-    BLOCKED = "blocked"
-
-
-class ClientPresenceStatus(StrEnum):
-    ONLINE = "online"
-    STALE = "stale"
-    UNKNOWN = "unknown"
-
-
-class BootstrapEnrollRequest(BaseModel):
-    client_id: str = Field(min_length=1, max_length=200)
-    display_name: str = Field(min_length=1, max_length=200)
-    bootstrap_token: str = Field(min_length=1)
-
-
-class BootstrapEnrollResponse(BaseModel):
-    client_id: str
-    display_name: str
-    enrollment_status: ClientEnrollmentStatus
-    auth_token: str | None
-    first_seen_at_utc: str
-    last_enrolled_at_utc: str
-
-
-class AdminClientItem(BaseModel):
-    client_id: str
-    display_name: str
-    enrollment_status: ClientEnrollmentStatus
-    first_seen_at_utc: str
-    last_enrolled_at_utc: str
-    approved_at_utc: str | None
-    revoked_at_utc: str | None
-    auth_token: str | None
-    heartbeat_last_seen_at_utc: str | None
-    heartbeat_presence_status: str
-    heartbeat_daemon_state: str | None
-    heartbeat_workload_status: ClientWorkloadStatus | None
-    heartbeat_active_job_summary: str | None
-    heartbeat_retry_backoff_summary: str | None
-    heartbeat_auth_block_reason: str | None
-    heartbeat_recent_error_summary: str | None
-
-
-class AdminClientListResponse(BaseModel):
-    total: int
-    limit: int
-    offset: int
-    items: list[AdminClientItem]
-
-
-class AdminClientActionResponse(BaseModel):
-    item: AdminClientItem
-
-
-class HeartbeatActiveJobSummary(BaseModel):
-    job_id: int = Field(ge=1)
-    media_label: str | None = Field(default=None, max_length=255)
-    job_status: str = Field(min_length=1, max_length=128)
-    ready_to_upload: int = Field(default=0, ge=0)
-    uploaded: int = Field(default=0, ge=0)
-    retrying: int = Field(default=0, ge=0)
-    total_files: int | None = Field(default=None, ge=0)
-    non_terminal_files: int | None = Field(default=None, ge=0)
-    error_files: int | None = Field(default=None, ge=0)
-    blocking_reason: str | None = Field(default=None, max_length=256)
-
-
-class HeartbeatRetryBackoffSummary(BaseModel):
-    pending_count: int = Field(ge=0)
-    next_retry_at_utc: datetime | None = None
-    reason: str | None = Field(default=None, max_length=512)
-
-
-class HeartbeatRecentErrorSummary(BaseModel):
-    category: str = Field(min_length=1, max_length=128)
-    message: str = Field(min_length=1, max_length=512)
-    created_at_utc: datetime
-
-
-class ClientHeartbeatRequest(BaseModel):
-    last_seen_at_utc: datetime
-    daemon_state: str = Field(min_length=1, max_length=128)
-    workload_status: ClientWorkloadStatus
-    active_job: HeartbeatActiveJobSummary | None = None
-    retry_backoff: HeartbeatRetryBackoffSummary | None = None
-    auth_block_reason: str | None = Field(default=None, max_length=128)
-    recent_error: HeartbeatRecentErrorSummary | None = None
-
-
-class ClientHeartbeatResponse(BaseModel):
-    status: str
-    client_id: str
-    last_seen_at_utc: str
-    daemon_state: str
-    workload_status: ClientWorkloadStatus
-
-
-_HEARTBEAT_ONLINE_MAX_AGE_SECONDS = 90
-_CLIENT_LIST_SCAN_MAX = 5000
-_CLIENT_LIST_SCAN_PAGE_SIZE = 200
-_DEFAULT_PREVIEW_MAX_LONG_EDGE = 1024
-_PREVIEW_RASTER_SUFFIXES = {".png", ".jpg", ".jpeg"}
-_PREVIEW_HEIC_SUFFIXES = {".heic", ".heif"}
-_PREVIEW_RAW_SUFFIXES = {
-    ".arw",
-    ".cr2",
-    ".cr3",
-    ".dng",
-    ".nef",
-    ".orf",
-    ".raf",
-    ".rw2",
-}
-_MEDIA_TYPE_SUFFIXES: dict[str, tuple[str, ...]] = {
-    "jpeg": tuple(sorted(_PREVIEW_RASTER_SUFFIXES - {".png"})),
-    "png": (".png",),
-    "heic": tuple(sorted(_PREVIEW_HEIC_SUFFIXES)),
-    "raw": tuple(sorted(_PREVIEW_RAW_SUFFIXES)),
-    "video": (".avi", ".m4v", ".mkv", ".mov", ".mp4", ".mts"),
-}
-_PREVIEWABLE_SUFFIXES = frozenset(
-    suffix
-    for media_type in ("jpeg", "png", "heic", "raw")
-    for suffix in _MEDIA_TYPE_SUFFIXES[media_type]
-)
-_RAW_EMBEDDED_PREVIEW_TAGS = ("PreviewImage", "JpgFromRaw", "OtherImage", "ThumbnailImage")
-_ALLOWED_EXTRACTION_STATUS = {"pending", "succeeded", "failed"}
-_ALLOWED_PREVIEW_STATUS = {"pending", "succeeded", "failed"}
-_ALLOWED_ORIGIN_KIND = {"uploaded", "indexed"}
-_ALLOWED_MEDIA_TYPE = {"jpeg", "png", "heic", "raw", "video", "other"}
-_ALLOWED_PREVIEW_CAPABILITY = {"previewable", "not_previewable"}
-
-
-def _resolve_preview_max_long_edge(raw_value: str | int | None) -> int:
-    if raw_value is None:
-        return _DEFAULT_PREVIEW_MAX_LONG_EDGE
-    if isinstance(raw_value, bool):
-        raise RuntimeError("PHOTOVAULT_API_PREVIEW_MAX_LONG_EDGE must be a positive integer")
-    if isinstance(raw_value, int):
-        parsed = raw_value
-    else:
-        stripped = raw_value.strip()
-        if not stripped:
-            return _DEFAULT_PREVIEW_MAX_LONG_EDGE
-        try:
-            parsed = int(stripped)
-        except ValueError as exc:
-            raise RuntimeError("PHOTOVAULT_API_PREVIEW_MAX_LONG_EDGE must be a positive integer") from exc
-    if parsed <= 0:
-        raise RuntimeError("PHOTOVAULT_API_PREVIEW_MAX_LONG_EDGE must be a positive integer")
-    return parsed
-
-
-def _preview_max_size(max_long_edge: int) -> tuple[int, int]:
-    return (max_long_edge, max_long_edge)
-
-
-def _normalize_preview_suffix_token(raw_value: str, *, env_name: str) -> str:
-    token = raw_value.strip().lower()
-    if not token:
-        raise RuntimeError(
-            f"{env_name} must be a comma-separated list of file suffixes like '.jpg,.png'"
-        )
-    normalized = token if token.startswith(".") else f".{token}"
-    if len(normalized) <= 1:
-        raise RuntimeError(
-            f"{env_name} must be a comma-separated list of file suffixes like '.jpg,.png'"
-        )
-    if "/" in normalized or "\\" in normalized or "," in normalized or " " in normalized:
-        raise RuntimeError(
-            f"{env_name} must be a comma-separated list of file suffixes like '.jpg,.png'"
-        )
-    return normalized
-
-
-def _resolve_preview_suffix_set(
-    raw_value: str | list[str] | set[str] | tuple[str, ...] | None,
-    *,
-    env_name: str,
-) -> frozenset[str]:
-    if raw_value is None:
-        return frozenset()
-
-    tokens: list[str]
-    if isinstance(raw_value, str):
-        if not raw_value.strip():
-            return frozenset()
-        tokens = [token for token in raw_value.split(",") if token.strip()]
-    else:
-        tokens = [str(token) for token in raw_value]
-
-    normalized: set[str] = set()
-    for token in tokens:
-        normalized.add(_normalize_preview_suffix_token(token, env_name=env_name))
-    return frozenset(normalized)
-
-
-def _sanitize_component(raw_value: str, *, default_value: str) -> str:
-    normalized = raw_value.strip()
-    if not normalized:
-        return default_value
-    normalized = normalized.replace("\\", "_").replace("/", "_")
-    normalized = re.sub(r"[^A-Za-z0-9._ -]+", "_", normalized)
-    normalized = normalized.replace(" ", "_")
-    normalized = re.sub(r"_+", "_", normalized)
-    normalized = normalized.strip("._-")
-    return normalized or default_value
-
-
-def _compute_sha256(path: Path) -> str:
-    hasher = hashlib.sha256()
-    with path.open("rb") as handle:
-        while True:
-            chunk = handle.read(1024 * 1024)
-            if not chunk:
-                break
-            hasher.update(chunk)
-    return hasher.hexdigest()
-
-
-def _iter_storage_files(storage_root_path: Path) -> list[Path]:
-    candidates = [
-        candidate
-        for candidate in storage_root_path.rglob("*")
-        if candidate.is_file() and ".temp_uploads" not in candidate.parts
-    ]
-    return sorted(
-        candidates,
-        key=lambda candidate: candidate.relative_to(storage_root_path).as_posix(),
-    )
-
-
-def _catalog_origin_for_source_kind(source_kind: str) -> str:
-    if source_kind == "upload_verify":
-        return "uploaded"
-    return "indexed"
-
-
-def _normalize_exif_text(value: object) -> str | None:
-    if isinstance(value, bytes):
-        decoded = value.decode("utf-8", errors="ignore").strip()
-        return decoded or None
-    if isinstance(value, str):
-        stripped = value.strip()
-        return stripped or None
-    return None
-
-
-def _normalize_exif_int(value: object) -> int | None:
-    if isinstance(value, int):
-        return value
-    if isinstance(value, str):
-        stripped = value.strip()
-        if not stripped:
-            return None
-        try:
-            return int(stripped)
-        except ValueError:
-            return None
-    return None
-
-
-def _normalize_exif_rational(value: object) -> float | None:
-    """Coerce EXIF numeric-ish values (int/float/IFDRational/str) to float.
-
-    Pillow returns IFDRational for EXIF rational tags. It supports float()
-    conversion but guards against zero denominators by raising. We handle
-    that defensively so a corrupt tag never aborts extraction.
-    """
-    if isinstance(value, bool):  # bool is an int subclass — exclude explicitly
-        return None
-    if isinstance(value, (int, float)):
-        result = float(value)
-        if math.isfinite(result):
-            return result
-        return None
-    # Pillow IFDRational + anything with __float__ (duck-typed to stay
-    # resilient to library changes).
-    if hasattr(value, "__float__"):
-        try:
-            result = float(value)
-        except (ZeroDivisionError, ValueError, TypeError):
-            return None
-        if math.isfinite(result):
-            return result
-        return None
-    if isinstance(value, tuple) and len(value) == 2:
-        numerator, denominator = value
-        try:
-            numerator_f = float(numerator)
-            denominator_f = float(denominator)
-        except (TypeError, ValueError):
-            return None
-        if denominator_f == 0:
-            return None
-        result = numerator_f / denominator_f
-        if math.isfinite(result):
-            return result
-        return None
-    if isinstance(value, str):
-        stripped = value.strip()
-        if not stripped:
-            return None
-        # Accept "1/200", "0.005", "2.8", etc.
-        if "/" in stripped:
-            parts = stripped.split("/", 1)
-            try:
-                numerator_f = float(parts[0])
-                denominator_f = float(parts[1])
-            except ValueError:
-                return None
-            if denominator_f == 0:
-                return None
-            result = numerator_f / denominator_f
-        else:
-            try:
-                result = float(stripped)
-            except ValueError:
-                return None
-        if math.isfinite(result):
-            return result
-        return None
-    return None
-
-
-def _normalize_exif_iso_speed(value: object) -> int | None:
-    """EXIF ISOSpeedRatings (tag 34855) is often a tuple like (400,) or a
-    scalar int. This normalizes both to a single integer, picking the first
-    positive entry for tuples/lists.
-    """
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        return value if value > 0 else None
-    if isinstance(value, (tuple, list)):
-        for candidate in value:
-            if isinstance(candidate, bool):
-                continue
-            if isinstance(candidate, int) and candidate > 0:
-                return candidate
-            if isinstance(candidate, str):
-                stripped = candidate.strip()
-                if stripped.isdigit():
-                    parsed = int(stripped)
-                    if parsed > 0:
-                        return parsed
-        return None
-    if isinstance(value, str):
-        stripped = value.strip()
-        if stripped.isdigit():
-            parsed = int(stripped)
-            return parsed if parsed > 0 else None
-    return None
-
-
-def _extract_capture_timestamp_utc(exif_map: object) -> str | None:
-    if not hasattr(exif_map, "get"):
-        return None
-
-    # EXIF DateTimeOriginal and OffsetTimeOriginal.
-    raw_timestamp = _normalize_exif_text(exif_map.get(36867) or exif_map.get(306))
-    raw_offset = _normalize_exif_text(exif_map.get(36881) or exif_map.get(36880))
-    if raw_timestamp is None:
-        return None
-
-    try:
-        parsed = datetime.strptime(raw_timestamp, "%Y:%m:%d %H:%M:%S")
-    except ValueError:
-        return None
-
-    if raw_offset:
-        try:
-            parsed_offset = datetime.strptime(raw_offset, "%z").tzinfo
-        except ValueError:
-            parsed_offset = None
-        if parsed_offset is not None:
-            return parsed.replace(tzinfo=parsed_offset).astimezone(UTC).isoformat()
-
-    # If EXIF omits timezone, keep deterministic behavior by treating it as UTC.
-    return parsed.replace(tzinfo=UTC).isoformat()
-
-
-def _extract_media_metadata(path: Path) -> dict[str, str | int | float | None]:
-    file_suffix = path.suffix.lower()
-    if file_suffix not in {".png", ".jpg", ".jpeg"}:
-        raise ValueError(f"unsupported media format for extraction: {file_suffix or 'unknown'}")
-
-    try:
-        with Image.open(path) as image:
-            image.load()
-            width, height = image.size
-            exif_map = image.getexif()
-    except (UnidentifiedImageError, OSError, SyntaxError, ValueError) as exc:
-        raise ValueError(f"invalid media content for extraction: {exc}") from exc
-
-    # Exposure-related EXIF tags. See Phase 3.A plan in
-    # docs/proposals/server_ui_catalog_improvements.md §9 for rationale
-    # (ExposureTime preferred over ShutterSpeedValue; ISOSpeedRatings may
-    # be a tuple; 35mm equivalent focal length is a plain integer).
-    return {
-        "capture_timestamp_utc": _extract_capture_timestamp_utc(exif_map),
-        "camera_make": _normalize_exif_text(exif_map.get(271)),
-        "camera_model": _normalize_exif_text(exif_map.get(272)),
-        "image_width": int(width),
-        "image_height": int(height),
-        "orientation": _normalize_exif_int(exif_map.get(274)),
-        "lens_model": _normalize_exif_text(exif_map.get(42036)),
-        "exposure_time_s": _normalize_exif_rational(exif_map.get(33434)),
-        "f_number": _normalize_exif_rational(exif_map.get(33437)),
-        "iso_speed": _normalize_exif_iso_speed(exif_map.get(34855)),
-        "focal_length_mm": _normalize_exif_rational(exif_map.get(37386)),
-        "focal_length_35mm_mm": _normalize_exif_int(exif_map.get(41989)),
-    }
-
-
+# I/O helpers kept here so tests can monkeypatch via app_module.*
 def _find_executable(name: str) -> str | None:
     return shutil.which(name)
 
@@ -1098,330 +466,6 @@ def _attempt_preview_generation(
         recorded_at_utc=now,
     )
 
-
-def _to_admin_catalog_item(record: object, *, is_rejected: bool = False) -> AdminCatalogItem:
-    return AdminCatalogItem(
-        relative_path=str(record.relative_path),
-        sha256_hex=str(record.sha256_hex),
-        size_bytes=int(record.size_bytes),
-        media_type=_media_type_for_relative_path(str(record.relative_path)),
-        preview_capability=_preview_capability_for_relative_path(str(record.relative_path)),
-        origin_kind=str(record.origin_kind),
-        last_observed_origin_kind=str(record.last_observed_origin_kind),
-        provenance_job_name=(
-            str(record.provenance_job_name) if record.provenance_job_name is not None else None
-        ),
-        provenance_original_filename=(
-            str(record.provenance_original_filename)
-            if record.provenance_original_filename is not None
-            else None
-        ),
-        first_cataloged_at_utc=str(record.first_cataloged_at_utc),
-        last_cataloged_at_utc=str(record.last_cataloged_at_utc),
-        extraction_status=str(record.extraction_status),
-        extraction_last_attempted_at_utc=(
-            str(record.extraction_last_attempted_at_utc)
-            if record.extraction_last_attempted_at_utc is not None
-            else None
-        ),
-        extraction_last_succeeded_at_utc=(
-            str(record.extraction_last_succeeded_at_utc)
-            if record.extraction_last_succeeded_at_utc is not None
-            else None
-        ),
-        extraction_last_failed_at_utc=(
-            str(record.extraction_last_failed_at_utc)
-            if record.extraction_last_failed_at_utc is not None
-            else None
-        ),
-        extraction_failure_detail=(
-            str(record.extraction_failure_detail) if record.extraction_failure_detail is not None else None
-        ),
-        preview_status=str(record.preview_status),
-        preview_relative_path=(
-            str(record.preview_relative_path) if record.preview_relative_path is not None else None
-        ),
-        preview_last_attempted_at_utc=(
-            str(record.preview_last_attempted_at_utc)
-            if record.preview_last_attempted_at_utc is not None
-            else None
-        ),
-        preview_last_succeeded_at_utc=(
-            str(record.preview_last_succeeded_at_utc)
-            if record.preview_last_succeeded_at_utc is not None
-            else None
-        ),
-        preview_last_failed_at_utc=(
-            str(record.preview_last_failed_at_utc) if record.preview_last_failed_at_utc is not None else None
-        ),
-        preview_failure_detail=(
-            str(record.preview_failure_detail) if record.preview_failure_detail is not None else None
-        ),
-        capture_timestamp_utc=(
-            str(record.capture_timestamp_utc) if record.capture_timestamp_utc is not None else None
-        ),
-        camera_make=str(record.camera_make) if record.camera_make is not None else None,
-        camera_model=str(record.camera_model) if record.camera_model is not None else None,
-        image_width=int(record.image_width) if record.image_width is not None else None,
-        image_height=int(record.image_height) if record.image_height is not None else None,
-        orientation=int(record.orientation) if record.orientation is not None else None,
-        lens_model=str(record.lens_model) if record.lens_model is not None else None,
-        exposure_time_s=(
-            float(getattr(record, "exposure_time_s", None))
-            if getattr(record, "exposure_time_s", None) is not None
-            else None
-        ),
-        f_number=(
-            float(getattr(record, "f_number", None))
-            if getattr(record, "f_number", None) is not None
-            else None
-        ),
-        iso_speed=(
-            int(getattr(record, "iso_speed", None))
-            if getattr(record, "iso_speed", None) is not None
-            else None
-        ),
-        focal_length_mm=(
-            float(getattr(record, "focal_length_mm", None))
-            if getattr(record, "focal_length_mm", None) is not None
-            else None
-        ),
-        focal_length_35mm_mm=(
-            int(getattr(record, "focal_length_35mm_mm", None))
-            if getattr(record, "focal_length_35mm_mm", None) is not None
-            else None
-        ),
-        is_favorite=bool(getattr(record, "is_favorite", False)),
-        is_archived=bool(getattr(record, "is_archived", False)),
-        is_rejected=bool(is_rejected),
-    )
-
-
-def _parse_boolean_filter(raw_value: str | None, *, field_name: str) -> bool | None:
-    if raw_value is None:
-        return None
-    lowered = raw_value.strip().lower()
-    if lowered == "":
-        return None
-    if lowered == "true":
-        return True
-    if lowered == "false":
-        return False
-    raise HTTPException(status_code=400, detail=f"invalid {field_name} filter")
-
-
-def _normalize_catalog_folder_prefix(raw_value: str | None) -> str | None:
-    """Validate and normalize a catalog folder prefix.
-
-    Accepts a forward-slash separated path (e.g. ``"2024/08"``) and returns
-    it stripped of surrounding whitespace and trailing slashes. Rejects
-    absolute paths, empty segments, ``..`` segments, and backslashes so the
-    filter cannot be abused to reach outside of the managed catalog.
-    """
-
-    if raw_value is None:
-        return None
-    value = raw_value.strip()
-    if value == "":
-        return None
-    if value.startswith("/") or "\\" in value:
-        raise HTTPException(status_code=400, detail="invalid relative_path_prefix")
-    trimmed = value.strip("/")
-    if trimmed == "":
-        raise HTTPException(status_code=400, detail="invalid relative_path_prefix")
-    segments = trimmed.split("/")
-    for segment in segments:
-        if segment == "" or segment == "." or segment == "..":
-            raise HTTPException(status_code=400, detail="invalid relative_path_prefix")
-    return trimmed
-
-
-def _validate_catalog_filter_selection(
-    *,
-    extraction_status: str | None = None,
-    preview_status: str | None = None,
-    origin_kind: str | None = None,
-    media_type: str | None = None,
-    preview_capability: str | None = None,
-) -> None:
-    if extraction_status is not None and extraction_status not in _ALLOWED_EXTRACTION_STATUS:
-        raise HTTPException(status_code=400, detail="invalid extraction_status filter")
-    if preview_status is not None and preview_status not in _ALLOWED_PREVIEW_STATUS:
-        raise HTTPException(status_code=400, detail="invalid preview_status filter")
-    if origin_kind is not None and origin_kind not in _ALLOWED_ORIGIN_KIND:
-        raise HTTPException(status_code=400, detail="invalid origin_kind filter")
-    if media_type is not None and media_type not in _ALLOWED_MEDIA_TYPE:
-        raise HTTPException(status_code=400, detail="invalid media_type filter")
-    if preview_capability is not None and preview_capability not in _ALLOWED_PREVIEW_CAPABILITY:
-        raise HTTPException(status_code=400, detail="invalid preview_capability filter")
-
-
-def _validate_backfill_target_statuses(
-    *,
-    target_statuses: list[str],
-    allowed_statuses: set[str],
-) -> list[str]:
-    requested_statuses = list(dict.fromkeys(target_statuses))
-    invalid_statuses = [status for status in requested_statuses if status not in allowed_statuses]
-    if invalid_statuses:
-        raise HTTPException(
-            status_code=400,
-            detail=f"invalid target_statuses: {','.join(invalid_statuses)}",
-        )
-    return requested_statuses
-
-
-def _to_backfill_run_summary(record: CatalogBackfillRunRecord) -> AdminCatalogBackfillRunSummary:
-    return AdminCatalogBackfillRunSummary(
-        backfill_kind=record.backfill_kind,
-        requested_statuses=list(record.requested_statuses),
-        limit=record.limit_count,
-        origin_kind=record.filter_origin_kind,
-        media_type=record.filter_media_type,
-        preview_capability=record.filter_preview_capability,
-        cataloged_since_utc=record.filter_cataloged_since_utc,
-        cataloged_before_utc=record.filter_cataloged_before_utc,
-        selected_count=record.selected_count,
-        processed_count=record.processed_count,
-        succeeded_count=record.succeeded_count,
-        failed_count=record.failed_count,
-        remaining_pending_count=record.remaining_pending_count,
-        remaining_failed_count=record.remaining_failed_count,
-        completed_at_utc=record.completed_at_utc,
-    )
-
-
-def _heartbeat_presence_status(record: ClientHeartbeatRecord | None, *, now_utc: datetime) -> str:
-    if record is None:
-        return ClientPresenceStatus.UNKNOWN.value
-    try:
-        last_seen = datetime.fromisoformat(record.last_seen_at_utc)
-        if last_seen.tzinfo is None:
-            last_seen = last_seen.replace(tzinfo=UTC)
-    except ValueError:
-        return ClientPresenceStatus.UNKNOWN.value
-    age_seconds = max(0.0, (now_utc - last_seen).total_seconds())
-    if age_seconds <= _HEARTBEAT_ONLINE_MAX_AGE_SECONDS:
-        return ClientPresenceStatus.ONLINE.value
-    return ClientPresenceStatus.STALE.value
-
-
-def _to_admin_client_item(
-    record: ClientRecord,
-    *,
-    heartbeat: ClientHeartbeatRecord | None = None,
-    now_utc: datetime,
-) -> AdminClientItem:
-    active_job_summary = None
-    if heartbeat is not None and heartbeat.active_job_id is not None:
-        job_label = heartbeat.active_job_label or "job"
-        active_job_parts = [
-            f"{job_label} (id={heartbeat.active_job_id}, status={heartbeat.active_job_status or 'unknown'}, "
-            f"ready={heartbeat.active_job_ready_to_upload or 0}, "
-            f"uploaded={heartbeat.active_job_uploaded or 0}, "
-            f"retrying={heartbeat.active_job_retrying or 0}"
-        ]
-        if heartbeat.active_job_total_files is not None:
-            active_job_parts.append(f", total={heartbeat.active_job_total_files}")
-        if heartbeat.active_job_non_terminal_files is not None:
-            active_job_parts.append(f", non_terminal={heartbeat.active_job_non_terminal_files}")
-        if heartbeat.active_job_error_files is not None:
-            active_job_parts.append(f", errors={heartbeat.active_job_error_files}")
-        active_job_parts.append(")")
-        if heartbeat.active_job_blocking_reason:
-            active_job_parts.append(f" blocked={heartbeat.active_job_blocking_reason}")
-        active_job_summary = "".join(active_job_parts)
-    retry_backoff_summary = None
-    if heartbeat is not None and heartbeat.retry_pending_count is not None:
-        retry_backoff_summary = (
-            f"pending={heartbeat.retry_pending_count}, next={heartbeat.retry_next_at_utc or 'n/a'}, "
-            f"reason={heartbeat.retry_reason or 'n/a'}"
-        )
-    recent_error_summary = None
-    if heartbeat is not None and heartbeat.recent_error_message is not None:
-        recent_error_summary = (
-            f"{heartbeat.recent_error_category or 'error'} at "
-            f"{heartbeat.recent_error_at_utc or 'unknown'}: {heartbeat.recent_error_message}"
-        )
-    heartbeat_workload_status = None
-    if heartbeat is not None:
-        try:
-            heartbeat_workload_status = ClientWorkloadStatus(heartbeat.workload_status)
-        except ValueError:
-            heartbeat_workload_status = None
-
-    return AdminClientItem(
-        client_id=record.client_id,
-        display_name=record.display_name,
-        enrollment_status=ClientEnrollmentStatus(record.enrollment_status),
-        first_seen_at_utc=record.first_seen_at_utc,
-        last_enrolled_at_utc=record.last_enrolled_at_utc,
-        approved_at_utc=record.approved_at_utc,
-        revoked_at_utc=record.revoked_at_utc,
-        auth_token=record.auth_token,
-        heartbeat_last_seen_at_utc=heartbeat.last_seen_at_utc if heartbeat is not None else None,
-        heartbeat_presence_status=_heartbeat_presence_status(heartbeat, now_utc=now_utc),
-        heartbeat_daemon_state=heartbeat.daemon_state if heartbeat is not None else None,
-        heartbeat_workload_status=heartbeat_workload_status,
-        heartbeat_active_job_summary=active_job_summary,
-        heartbeat_retry_backoff_summary=retry_backoff_summary,
-        heartbeat_auth_block_reason=heartbeat.auth_block_reason if heartbeat is not None else None,
-        heartbeat_recent_error_summary=recent_error_summary,
-    )
-
-
-def _list_clients_for_admin_view(store: UploadStateStore) -> list[ClientRecord]:
-    clients: list[ClientRecord] = []
-    offset = 0
-    while offset < _CLIENT_LIST_SCAN_MAX:
-        batch_limit = min(_CLIENT_LIST_SCAN_PAGE_SIZE, _CLIENT_LIST_SCAN_MAX - offset)
-        total, batch = store.list_clients(limit=batch_limit, offset=offset)
-        if not batch:
-            break
-        clients.extend(batch)
-        offset += len(batch)
-        if len(clients) >= total:
-            break
-    return clients
-
-
-def _presence_sort_rank(value: str) -> int:
-    ranks = {
-        ClientPresenceStatus.ONLINE.value: 0,
-        ClientPresenceStatus.STALE.value: 1,
-        ClientPresenceStatus.UNKNOWN.value: 2,
-    }
-    return ranks.get(value, 99)
-
-
-def _workload_sort_rank(value: str | None) -> int:
-    ranks = {
-        ClientWorkloadStatus.WORKING.value: 0,
-        ClientWorkloadStatus.BLOCKED.value: 1,
-        ClientWorkloadStatus.WAITING.value: 2,
-        ClientWorkloadStatus.IDLE.value: 3,
-    }
-    if value is None:
-        return 99
-    return ranks.get(value, 98)
-
-
-def _require_approved_client(request: Request, store: UploadStateStore) -> ClientRecord:
-    client_id = request.headers.get("x-photovault-client-id", "").strip()
-    auth_token = request.headers.get("x-photovault-client-token", "").strip()
-    if not client_id or not auth_token:
-        raise HTTPException(status_code=401, detail="CLIENT_AUTH_REQUIRED")
-
-    client = store.get_client(client_id)
-    if client is None:
-        raise HTTPException(status_code=401, detail="CLIENT_AUTH_INVALID")
-    if client.enrollment_status == ClientEnrollmentStatus.PENDING.value:
-        raise HTTPException(status_code=403, detail="CLIENT_PENDING_APPROVAL")
-    if client.enrollment_status == ClientEnrollmentStatus.REVOKED.value:
-        raise HTTPException(status_code=403, detail="CLIENT_REVOKED")
-    if client.auth_token is None or client.auth_token != auth_token:
-        raise HTTPException(status_code=401, detail="CLIENT_AUTH_INVALID")
-    return client
 
 
 def create_app(

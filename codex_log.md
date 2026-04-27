@@ -754,3 +754,38 @@ Verification: scripts/deploy_rpi.sh; /bin/zsh -lc "ANISBLE_HOST_KEY_CHECKING=Fal
 - Summary: Fixed API endpoint display in dependency health panel — removed env-var workaround; daemon now exposes its own resolved server_base_url in the /state response, and the client UI reads it from there. Changes: (1) clientd /state endpoint now includes server_base_url in the response payload (no new state, no schema change); (2) _get_dependency_snapshot() signature changed to accept server_api_url parameter instead of reading PHOTOVAULT_SERVER_BASE_URL from env; (3) _render_overview() in app.py extracts server_base_url from the already-fetched daemon state and passes it to the dependency snapshot; (4) reverted the Ansible photovault-client-ui.env change (user-confirmed: env approach is wrong, daemon is the source of truth).
 - Files changed: services/photovault-clientd/src/photovault_clientd/app.py, services/photovault-client-ui/src/photovault_client_ui/system.py, services/photovault-client-ui/src/photovault_client_ui/app.py, services/photovault-client-ui/tests/test_client_ui_app.py
 - Verification: source .venv/bin/activate && ruff check services/photovault-client-ui/src/photovault_client_ui/ services/photovault-client-ui/tests/ && pytest -q services/photovault-client-ui/tests/test_client_ui_app.py (33 passed); pytest -q services/photovault-clientd/tests/ (passes)
+
+## 2026-04-27T06:18Z — photovault-api app.py split into sub-modules
+
+**Action:** Decomposed `photovault-api/app.py` (2943 lines) into three new modules and a slimmed `app.py`.
+
+**Files created:**
+- `services/photovault-api/src/photovault_api/models.py` — all Pydantic BaseModel / StrEnum request+response types
+- `services/photovault-api/src/photovault_api/media.py` — pure media helpers: constants, EXIF normalization, `_compute_sha256`, `_iter_storage_files`, `_media_type_for_relative_path`, `_preview_capability_for_relative_path`, `_preview_max_size`, `_resolve_preview_*`, `_sanitize_component`, `_extract_media_metadata`
+- `services/photovault-api/src/photovault_api/storage_ops.py` — catalog/client helpers: `_to_admin_catalog_item`, `_to_admin_client_item`, `_heartbeat_presence_status`, `_list_clients_for_admin_view`, `_require_approved_client`, `_validate_*`, `_parse_boolean_filter`, etc.
+
+**Files also completed (from prior session):**
+- `services/photovault-api/src/photovault_api/state_store/__init__.py` — re-export facade
+- `services/photovault-api/src/photovault_api/state_store/records.py` — all dataclasses
+- `services/photovault-api/src/photovault_api/state_store/protocol.py` — UploadStateStore Protocol
+- `services/photovault-api/src/photovault_api/state_store/in_memory.py` — InMemoryUploadStateStore
+- `services/photovault-api/src/photovault_api/state_store/postgres.py` — PostgresUploadStateStore
+
+**Key design decisions:**
+- I/O-chain functions (`_find_executable`, `_run_external_command`, `_render_*`, `_extract_raw_embedded_preview_bytes`, `_render_raw_preview_source_via_libraw`, `_upsert_storage_and_catalog_record`, `_attempt_media_extraction`, `_attempt_preview_generation`, `_preview_relative_cache_path`) kept in `app.py` so monkeypatch tests continue to work via `app_module.*` without modification.
+- Removed `from __future__ import annotations` from `models.py` to fix Pydantic v2 cross-module forward reference resolution.
+
+**Verification:** `python -m pytest tests/ -q` → 131 passed in 2.32s (zero regressions).
+
+## 2026-04-27T06:25Z — photovault-server-ui app.py split into sub-modules
+
+**Action:** Decomposed `photovault-server-ui/app.py` (1846 lines) into two new modules and a slimmed `app.py`.
+
+**Files created:**
+- `services/photovault-server-ui/src/photovault_server_ui/api_client.py` — `ApiFetcher`/`ApiPoster` type aliases + `_default_api_fetcher` + `_default_api_poster` HTTP client functions
+- `services/photovault-server-ui/src/photovault_server_ui/formatters.py` — all template/display helpers: `_format_size_bytes`, `_format_shutter_speed`, `_format_exposure_summary`, `_catalog_metadata_summary`, `_decorate_catalog_item`, `_fetch_catalog_asset_for_display`, `_timestamp_parts`, `_format_timestamp_inline`, `_count_client_summary`, `_catalog_query_state_from_*`, `_local_to_utc_iso`, `_utc_iso_to_local`, `_fallback_catalog_asset`
+
+**Files modified:**
+- `services/photovault-server-ui/src/photovault_server_ui/app.py` — slimmed to `create_app()` + routes only; imports from new sub-modules
+
+**Verification:** `python -m pytest tests/ -q` → 62 passed in 1.20s (zero regressions).
