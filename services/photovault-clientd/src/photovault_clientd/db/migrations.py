@@ -1,14 +1,10 @@
 """SQLite schema and persistence helpers for photovault-clientd."""
 
-import json
 import logging
 import sqlite3
-from pathlib import Path
-from typing import Callable, Sequence
+from typing import Callable
 
-from photovault_clientd.events import EventCategory, EventLevel
 from photovault_clientd.state_machine import ClientState, FileStatus
-from photovault_clientd.transitions import is_transition_allowed
 
 DAEMON_EVENT_LOGGER = logging.getLogger("photovault-clientd.daemon_events")
 

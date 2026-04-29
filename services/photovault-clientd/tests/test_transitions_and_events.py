@@ -260,4 +260,7 @@ def test_append_daemon_event_is_mirrored_to_process_logs(tmp_path: Path, caplog)
     daemon_event_messages = [
         record.message for record in caplog.records if record.name == "photovault-clientd.daemon_events"
     ]
-    assert any("category=TICK_NOOP" in message and "message=mirror-check" in message for message in daemon_event_messages)
+    assert any(
+        "category=TICK_NOOP" in message and "message=mirror-check" in message
+        for message in daemon_event_messages
+    )

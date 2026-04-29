@@ -3,8 +3,6 @@
 import json
 import logging
 import sqlite3
-from pathlib import Path
-from typing import Callable, Sequence
 
 from photovault_clientd.events import EventCategory, EventLevel
 from photovault_clientd.state_machine import ClientState, FileStatus

@@ -9,6 +9,21 @@ Append-only log of substantive Codex actions in this repository.
 - Verification:
 
 ## Entries
+- Timestamp (UTC): 2026-04-28T22:57:26Z
+- Summary: Split the upload-phase engine logic into smaller modules. Added `upload_queue.py` for `QUEUE_UPLOAD` and `WAIT_NETWORK`, `upload_transfer.py` for metadata handshake and full-file transfer, `upload_finalize.py` for server verify/reupload/post-upload phases, and `upload_common.py` for shared upload defaults/auth-block constants. Replaced `engine/upload.py` with a compatibility export layer so `core.py` and package-level imports keep working unchanged.
+- Files changed: `services/photovault-clientd/src/photovault_clientd/engine/upload.py`, `services/photovault-clientd/src/photovault_clientd/engine/upload_common.py`, `services/photovault-clientd/src/photovault_clientd/engine/upload_queue.py`, `services/photovault-clientd/src/photovault_clientd/engine/upload_transfer.py`, `services/photovault-clientd/src/photovault_clientd/engine/upload_finalize.py`, `codex_log.md`
+- Verification: `source /Users/ptroc/IdeaProjects/venv.3.13/bin/activate && ruff check services/photovault-clientd/src/photovault_clientd/engine/upload.py services/photovault-clientd/src/photovault_clientd/engine/upload_common.py services/photovault-clientd/src/photovault_clientd/engine/upload_queue.py services/photovault-clientd/src/photovault_clientd/engine/upload_transfer.py services/photovault-clientd/src/photovault_clientd/engine/upload_finalize.py services/photovault-clientd/tests/test_m2_handshake.py services/photovault-clientd/tests/test_auto_progress_loop.py` → passed; `source /Users/ptroc/IdeaProjects/venv.3.13/bin/activate && pytest -q services/photovault-clientd/tests/test_m2_handshake.py services/photovault-clientd/tests/test_auto_progress_loop.py` → 31 passed.
+
+- Timestamp (UTC): 2026-04-28T22:52:08Z
+- Summary: Split `photovault-clientd` networking into dedicated modules without changing its public API. Added `networking_types.py` for defaults, dataclasses, and `NetworkManagerError`; added `networking_nmcli.py` for nmcli execution, parse, and connectivity helper functions; moved the `NetworkManagerAdapter` implementation into `networking_adapter.py`; and replaced `networking.py` with a compatibility export layer. Verified the new networking files directly because the broader `photovault-clientd` `ruff` target still contains substantial pre-existing issues outside this hotspot.
+- Files changed: `services/photovault-clientd/src/photovault_clientd/networking.py`, `services/photovault-clientd/src/photovault_clientd/networking_types.py`, `services/photovault-clientd/src/photovault_clientd/networking_nmcli.py`, `services/photovault-clientd/src/photovault_clientd/networking_adapter.py`, `codex_log.md`
+- Verification: `source /Users/ptroc/IdeaProjects/venv.3.13/bin/activate && ruff check services/photovault-clientd/src/photovault_clientd/networking.py services/photovault-clientd/src/photovault_clientd/networking_types.py services/photovault-clientd/src/photovault_clientd/networking_nmcli.py services/photovault-clientd/src/photovault_clientd/networking_adapter.py services/photovault-clientd/tests/test_networking_module.py services/photovault-clientd/tests/test_networking_api.py` → passed; `source /Users/ptroc/IdeaProjects/venv.3.13/bin/activate && pytest -q services/photovault-clientd/tests/test_networking_module.py services/photovault-clientd/tests/test_networking_api.py` → 32 passed.
+
+- Timestamp (UTC): 2026-04-28T22:48:12Z
+- Summary: Began the smaller-file hotspot refactor sequence by splitting `photovault-clientd` file-query helpers into domain modules. Added `queries_common.py` for shared constants, `queries_file_progress.py` for staging/hash/dedup/upload/retry queries, `queries_recovery.py` for bootstrap recovery, `queries_job_views.py` for daemon-event and job read models, and `queries_detected_media.py` for detected-media persistence. Replaced `queries_files.py` with a compatibility barrel and tightened both `db/__init__.py` and the new barrel to explicit re-export assembly so the public import surface remains stable without wildcard imports. Installed the repository requirements into `/Users/ptroc/IdeaProjects/venv.3.13` to unblock required verification in the mandated Python environment.
+- Files changed: `services/photovault-clientd/src/photovault_clientd/db/__init__.py`, `services/photovault-clientd/src/photovault_clientd/db/queries_common.py`, `services/photovault-clientd/src/photovault_clientd/db/queries_file_progress.py`, `services/photovault-clientd/src/photovault_clientd/db/queries_recovery.py`, `services/photovault-clientd/src/photovault_clientd/db/queries_job_views.py`, `services/photovault-clientd/src/photovault_clientd/db/queries_detected_media.py`, `services/photovault-clientd/src/photovault_clientd/db/queries_files.py`, `services/photovault-clientd/tests/test_auto_progress_loop.py`, `services/photovault-clientd/tests/test_client_identity_auth.py`, `services/photovault-clientd/tests/test_m2_handshake.py`, `services/photovault-clientd/tests/test_transitions_and_events.py`, `codex_log.md`
+- Verification: `source /Users/ptroc/IdeaProjects/venv.3.13/bin/activate && ruff check services/photovault-clientd/src/photovault_clientd/db services/photovault-clientd/tests` → passed; `source /Users/ptroc/IdeaProjects/venv.3.13/bin/activate && pytest -q services/photovault-clientd/tests/test_bootstrap_recovery.py services/photovault-clientd/tests/test_recovery_matrix.py services/photovault-clientd/tests/test_ingest_flow.py services/photovault-clientd/tests/test_m1_flow.py services/photovault-clientd/tests/test_m2_handshake.py services/photovault-clientd/tests/test_transitions_and_events.py` → 57 passed.
+
 - Timestamp (UTC): 2026-04-26T07:23:03Z
 - Summary: Fixed black-preview bug for Fuji X-T5 (and other recent) RAF files. Root cause: deploy provisioning installed `dcraw` but never `exiftool`, so the embedded-JPEG preview path always failed and every RAW fell into the `dcraw` fallback. Distro `dcraw` (9.28, 2018) has no support for the X-T5's X-Trans CMOS 5 HR sensor / new RAF subformat, so its PPM output was effectively all-zero pixels — PIL happily resized those zeros and saved a valid all-black JPEG. Two changes: (1) added `libimage-exiftool-perl` to both `deploy/docker/Dockerfile.server` and `ansible/playbooks/bootstrap.yml`, and removed the now-unused `dcraw` package from both, so the preferred embedded-preview path actually runs in production; (2) replaced the `dcraw` fallback with a `libraw`-backed implementation using `rawpy` (`use_camera_wb=True`, `output_bps=8`) — `_render_raw_preview_source_via_dcraw` is now `_render_raw_preview_source_via_libraw`, and the orchestrator's failure messages now read "RAW libraw fallback failed: …". Added `rawpy>=0.21,<1` and `numpy>=1.26,<3` to `services/photovault-api/pyproject.toml`. Updated the two affected tests to monkeypatch `_render_raw_preview_source_via_libraw` (the prior tests intercepted `_run_external_command` against a mocked dcraw path); the renamed/refreshed test is `test_admin_retry_preview_generates_cache_for_raw_via_libraw_fallback_when_embedded_preview_missing`. The combined-failure-detail test now asserts "libraw fallback unavailable" instead of "dcraw fallback unavailable".
 - Files changed: `deploy/docker/Dockerfile.server`, `ansible/playbooks/bootstrap.yml`, `services/photovault-api/pyproject.toml`, `services/photovault-api/src/photovault_api/app.py` (`_render_raw_preview_source_via_libraw`, updated `_render_raw_preview_source` failure wiring), `services/photovault-api/tests/test_api_app.py` (rewrote one test, updated assertion in another), `codex_log.md`.
@@ -789,3 +804,52 @@ Verification: scripts/deploy_rpi.sh; /bin/zsh -lc "ANISBLE_HOST_KEY_CHECKING=Fal
 - `services/photovault-server-ui/src/photovault_server_ui/app.py` — slimmed to `create_app()` + routes only; imports from new sub-modules
 
 **Verification:** `python -m pytest tests/ -q` → 62 passed in 1.20s (zero regressions).
+
+## 2026-04-28T23:03:00Z — photovault-clientd engine core split into helpers
+
+**Action:** Extracted HTTP/auth and heartbeat logic out of `services/photovault-clientd/src/photovault_clientd/engine/core.py` while keeping the dispatcher entrypoints stable.
+
+**Files created:**
+- `services/photovault-clientd/src/photovault_clientd/engine/http_helpers.py`
+- `services/photovault-clientd/src/photovault_clientd/engine/heartbeat.py`
+
+**Files modified:**
+- `services/photovault-clientd/src/photovault_clientd/engine/core.py`
+
+**Verification:**
+- `source /Users/ptroc/IdeaProjects/venv.3.13/bin/activate && ruff check services/photovault-clientd/src/photovault_clientd/engine/core.py services/photovault-clientd/src/photovault_clientd/engine/http_helpers.py services/photovault-clientd/src/photovault_clientd/engine/heartbeat.py services/photovault-clientd/tests/test_client_identity_auth.py services/photovault-clientd/tests/test_auto_progress_loop.py services/photovault-clientd/tests/test_m2_handshake.py services/photovault-clientd/tests/test_bootstrap_recovery.py`
+- `source /Users/ptroc/IdeaProjects/venv.3.13/bin/activate && pytest -q services/photovault-clientd/tests/test_client_identity_auth.py services/photovault-clientd/tests/test_auto_progress_loop.py services/photovault-clientd/tests/test_m2_handshake.py services/photovault-clientd/tests/test_bootstrap_recovery.py`
+
+## 2026-04-28T23:12:19Z — photovault-clientd app route split
+
+**Action:** Moved clientd network and ingest/block-device/state routes out of `services/photovault-clientd/src/photovault_clientd/app.py` into dedicated registration modules and introduced a shared app context for AP/portal state and progression wiring.
+
+**Files created:**
+- `services/photovault-clientd/src/photovault_clientd/app_context.py`
+- `services/photovault-clientd/src/photovault_clientd/routes_network.py`
+- `services/photovault-clientd/src/photovault_clientd/routes_ingest.py`
+
+**Files modified:**
+- `services/photovault-clientd/src/photovault_clientd/app.py`
+
+**Verification:**
+- `source /Users/ptroc/IdeaProjects/venv.3.13/bin/activate && ruff check services/photovault-clientd/src/photovault_clientd/app.py services/photovault-clientd/src/photovault_clientd/app_context.py services/photovault-clientd/src/photovault_clientd/routes_network.py services/photovault-clientd/src/photovault_clientd/routes_ingest.py services/photovault-clientd/tests/test_networking_api.py services/photovault-clientd/tests/test_block_devices_api.py services/photovault-clientd/tests/test_ingest_flow.py services/photovault-clientd/tests/test_bootstrap_recovery.py`
+- `source /Users/ptroc/IdeaProjects/venv.3.13/bin/activate && pytest -q services/photovault-clientd/tests/test_networking_api.py services/photovault-clientd/tests/test_block_devices_api.py services/photovault-clientd/tests/test_ingest_flow.py services/photovault-clientd/tests/test_bootstrap_recovery.py`
+
+## 2026-04-28T23:21:35Z — photovault-client-ui helper/module split
+
+**Action:** Broke the client UI monolith into loader/render helper modules and split `view_models.py` into jobs-vs-overview modules while preserving the Flask `create_app()` contract and all existing routes/templates.
+
+**Files created:**
+- `services/photovault-client-ui/src/photovault_client_ui/context_loaders.py`
+- `services/photovault-client-ui/src/photovault_client_ui/page_renderers.py`
+- `services/photovault-client-ui/src/photovault_client_ui/view_models_jobs.py`
+- `services/photovault-client-ui/src/photovault_client_ui/view_models_overview.py`
+
+**Files modified:**
+- `services/photovault-client-ui/src/photovault_client_ui/app.py`
+- `services/photovault-client-ui/src/photovault_client_ui/view_models.py`
+
+**Verification:**
+- `source /Users/ptroc/IdeaProjects/venv.3.13/bin/activate && ruff check services/photovault-client-ui/src/photovault_client_ui services/photovault-client-ui/tests`
+- `source /Users/ptroc/IdeaProjects/venv.3.13/bin/activate && pytest -q services/photovault-client-ui/tests/test_client_ui_app.py`

@@ -8,9 +8,9 @@ from urllib.error import HTTPError
 import pytest
 from fastapi.testclient import TestClient
 from photovault_clientd import engine
-from photovault_clientd.engine import core
 from photovault_clientd.app import create_app
 from photovault_clientd.db import fetch_server_auth_state, open_db
+from photovault_clientd.engine import core
 
 
 class _FakeResponse:

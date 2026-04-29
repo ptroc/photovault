@@ -1,0 +1,12 @@
+"""Shared constants for upload-phase engine helpers."""
+
+DEFAULT_SERVER_BASE_URL = "http://127.0.0.1:9301"
+DEFAULT_MAX_UPLOAD_RETRIES = 3
+
+AUTH_BLOCKED_DETAILS = {
+    "CLIENT_PENDING_APPROVAL",
+    "CLIENT_REVOKED",
+    "CLIENT_AUTH_REQUIRED",
+    "CLIENT_AUTH_INVALID",
+}
+

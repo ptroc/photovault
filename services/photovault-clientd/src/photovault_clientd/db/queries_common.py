@@ -1,12 +1,8 @@
-"""SQLite schema and persistence helpers for photovault-clientd."""
+"""Shared constants for clientd SQLite query helpers."""
 
 import logging
-import sqlite3
-from pathlib import Path
 
 from photovault_clientd.state_machine import ClientState, FileStatus
-
-from .migrations import apply_schema_migrations
 
 DAEMON_EVENT_LOGGER = logging.getLogger("photovault-clientd.daemon_events")
 
@@ -82,44 +78,3 @@ DETECTED_MEDIA_EVENT_TYPES = (
     DETECTED_MEDIA_EVENT_REMOVED,
 )
 
-LATEST_SCHEMA_VERSION = 8
-CLIENT_ENROLLMENT_PENDING = "pending"
-CLIENT_ENROLLMENT_APPROVED = "approved"
-CLIENT_ENROLLMENT_REVOKED = "revoked"
-CLIENT_ENROLLMENT_STATUSES = (
-    CLIENT_ENROLLMENT_PENDING,
-    CLIENT_ENROLLMENT_APPROVED,
-    CLIENT_ENROLLMENT_REVOKED,
-)
-HEARTBEAT_STATUS_NEVER = "never"
-
-
-def validate_recovery_policy() -> None:
-    mapped_statuses = {status.value for status in BOOTSTRAP_RESUME_MAP}
-    missing = NON_TERMINAL_FILE_STATUSES - mapped_statuses
-    invalid = mapped_statuses & TERMINAL_FILE_STATUSES
-    if missing:
-        raise RuntimeError(f"bootstrap recovery map missing non-terminal statuses: {sorted(missing)}")
-    if invalid:
-        raise RuntimeError(f"bootstrap recovery map contains terminal statuses: {sorted(invalid)}")
-
-
-validate_recovery_policy()
-
-
-
-
-
-
-
-
-
-
-
-def open_db(path: Path) -> sqlite3.Connection:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path)
-    conn.execute("PRAGMA journal_mode = WAL;")
-    conn.execute("PRAGMA foreign_keys = ON;")
-    apply_schema_migrations(conn)
-    return conn

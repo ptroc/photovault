@@ -5,9 +5,9 @@ from threading import Event, Thread
 
 from fastapi.testclient import TestClient
 from photovault_clientd import engine
-from photovault_clientd.engine import core
 from photovault_clientd.app import create_app
 from photovault_clientd.db import open_db, set_daemon_state
+from photovault_clientd.engine import core
 from photovault_clientd.state_machine import ClientState
 
 

@@ -10,8 +10,8 @@ from fastapi.testclient import TestClient
 from photovault_api.app import create_app as create_api_app
 from photovault_api.state_store import InMemoryUploadStateStore
 from photovault_clientd import engine
-from photovault_clientd.engine import core
 from photovault_clientd.app import create_app
+from photovault_clientd.engine import core
 
 ORIGINAL_NETWORK_IS_ONLINE = engine._network_is_online
 
