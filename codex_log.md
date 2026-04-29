@@ -853,3 +853,55 @@ Verification: scripts/deploy_rpi.sh; /bin/zsh -lc "ANISBLE_HOST_KEY_CHECKING=Fal
 **Verification:**
 - `source /Users/ptroc/IdeaProjects/venv.3.13/bin/activate && ruff check services/photovault-client-ui/src/photovault_client_ui services/photovault-client-ui/tests`
 - `source /Users/ptroc/IdeaProjects/venv.3.13/bin/activate && pytest -q services/photovault-client-ui/tests/test_client_ui_app.py`
+
+## 2026-04-29T09:41:19Z — photovault-api route/module split
+
+**Action:** Extracted the API app hotspot into `media_preview.py`, `routes_client_upload.py`, and `admin_routes.py`, leaving `app.py` as the assembly layer plus the compatibility helper surface used by tests and extracted routes. Removed the duplicate in-file `/v1/client/tombstone-report` registration so the client route now has a single canonical implementation in `routes_client_upload.py`.
+
+**Files created:**
+- `services/photovault-api/src/photovault_api/admin_routes.py`
+- `services/photovault-api/src/photovault_api/media_preview.py`
+- `services/photovault-api/src/photovault_api/routes_client_upload.py`
+
+**Files modified:**
+- `services/photovault-api/src/photovault_api/app.py`
+- `services/photovault-api/tests/test_api_app.py`
+
+**Verification:**
+- `source /Users/ptroc/IdeaProjects/venv.3.13/bin/activate && ruff check services/photovault-api/src/photovault_api/app.py services/photovault-api/src/photovault_api/admin_routes.py services/photovault-api/src/photovault_api/media_preview.py services/photovault-api/src/photovault_api/routes_client_upload.py services/photovault-api/tests/test_api_app.py`
+- `source /Users/ptroc/IdeaProjects/venv.3.13/bin/activate && pytest -q services/photovault-api/tests/test_api_app.py`
+
+## 2026-04-29T09:53:10Z — photovault-api state-store split
+
+**Action:** Split the Postgres and in-memory state-store hotspots into domain helper modules for uploads, catalog operations, and client heartbeat/approval flows. Kept `PostgresUploadStateStore`, `InMemoryUploadStateStore`, and `initialize()` in place while rebinding the original method surfaces to extracted helper implementations so protocol behavior and call signatures remain stable.
+
+**Files created:**
+- `services/photovault-api/src/photovault_api/state_store/postgres_uploads.py`
+- `services/photovault-api/src/photovault_api/state_store/postgres_catalog.py`
+- `services/photovault-api/src/photovault_api/state_store/postgres_clients.py`
+- `services/photovault-api/src/photovault_api/state_store/in_memory_uploads.py`
+- `services/photovault-api/src/photovault_api/state_store/in_memory_catalog.py`
+- `services/photovault-api/src/photovault_api/state_store/in_memory_clients.py`
+
+**Files modified:**
+- `services/photovault-api/src/photovault_api/state_store/postgres.py`
+- `services/photovault-api/src/photovault_api/state_store/in_memory.py`
+
+**Verification:**
+- `source /Users/ptroc/IdeaProjects/venv.3.13/bin/activate && ruff check services/photovault-api/src/photovault_api/state_store/postgres.py services/photovault-api/src/photovault_api/state_store/postgres_uploads.py services/photovault-api/src/photovault_api/state_store/postgres_catalog.py services/photovault-api/src/photovault_api/state_store/postgres_clients.py services/photovault-api/src/photovault_api/state_store/in_memory.py services/photovault-api/src/photovault_api/state_store/in_memory_uploads.py services/photovault-api/src/photovault_api/state_store/in_memory_catalog.py services/photovault-api/src/photovault_api/state_store/in_memory_clients.py services/photovault-api/tests/test_state_store.py`
+- `source /Users/ptroc/IdeaProjects/venv.3.13/bin/activate && pytest -q services/photovault-api/tests/test_state_store.py`
+
+## 2026-04-29T09:53:15Z — photovault-server-ui helper split
+
+**Action:** Extracted server UI page assembly helpers for client-facing insight pages and catalog/library rendering into dedicated modules while keeping `app.py` as the Flask assembly point. Preserved route URLs, HTMX fragment behavior, redirects, and template contracts without introducing blueprints.
+
+**Files created:**
+- `services/photovault-server-ui/src/photovault_server_ui/client_pages.py`
+- `services/photovault-server-ui/src/photovault_server_ui/catalog_pages.py`
+
+**Files modified:**
+- `services/photovault-server-ui/src/photovault_server_ui/app.py`
+
+**Verification:**
+- `source /Users/ptroc/IdeaProjects/venv.3.13/bin/activate && ruff check services/photovault-server-ui/src/photovault_server_ui/app.py services/photovault-server-ui/src/photovault_server_ui/client_pages.py services/photovault-server-ui/src/photovault_server_ui/catalog_pages.py services/photovault-server-ui/tests/test_server_ui_app.py`
+- `source /Users/ptroc/IdeaProjects/venv.3.13/bin/activate && pytest -q services/photovault-server-ui/tests/test_server_ui_app.py`

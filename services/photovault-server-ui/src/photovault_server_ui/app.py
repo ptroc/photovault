@@ -1,36 +1,35 @@
 """SSR monitoring UI for the photovault server."""
 from __future__ import annotations
 
-import json
 import os
-from datetime import datetime, timezone
-from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.error import URLError
-from urllib.parse import parse_qsl, urlencode
+from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from flask import Flask, Response, redirect, render_template, request, url_for
 
 from .api_client import ApiFetcher, ApiPoster, _default_api_fetcher, _default_api_poster
+from .catalog_pages import (
+    build_library_folder_tree,
+    catalog_action_redirect,
+    render_catalog_page,
+    sanitize_library_prefix,
+)
+from .client_pages import is_hx_request, render_clients_page, render_conflicts_page, render_duplicates_page
 from .formatters import (
-    _catalog_metadata_summary,
     _catalog_query_state_from_args,
     _catalog_query_state_from_form,
-    _catalog_query_state_from_values,
-    _count_client_summary,
     _decorate_catalog_item,
-    _fallback_catalog_asset,
-    _fetch_catalog_asset_for_display,
     _format_exposure_summary,
     _format_sha_for_display,
     _format_shutter_speed,
     _format_size_bytes,
-    _format_timestamp_inline,
     _local_to_utc_iso,
     _timestamp_parts,
-    _utc_iso_to_local,
 )
+
+_APP_FORMAT_EXPORTS = (_format_exposure_summary, _format_shutter_speed)
 
 def create_app(*, api_fetcher: ApiFetcher | None = None, api_poster: ApiPoster | None = None) -> Flask:
     app = Flask(__name__)
@@ -50,29 +49,17 @@ def create_app(*, api_fetcher: ApiFetcher | None = None, api_poster: ApiPoster |
         action_message: str | None = None,
         action_error: str | None = None,
     ):
-        if return_to == "asset" and relative_path:
-            return redirect(
-                url_for(
-                    "catalog_asset_detail",
-                    relative_path=relative_path,
-                    page=page,
-                    action_message=action_message,
-                    action_error=action_error,
-                    **query_state,
-                )
-            )
-        return redirect(
-            url_for(
-                "catalog",
-                page=page,
-                action_message=action_message,
-                action_error=action_error,
-                **query_state,
-            )
+        return catalog_action_redirect(
+            relative_path=relative_path,
+            page=page,
+            query_state=query_state,
+            return_to=return_to,
+            action_message=action_message,
+            action_error=action_error,
         )
 
     def _is_hx_request() -> bool:
-        return request.headers.get("HX-Request", "").lower() == "true"
+        return is_hx_request()
 
     def _render_clients_page(
         *,
@@ -83,61 +70,15 @@ def create_app(*, api_fetcher: ApiFetcher | None = None, api_poster: ApiPoster |
         include_sort_by: bool = False,
         include_sort_order: bool = False,
     ) -> str:
-        offset = (page - 1) * page_size
-        error_message: str | None = None
-        query: dict[str, str] = {"limit": str(page_size), "offset": str(offset)}
-        if clients_query_state.get("presence_status", ""):
-            query["presence_status"] = clients_query_state["presence_status"]
-        if clients_query_state.get("workload_status", ""):
-            query["workload_status"] = clients_query_state["workload_status"]
-        if clients_query_state.get("enrollment_status", ""):
-            query["enrollment_status"] = clients_query_state["enrollment_status"]
-        if include_sort_by and clients_query_state.get("sort_by", "").strip():
-            query["sort_by"] = clients_query_state["sort_by"]
-        if include_sort_order and clients_query_state.get("sort_order", "").strip():
-            query["sort_order"] = clients_query_state["sort_order"]
-        try:
-            payload = fetcher("/v1/admin/clients", query)
-        except (URLError, TimeoutError, ValueError):
-            payload = {"total": 0, "limit": page_size, "offset": offset, "items": []}
-            error_message = "Unable to reach photovault-api client registry endpoint."
-
-        total = int(payload.get("total", 0))
-        items = list(payload.get("items", []))
-        has_previous = page > 1
-        has_next = offset + len(items) < total
-        start_index = offset + 1 if total > 0 and items else 0
-        end_index = offset + len(items)
-        previous_url = (
-            url_for("clients", page=page - 1, **clients_query_state)
-            if has_previous
-            else None
-        )
-        next_url = (
-            url_for("clients", page=page + 1, **clients_query_state)
-            if has_next
-            else None
-        )
-        template_name = "_clients_content.html" if _is_hx_request() else "clients.html"
-        return render_template(
-            template_name,
-            clients=items,
-            client_summary=_count_client_summary(items),
+        return render_clients_page(
+            fetcher,
             page=page,
+            clients_query_state=clients_query_state,
             page_size=page_size,
-            total=total,
-            has_previous=has_previous,
-            has_next=has_next,
-            start_index=start_index,
-            end_index=end_index,
-            error_message=error_message,
             action_message=action_message,
             action_error=action_error,
-            clients_query_state=clients_query_state,
-            previous_url=previous_url,
-            next_url=next_url,
-            active_page="clients",
-            suppress_layout_alerts=True,
+            include_sort_by=include_sort_by,
+            include_sort_order=include_sort_order,
         )
 
     def _render_duplicates_page(
@@ -145,30 +86,11 @@ def create_app(*, api_fetcher: ApiFetcher | None = None, api_poster: ApiPoster |
         action_message: str | None = None,
         action_error: str | None = None,
     ) -> str:
-        error_message: str | None = None
-        try:
-            payload = fetcher("/v1/admin/duplicates", {"limit": str(insight_page_size), "offset": "0"})
-        except (URLError, TimeoutError, ValueError):
-            payload = {"total": 0, "limit": insight_page_size, "offset": 0, "items": []}
-            error_message = "Unable to reach photovault-api duplicates endpoint."
-
-        groups = list(payload.get("items", []))
-        for group in groups:
-            group["sha256_display"] = _format_sha_for_display(str(group.get("sha256_hex") or ""))
-            group["assets"] = [
-                _fetch_catalog_asset_for_display(fetcher, relative_path)
-                for relative_path in list(group.get("relative_paths") or [])
-            ]
-        template_name = "_duplicates_content.html" if _is_hx_request() else "duplicates.html"
-        return render_template(
-            template_name,
-            groups=groups,
-            total=int(payload.get("total", 0)),
-            error_message=error_message,
+        return render_duplicates_page(
+            fetcher,
+            insight_page_size=insight_page_size,
             action_message=action_message,
             action_error=action_error,
-            active_page="duplicates",
-            suppress_layout_alerts=True,
         )
 
     def _render_catalog_page(
@@ -178,123 +100,14 @@ def create_app(*, api_fetcher: ApiFetcher | None = None, api_poster: ApiPoster |
         action_message: str | None = None,
         action_error: str | None = None,
     ) -> str:
-        offset = (page - 1) * page_size
-        extraction_status_filter = catalog_filters.get("extraction_status", "").strip()
-        origin_kind_filter = catalog_filters.get("origin_kind", "").strip()
-        media_type_filter = catalog_filters.get("media_type", "").strip()
-        preview_capability_filter = catalog_filters.get("preview_capability", "").strip()
-        preview_status_filter = catalog_filters.get("preview_status", "").strip()
-        is_favorite_filter = catalog_filters.get("is_favorite", "").strip()
-        is_archived_filter = catalog_filters.get("is_archived", "").strip()
-        cataloged_since_filter = catalog_filters.get("cataloged_since_utc", "").strip()
-        cataloged_before_filter = catalog_filters.get("cataloged_before_utc", "").strip()
-
-        error_message: str | None = None
-        latest_backfill_runs: dict[str, Any] = {"extraction_run": None, "preview_run": None}
-        query: dict[str, str] = {"limit": str(page_size), "offset": str(offset)}
-        if extraction_status_filter:
-            query["extraction_status"] = extraction_status_filter
-        if origin_kind_filter:
-            query["origin_kind"] = origin_kind_filter
-        if media_type_filter:
-            query["media_type"] = media_type_filter
-        if preview_capability_filter:
-            query["preview_capability"] = preview_capability_filter
-        if preview_status_filter:
-            query["preview_status"] = preview_status_filter
-        if is_favorite_filter:
-            query["is_favorite"] = is_favorite_filter
-        if is_archived_filter:
-            query["is_archived"] = is_archived_filter
-        if cataloged_since_filter:
-            query["cataloged_since_utc"] = cataloged_since_filter
-        if cataloged_before_filter:
-            query["cataloged_before_utc"] = cataloged_before_filter
-        try:
-            payload = fetcher("/v1/admin/catalog", query)
-        except (URLError, TimeoutError, ValueError):
-            payload = {"total": 0, "limit": page_size, "offset": offset, "items": []}
-            error_message = "Unable to reach photovault-api catalog endpoint."
-        try:
-            latest_backfill_runs = fetcher("/v1/admin/catalog/backfill/latest", {})
-        except (URLError, TimeoutError, ValueError):
-            if error_message is None:
-                error_message = "Unable to reach photovault-api catalog backfill endpoint."
-
-        total = int(payload.get("total", 0))
-        items = list(payload.get("items", []))
-        has_previous = page > 1
-        has_next = offset + len(items) < total
-        start_index = offset + 1 if total > 0 and items else 0
-        end_index = offset + len(items)
-
-        for item in items:
-            _decorate_catalog_item(item)
-
-        filter_query = _catalog_query_state_from_values(catalog_filters)
-        return_query = urlencode(filter_query)
-        previous_url = url_for("catalog", page=page - 1, **filter_query) if has_previous else None
-        next_url = url_for("catalog", page=page + 1, **filter_query) if has_next else None
-
-        filter_chip_labels = {
-            "extraction_status": "Extraction",
-            "preview_status": "Preview",
-            "origin_kind": "Origin",
-            "media_type": "Media type",
-            "preview_capability": "Previewable",
-            "is_favorite": "Favorite",
-            "is_archived": "Archived",
-            "cataloged_since_utc": "Since",
-            "cataloged_before_utc": "Before",
-        }
-        active_filters: list[dict[str, str]] = []
-        for key, label in filter_chip_labels.items():
-            value = filter_query.get(key, "")
-            if not value:
-                continue
-            remaining = {k: v for k, v in filter_query.items() if k != key}
-            active_filters.append(
-                {
-                    "key": key,
-                    "label": label,
-                    "value": value,
-                    "remove_url": url_for("catalog", **remaining),
-                }
-            )
-
-        template_name = "_catalog_content.html" if _is_hx_request() else "catalog.html"
-        return render_template(
-            template_name,
-            assets=items,
+        return render_catalog_page(
+            fetcher,
             page=page,
             page_size=page_size,
-            total=total,
-            has_previous=has_previous,
-            has_next=has_next,
-            start_index=start_index,
-            end_index=end_index,
-            error_message=error_message,
+            is_hx_request=_is_hx_request(),
+            catalog_filters=catalog_filters,
             action_message=action_message,
             action_error=action_error,
-            extraction_status_filter=extraction_status_filter,
-            origin_kind_filter=origin_kind_filter,
-            media_type_filter=media_type_filter,
-            preview_capability_filter=preview_capability_filter,
-            preview_status_filter=preview_status_filter,
-            is_favorite_filter=is_favorite_filter,
-            is_archived_filter=is_archived_filter,
-            cataloged_since_filter=cataloged_since_filter,
-            cataloged_before_filter=cataloged_before_filter,
-            cataloged_since_local=_utc_iso_to_local(cataloged_since_filter),
-            cataloged_before_local=_utc_iso_to_local(cataloged_before_filter),
-            catalog_query_state=filter_query,
-            return_query=return_query,
-            active_filters=active_filters,
-            latest_backfill_runs=latest_backfill_runs,
-            previous_url=previous_url,
-            next_url=next_url,
-            active_page="catalog",
-            suppress_layout_alerts=True,
         )
 
     @app.get("/")
@@ -539,32 +352,7 @@ def create_app(*, api_fetcher: ApiFetcher | None = None, api_poster: ApiPoster |
 
     @app.get("/conflicts")
     def conflicts() -> str:
-        error_message: str | None = None
-        try:
-            payload = fetcher("/v1/admin/path-conflicts", {"limit": str(insight_page_size), "offset": "0"})
-            latest_run = fetcher("/v1/admin/latest-index-run", {})
-        except (URLError, TimeoutError, ValueError):
-            payload = {"total": 0, "limit": insight_page_size, "offset": 0, "items": []}
-            latest_run = {"latest_run": None}
-            error_message = "Unable to reach photovault-api conflict inspection endpoints."
-
-        conflicts_list = list(payload.get("items", []))
-        for conflict in conflicts_list:
-            conflict["previous_sha256_display"] = _format_sha_for_display(
-                str(conflict.get("previous_sha256_hex") or "")
-            )
-            conflict["current_sha256_display"] = _format_sha_for_display(
-                str(conflict.get("current_sha256_hex") or "")
-            )
-
-        return render_template(
-            "conflicts.html",
-            conflicts=conflicts_list,
-            total=int(payload.get("total", 0)),
-            latest_run=latest_run.get("latest_run"),
-            error_message=error_message,
-            active_page="conflicts",
-        )
+        return render_conflicts_page(fetcher, insight_page_size=insight_page_size)
 
     @app.get("/catalog")
     def catalog() -> str:
@@ -1087,59 +875,12 @@ def create_app(*, api_fetcher: ApiFetcher | None = None, api_poster: ApiPoster |
     # the data-dense admin table used for moderation work.
 
     def _sanitize_library_prefix(raw_value: str) -> str:
-        """Return a normalized folder prefix, or ``""`` if invalid/empty.
-
-        The server-UI accepts the same grammar the API expects: forward
-        slashes, no leading slash, no empty/``.``/``..`` segments. On any
-        violation we simply drop back to the root rather than surfacing an
-        error — the grid should always render *something*.
-        """
-        value = (raw_value or "").strip()
-        if value == "" or value.startswith("/") or "\\" in value:
-            return ""
-        trimmed = value.strip("/")
-        if trimmed == "":
-            return ""
-        for segment in trimmed.split("/"):
-            if segment in ("", ".", ".."):
-                return ""
-        return trimmed
+        return sanitize_library_prefix(raw_value)
 
     def _build_library_folder_tree(
         folders: list[dict[str, Any]], selected_prefix: str
     ) -> list[dict[str, Any]]:
-        """Shape folder rows from the API into a tree-friendly list.
-
-        Each returned entry is flat but annotated with ``depth``, an
-        indentation-friendly ``display_name`` (the last path segment), plus
-        ``is_selected`` and ``is_ancestor_of_selected`` flags so the template
-        can expand the path to the selected folder and highlight it.
-        """
-        normalized_selected = selected_prefix.strip("/")
-        selected_ancestors: set[str] = set()
-        if normalized_selected:
-            parts = normalized_selected.split("/")
-            for index in range(1, len(parts) + 1):
-                selected_ancestors.add("/".join(parts[:index]))
-        entries: list[dict[str, Any]] = []
-        for folder in folders:
-            path = str(folder.get("path", ""))
-            if not path:
-                continue
-            display_name = path.rsplit("/", 1)[-1]
-            entries.append(
-                {
-                    "path": path,
-                    "depth": int(folder.get("depth", 0)),
-                    "direct_count": int(folder.get("direct_count", 0)),
-                    "total_count": int(folder.get("total_count", 0)),
-                    "display_name": display_name,
-                    "is_selected": path == normalized_selected,
-                    "is_ancestor_of_selected": path in selected_ancestors
-                    and path != normalized_selected,
-                }
-            )
-        return entries
+        return build_library_folder_tree(folders, selected_prefix)
 
     @app.get("/library")
     def library() -> str:

@@ -3646,7 +3646,11 @@ def test_admin_reject_execute_logs_start_finish_and_failure_reason(
     assert mark.status_code == 200
 
     caplog.set_level(logging.INFO, logger="photovault-api.app")
-    monkeypatch.setattr(app_module.os, "replace", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("forced replace failure")))
+    monkeypatch.setattr(
+        app_module.os,
+        "replace",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("forced replace failure")),
+    )
     monkeypatch.setattr(
         app_module.shutil,
         "copy2",
