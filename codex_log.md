@@ -905,3 +905,59 @@ Verification: scripts/deploy_rpi.sh; /bin/zsh -lc "ANISBLE_HOST_KEY_CHECKING=Fal
 **Verification:**
 - `source /Users/ptroc/IdeaProjects/venv.3.13/bin/activate && ruff check services/photovault-server-ui/src/photovault_server_ui/app.py services/photovault-server-ui/src/photovault_server_ui/client_pages.py services/photovault-server-ui/src/photovault_server_ui/catalog_pages.py services/photovault-server-ui/tests/test_server_ui_app.py`
 - `source /Users/ptroc/IdeaProjects/venv.3.13/bin/activate && pytest -q services/photovault-server-ui/tests/test_server_ui_app.py`
+
+## 2026-04-29T11:04:37Z — small preview variant for compact server UI surfaces
+
+**Action:** Added an optional `max_long_edge` preview size parameter through the API and server-UI preview proxy, generated size-specific cached JPEG variants on demand, and switched compact catalog/library/rejects/duplicates surfaces to request 150px previews while keeping asset detail and lightbox on the existing larger preview.
+
+**Files modified:**
+- `services/photovault-api/src/photovault_api/admin_routes.py`
+- `services/photovault-api/src/photovault_api/app.py`
+- `services/photovault-api/src/photovault_api/media_preview.py`
+- `services/photovault-api/tests/test_api_app.py`
+- `services/photovault-server-ui/src/photovault_server_ui/app.py`
+- `services/photovault-server-ui/src/photovault_server_ui/templates/_asset_card.html`
+- `services/photovault-server-ui/src/photovault_server_ui/templates/_duplicates_content.html`
+- `services/photovault-server-ui/src/photovault_server_ui/templates/library.html`
+- `services/photovault-server-ui/src/photovault_server_ui/templates/library_rejects.html`
+- `services/photovault-server-ui/tests/test_server_ui_app.py`
+
+**Verification:**
+- `source /Users/ptroc/IdeaProjects/venv.3.13/bin/activate && ruff check services/photovault-api/src/photovault_api/app.py services/photovault-api/src/photovault_api/admin_routes.py services/photovault-api/src/photovault_api/media_preview.py services/photovault-api/tests/test_api_app.py services/photovault-server-ui/src/photovault_server_ui/app.py services/photovault-server-ui/tests/test_server_ui_app.py`
+- `source /Users/ptroc/IdeaProjects/venv.3.13/bin/activate && pytest -q services/photovault-api/tests/test_api_app.py -k "preview"`
+- `source /Users/ptroc/IdeaProjects/venv.3.13/bin/activate && pytest -q services/photovault-server-ui/tests/test_server_ui_app.py -k "catalog or library or duplicates or preview_proxy"`
+
+## 2026-04-29T11:11:42Z — trash nav exposure and compose purge runner
+
+**Action:** Exposed trash as a first-class server UI destination, kept the existing 14-day trash retention behavior, and added a compose-managed cron container that runs the existing `scripts/purge_trash.py` job twice daily using the shared server image.
+
+**Files modified:**
+- `services/photovault-server-ui/src/photovault_server_ui/templates/base.html`
+- `services/photovault-server-ui/src/photovault_server_ui/app.py`
+- `services/photovault-server-ui/tests/test_server_ui_app.py`
+- `deploy/docker/Dockerfile.server`
+- `deploy/docker/docker-compose.server.yml`
+- `docs/server_install_docker_compose.md`
+
+**Verification:**
+- `source /Users/ptroc/IdeaProjects/venv.3.13/bin/activate && pytest -q services/photovault-server-ui/tests/test_server_ui_app.py -k "trash or rejects_page_links_to_trash_page or base_navigation_includes_trash_link"`
+- `source /Users/ptroc/IdeaProjects/venv.3.13/bin/activate && pytest -q services/photovault-api/tests/test_purge_trash_script.py services/photovault-api/tests/test_api_app.py -k "tombstone or purge_trash"`
+- `source /Users/ptroc/IdeaProjects/venv.3.13/bin/activate && python -c "from pathlib import Path; import yaml; data=yaml.safe_load(Path('deploy/docker/docker-compose.server.yml').read_text()); assert 'photovault-trash-purge' in data['services']; print('compose_yaml_ok')"`
+- `docker compose -f deploy/docker/docker-compose.server.yml config` (not run successfully: `docker` binary unavailable in this environment)
+
+## 2026-04-29T11:20:44Z — catalog maintenance page redo support
+
+**Action:** Reworked `/catalog` into a maintenance-only "Catalog Actions" page, removed asset/preview browsing from that surface, and expanded extraction/preview backfill flows so operators can explicitly redo already successful items after config changes.
+
+**Files modified:**
+- `services/photovault-api/src/photovault_api/admin_routes.py`
+- `services/photovault-api/tests/test_api_app.py`
+- `services/photovault-server-ui/src/photovault_server_ui/app.py`
+- `services/photovault-server-ui/src/photovault_server_ui/catalog_pages.py`
+- `services/photovault-server-ui/src/photovault_server_ui/templates/base.html`
+- `services/photovault-server-ui/src/photovault_server_ui/templates/catalog.html`
+- `services/photovault-server-ui/src/photovault_server_ui/templates/_catalog_content.html`
+- `services/photovault-server-ui/tests/test_server_ui_app.py`
+
+**Verification:**
+- `source /Users/ptroc/IdeaProjects/venv.3.13/bin/activate && pytest services/photovault-api/tests/test_api_app.py -k 'backfill or retry' services/photovault-server-ui/tests/test_server_ui_app.py -k 'catalog'`

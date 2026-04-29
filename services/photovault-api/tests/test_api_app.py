@@ -1262,6 +1262,34 @@ def test_admin_backfill_is_sane_for_repeated_runs(tmp_path: Path) -> None:
     assert second_backfill.json()["run"]["processed_count"] == 0
 
 
+def test_admin_extraction_backfill_can_redo_succeeded_assets(tmp_path: Path) -> None:
+    file_path = tmp_path / "2026" / "04" / "Job_A" / "one.jpg"
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    content = _jpeg_with_exif_bytes(camera_make="Sony", camera_model="A7 IV")
+    file_path.write_bytes(content)
+
+    client = TestClient(create_app(storage_root=tmp_path))
+    assert client.post("/v1/storage/index").status_code == 200
+    retry_response = client.post(
+        "/v1/admin/catalog/extraction/retry",
+        json={"relative_path": "2026/04/Job_A/one.jpg"},
+    )
+    assert retry_response.status_code == 200
+    assert retry_response.json()["item"]["extraction_status"] == "succeeded"
+
+    backfill = client.post(
+        "/v1/admin/catalog/extraction/backfill",
+        json={"target_statuses": ["succeeded"], "limit": 10},
+    )
+    assert backfill.status_code == 200
+    run = backfill.json()["run"]
+    assert run["requested_statuses"] == ["succeeded"]
+    assert run["selected_count"] == 1
+    assert run["processed_count"] == 1
+    assert run["succeeded_count"] == 1
+    assert run["failed_count"] == 0
+
+
 def test_admin_preview_backfill_processes_pending_and_failed_assets_with_filters(tmp_path: Path) -> None:
     pending_path = "2026/04/Job_A/pending.jpg"
     failed_path = "2026/04/Job_A/failed.jpg"
@@ -1342,6 +1370,41 @@ def test_admin_preview_backfill_processes_pending_and_failed_assets_with_filters
     assert latest_payload["preview_run"] is not None
     assert latest_payload["preview_run"]["selected_count"] == 2
     assert latest_payload["extraction_run"] is None
+
+
+def test_admin_preview_backfill_can_redo_succeeded_assets(tmp_path: Path) -> None:
+    file_path = tmp_path / "2026" / "04" / "Job_A" / "one.jpg"
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    content = _jpeg_with_exif_bytes(width=12, height=8)
+    file_path.write_bytes(content)
+
+    client = TestClient(create_app(storage_root=tmp_path))
+    assert client.post("/v1/storage/index").status_code == 200
+    assert (
+        client.post(
+            "/v1/admin/catalog/extraction/retry",
+            json={"relative_path": "2026/04/Job_A/one.jpg"},
+        ).status_code
+        == 200
+    )
+    preview_retry = client.post(
+        "/v1/admin/catalog/preview/retry",
+        json={"relative_path": "2026/04/Job_A/one.jpg"},
+    )
+    assert preview_retry.status_code == 200
+    assert preview_retry.json()["item"]["preview_status"] == "succeeded"
+
+    backfill = client.post(
+        "/v1/admin/catalog/preview/backfill",
+        json={"target_statuses": ["succeeded"], "limit": 10},
+    )
+    assert backfill.status_code == 200
+    run = backfill.json()["run"]
+    assert run["requested_statuses"] == ["succeeded"]
+    assert run["selected_count"] == 1
+    assert run["processed_count"] == 1
+    assert run["succeeded_count"] == 1
+    assert run["failed_count"] == 0
 
 
 def test_mixed_uploaded_and_indexed_assets_converge_after_preview_backfill(tmp_path: Path) -> None:
@@ -1655,6 +1718,51 @@ def test_admin_retry_preview_honors_configured_max_long_edge(tmp_path: Path) -> 
         assert preview_image.size == (2048, 512)
 
 
+def test_admin_catalog_preview_generates_and_reuses_small_variant(tmp_path: Path) -> None:
+    image_path = tmp_path / "2026" / "04" / "Job_A" / "large.jpg"
+    image_path.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", (4096, 1024), color=(12, 34, 56)).save(image_path, format="JPEG")
+
+    client = TestClient(create_app(storage_root=tmp_path, preview_max_long_edge=2048))
+    index_response = client.post("/v1/storage/index")
+    assert index_response.status_code == 200
+
+    retry_response = client.post(
+        "/v1/admin/catalog/preview/retry",
+        json={"relative_path": "2026/04/Job_A/large.jpg"},
+    )
+    assert retry_response.status_code == 200
+    item = retry_response.json()["item"]
+    assert item["preview_relative_path"] == "2026/04/Job_A/large__" + item["sha256_hex"][:12] + "__w2048.jpg"
+
+    preview_cache_root = tmp_path.parent / ".photovault_preview_cache"
+    large_preview_file = preview_cache_root / str(item["preview_relative_path"])
+    assert large_preview_file.is_file()
+
+    preview_response = client.get(
+        "/v1/admin/catalog/preview",
+        params={"relative_path": "2026/04/Job_A/large.jpg", "max_long_edge": 150},
+    )
+    assert preview_response.status_code == 200
+    assert preview_response.headers["content-type"] == "image/jpeg"
+
+    small_preview_file = (
+        preview_cache_root / f"2026/04/Job_A/large__{item['sha256_hex'][:12]}__w150.jpg"
+    )
+    assert small_preview_file.is_file()
+    with Image.open(small_preview_file) as preview_image:
+        assert max(preview_image.size) == 150
+        assert preview_image.size == (150, 38)
+
+    small_preview_mtime = small_preview_file.stat().st_mtime_ns
+    second_preview_response = client.get(
+        "/v1/admin/catalog/preview",
+        params={"relative_path": "2026/04/Job_A/large.jpg", "max_long_edge": 150},
+    )
+    assert second_preview_response.status_code == 200
+    assert small_preview_file.stat().st_mtime_ns == small_preview_mtime
+
+
 def test_admin_retry_preview_passthrough_suffix_serves_original_file(tmp_path: Path) -> None:
     image_path = tmp_path / "2026" / "04" / "Job_A" / "passthrough.jpg"
     image_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1682,6 +1790,14 @@ def test_admin_retry_preview_passthrough_suffix_serves_original_file(tmp_path: P
     assert preview_response.status_code == 200
     assert preview_response.headers["content-type"] == "image/jpeg"
     assert preview_response.content == original_bytes
+
+    small_preview_response = client.get(
+        "/v1/admin/catalog/preview",
+        params={"relative_path": "2026/04/Job_A/passthrough.jpg", "max_long_edge": 150},
+    )
+    assert small_preview_response.status_code == 200
+    assert small_preview_response.headers["content-type"] == "image/jpeg"
+    assert small_preview_response.content == original_bytes
 
     preview_cache_root = tmp_path.parent / ".photovault_preview_cache"
     expected_cached = list(

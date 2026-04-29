@@ -11,7 +11,6 @@ from flask import redirect, render_template, url_for
 from .api_client import ApiFetcher
 from .formatters import (
     _catalog_query_state_from_values,
-    _decorate_catalog_item,
     _utc_iso_to_local,
 )
 
@@ -51,131 +50,44 @@ def render_catalog_page(
     fetcher: ApiFetcher,
     *,
     page: int,
-    page_size: int,
     is_hx_request: bool,
     catalog_filters: dict[str, str],
     action_message: str | None = None,
     action_error: str | None = None,
 ) -> str:
-    offset = (page - 1) * page_size
-    extraction_status_filter = catalog_filters.get("extraction_status", "").strip()
     origin_kind_filter = catalog_filters.get("origin_kind", "").strip()
     media_type_filter = catalog_filters.get("media_type", "").strip()
     preview_capability_filter = catalog_filters.get("preview_capability", "").strip()
-    preview_status_filter = catalog_filters.get("preview_status", "").strip()
-    is_favorite_filter = catalog_filters.get("is_favorite", "").strip()
-    is_archived_filter = catalog_filters.get("is_archived", "").strip()
     cataloged_since_filter = catalog_filters.get("cataloged_since_utc", "").strip()
     cataloged_before_filter = catalog_filters.get("cataloged_before_utc", "").strip()
 
     error_message: str | None = None
     latest_backfill_runs: dict[str, Any] = {"extraction_run": None, "preview_run": None}
-    query: dict[str, str] = {"limit": str(page_size), "offset": str(offset)}
-    if extraction_status_filter:
-        query["extraction_status"] = extraction_status_filter
-    if origin_kind_filter:
-        query["origin_kind"] = origin_kind_filter
-    if media_type_filter:
-        query["media_type"] = media_type_filter
-    if preview_capability_filter:
-        query["preview_capability"] = preview_capability_filter
-    if preview_status_filter:
-        query["preview_status"] = preview_status_filter
-    if is_favorite_filter:
-        query["is_favorite"] = is_favorite_filter
-    if is_archived_filter:
-        query["is_archived"] = is_archived_filter
-    if cataloged_since_filter:
-        query["cataloged_since_utc"] = cataloged_since_filter
-    if cataloged_before_filter:
-        query["cataloged_before_utc"] = cataloged_before_filter
-    try:
-        payload = fetcher("/v1/admin/catalog", query)
-    except (URLError, TimeoutError, ValueError):
-        payload = {"total": 0, "limit": page_size, "offset": offset, "items": []}
-        error_message = "Unable to reach photovault-api catalog endpoint."
     try:
         latest_backfill_runs = fetcher("/v1/admin/catalog/backfill/latest", {})
     except (URLError, TimeoutError, ValueError):
-        if error_message is None:
-            error_message = "Unable to reach photovault-api catalog backfill endpoint."
-
-    total = int(payload.get("total", 0))
-    items = list(payload.get("items", []))
-    has_previous = page > 1
-    has_next = offset + len(items) < total
-    start_index = offset + 1 if total > 0 and items else 0
-    end_index = offset + len(items)
-
-    for item in items:
-        _decorate_catalog_item(item)
+        error_message = "Unable to reach photovault-api catalog backfill endpoint."
 
     filter_query = _catalog_query_state_from_values(catalog_filters)
     return_query = urlencode(filter_query)
-    previous_url = url_for("catalog", page=page - 1, **filter_query) if has_previous else None
-    next_url = url_for("catalog", page=page + 1, **filter_query) if has_next else None
-
-    filter_chip_labels = {
-        "extraction_status": "Extraction",
-        "preview_status": "Preview",
-        "origin_kind": "Origin",
-        "media_type": "Media type",
-        "preview_capability": "Previewable",
-        "is_favorite": "Favorite",
-        "is_archived": "Archived",
-        "cataloged_since_utc": "Since",
-        "cataloged_before_utc": "Before",
-    }
-    active_filters: list[dict[str, str]] = []
-    for key, label in filter_chip_labels.items():
-        value = filter_query.get(key, "")
-        if not value:
-            continue
-        remaining = {
-            filter_key: filter_value
-            for filter_key, filter_value in filter_query.items()
-            if filter_key != key
-        }
-        active_filters.append(
-            {
-                "key": key,
-                "label": label,
-                "value": value,
-                "remove_url": url_for("catalog", **remaining),
-            }
-        )
 
     template_name = "_catalog_content.html" if is_hx_request else "catalog.html"
     return render_template(
         template_name,
-        assets=items,
         page=page,
-        page_size=page_size,
-        total=total,
-        has_previous=has_previous,
-        has_next=has_next,
-        start_index=start_index,
-        end_index=end_index,
         error_message=error_message,
         action_message=action_message,
         action_error=action_error,
-        extraction_status_filter=extraction_status_filter,
         origin_kind_filter=origin_kind_filter,
         media_type_filter=media_type_filter,
         preview_capability_filter=preview_capability_filter,
-        preview_status_filter=preview_status_filter,
-        is_favorite_filter=is_favorite_filter,
-        is_archived_filter=is_archived_filter,
         cataloged_since_filter=cataloged_since_filter,
         cataloged_before_filter=cataloged_before_filter,
         cataloged_since_local=_utc_iso_to_local(cataloged_since_filter),
         cataloged_before_local=_utc_iso_to_local(cataloged_before_filter),
         catalog_query_state=filter_query,
         return_query=return_query,
-        active_filters=active_filters,
         latest_backfill_runs=latest_backfill_runs,
-        previous_url=previous_url,
-        next_url=next_url,
         active_page="catalog",
         suppress_layout_alerts=True,
     )

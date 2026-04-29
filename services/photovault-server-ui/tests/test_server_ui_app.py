@@ -1,3 +1,4 @@
+import photovault_server_ui.app as app_module
 from photovault_server_ui.app import create_app
 
 
@@ -390,20 +391,12 @@ def test_duplicates_page_renders_duplicate_groups() -> None:
 
 def test_catalog_page_returns_fragment_for_hx_requests() -> None:
     def _fetcher(path: str, query: dict[str, str]) -> dict:
-        if path == "/v1/admin/catalog":
-            assert query == {"limit": "50", "offset": "0", "preview_status": "pending"}
-            return {
-                "total": 1,
-                "limit": 50,
-                "offset": 0,
-                "items": [_library_catalog_item("2026/04/Trip/a.jpg", preview_status="pending")],
-            }
         assert path == "/v1/admin/catalog/backfill/latest"
         return {"extraction_run": None, "preview_run": None}
 
     app = create_app(api_fetcher=_fetcher)
     response = app.test_client().get(
-        "/catalog?preview_status=pending",
+        "/catalog?origin_kind=indexed",
         headers={"HX-Request": "true"},
     )
     html = response.get_data(as_text=True)
@@ -412,11 +405,43 @@ def test_catalog_page_returns_fragment_for_hx_requests() -> None:
     assert "<!doctype html>" not in html
 
 
+def test_catalog_preview_proxy_forwards_optional_max_long_edge(monkeypatch) -> None:
+    observed: dict[str, str] = {}
+
+    class _FakeResponse:
+        def __init__(self) -> None:
+            self.headers = {"Content-Type": "image/jpeg"}
+
+        def read(self) -> bytes:
+            return b"preview-bytes"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+    def _fake_urlopen(request, timeout: int):
+        observed["url"] = request.full_url
+        observed["timeout"] = str(timeout)
+        return _FakeResponse()
+
+    monkeypatch.setattr(app_module, "urlopen", _fake_urlopen)
+
+    app = create_app(api_fetcher=lambda path, query: {"total": 0, "limit": 50, "offset": 0, "items": []})
+    response = app.test_client().get(
+        "/catalog/preview?relative_path=2026/04/Job_A/a.jpg&max_long_edge=150"
+    )
+    assert response.status_code == 200
+    assert response.data == b"preview-bytes"
+    assert observed["url"].endswith(
+        "/v1/admin/catalog/preview?relative_path=2026%2F04%2FJob_A%2Fa.jpg&max_long_edge=150"
+    )
+    assert observed["timeout"] == "10"
+
+
 def test_catalog_backfill_action_returns_fragment_for_hx_requests() -> None:
     def _fetcher(path: str, query: dict[str, str]) -> dict:
-        if path == "/v1/admin/catalog":
-            assert query == {"limit": "50", "offset": "0", "preview_status": "pending"}
-            return {"total": 0, "limit": 50, "offset": 0, "items": []}
         assert path == "/v1/admin/catalog/backfill/latest"
         return {"extraction_run": None, "preview_run": None}
 
@@ -440,7 +465,7 @@ def test_catalog_backfill_action_returns_fragment_for_hx_requests() -> None:
         data={
             "page": "1",
             "backfill_kind": "extraction",
-            "return_query": "preview_status=pending",
+            "return_query": "origin_kind=indexed",
             "target_statuses": ["pending", "failed"],
             "limit": "25",
         },
@@ -494,379 +519,54 @@ def test_conflicts_page_renders_conflict_history_and_latest_run() -> None:
     assert "No path conflicts have been recorded." not in html
 
 
-def test_catalog_page_renders_rows_extraction_states_and_metadata_summary() -> None:
+def test_catalog_page_renders_maintenance_surface_without_asset_cards() -> None:
     def _fetcher(path: str, query: dict[str, str]) -> dict:
-        if path == "/v1/admin/catalog/backfill/latest":
-            assert query == {}
-            return {"extraction_run": None, "preview_run": None}
-        assert path == "/v1/admin/catalog"
-        assert query == {"limit": "50", "offset": "0"}
-        return {
-            "total": 2,
-            "limit": 50,
-            "offset": 0,
-            "items": [
-                {
-                    "relative_path": "2026/04/Job_A/a.jpg",
-                    "sha256_hex": "a" * 64,
-                    "size_bytes": 2048,
-                    "media_type": "jpeg",
-                    "preview_capability": "previewable",
-                    "origin_kind": "uploaded",
-                    "last_observed_origin_kind": "uploaded",
-                    "provenance_job_name": "Job_A",
-                    "provenance_original_filename": "a.jpg",
-                    "first_cataloged_at_utc": "2026-04-22T10:00:00+00:00",
-                    "last_cataloged_at_utc": "2026-04-22T10:00:00+00:00",
-                    "extraction_status": "succeeded",
-                    "extraction_last_attempted_at_utc": "2026-04-22T10:01:00+00:00",
-                    "extraction_last_succeeded_at_utc": "2026-04-22T10:01:00+00:00",
-                    "extraction_last_failed_at_utc": None,
-                    "extraction_failure_detail": None,
-                    "preview_status": "succeeded",
-                    "preview_relative_path": "2026/04/Job_A/a__abc123__w1024.jpg",
-                    "preview_last_attempted_at_utc": "2026-04-22T10:02:00+00:00",
-                    "preview_last_succeeded_at_utc": "2026-04-22T10:02:00+00:00",
-                    "preview_last_failed_at_utc": None,
-                    "preview_failure_detail": None,
-                    "is_favorite": True,
-                    "is_archived": False,
-                    "capture_timestamp_utc": "2026-04-22T09:30:00+00:00",
-                    "camera_make": "Canon",
-                    "camera_model": "EOS R6",
-                    "image_width": 6000,
-                    "image_height": 4000,
-                    "orientation": 1,
-                    "lens_model": "RF 24-70mm",
-                },
-                {
-                    "relative_path": "2026/04/Job_A/b.jpg",
-                    "sha256_hex": "b" * 64,
-                    "size_bytes": 1000,
-                    "media_type": "jpeg",
-                    "preview_capability": "previewable",
-                    "origin_kind": "indexed",
-                    "last_observed_origin_kind": "indexed",
-                    "provenance_job_name": None,
-                    "provenance_original_filename": None,
-                    "first_cataloged_at_utc": "2026-04-22T10:05:00+00:00",
-                    "last_cataloged_at_utc": "2026-04-22T10:05:00+00:00",
-                    "extraction_status": "failed",
-                    "extraction_last_attempted_at_utc": "2026-04-22T10:06:00+00:00",
-                    "extraction_last_succeeded_at_utc": None,
-                    "extraction_last_failed_at_utc": "2026-04-22T10:06:00+00:00",
-                    "extraction_failure_detail": "invalid media content",
-                    "preview_status": "failed",
-                    "preview_relative_path": None,
-                    "preview_last_attempted_at_utc": "2026-04-22T10:06:10+00:00",
-                    "preview_last_succeeded_at_utc": None,
-                    "preview_last_failed_at_utc": "2026-04-22T10:06:10+00:00",
-                    "preview_failure_detail": "preview generation failed",
-                    "is_favorite": False,
-                    "is_archived": True,
-                    "capture_timestamp_utc": None,
-                    "camera_make": None,
-                    "camera_model": None,
-                    "image_width": None,
-                    "image_height": None,
-                    "orientation": None,
-                    "lens_model": None,
-                },
-            ],
-        }
+        assert path == "/v1/admin/catalog/backfill/latest"
+        assert query == {}
+        return {"extraction_run": None, "preview_run": None}
 
     app = create_app(api_fetcher=_fetcher)
     response = app.test_client().get("/catalog")
     assert response.status_code == 200
     html = response.get_data(as_text=True)
-    assert "Media Library" in html
-    assert "2026/04/Job_A/a.jpg" in html
-    assert "2026/04/Job_A/b.jpg" in html
+    assert "Catalog Actions" in html
+    assert "Maintenance Scope" in html
+    assert "Run Extraction Backfill" in html
+    assert "Run Preview Backfill" in html
     assert "succeeded" in html
-    assert "failed" in html
-    assert "camera Canon EOS R6" in html
-    assert "6000x4000" in html
-    assert ("a" * 64) not in html
-    assert ("b" * 64) not in html
-    assert "Inspect Asset" in html
-    assert 'src="/catalog/preview?relative_path=2026/04/Job_A/a.jpg"' in html
-    assert "favorite" in html
-    assert "archived" in html
+    assert "Inspect Asset" not in html
+    assert "No catalog assets matched the current filters." not in html
 
 
-def test_catalog_page_empty_state_is_clear() -> None:
+def test_catalog_page_preserves_scope_filters_in_form_fields() -> None:
     def _fetcher(path: str, query: dict[str, str]) -> dict:
-        if path == "/v1/admin/catalog/backfill/latest":
-            assert query == {}
-            return {"extraction_run": None, "preview_run": None}
-        assert path == "/v1/admin/catalog"
-        return {"total": 0, "limit": 50, "offset": 0, "items": []}
-
-    app = create_app(api_fetcher=_fetcher)
-    response = app.test_client().get("/catalog")
-    assert response.status_code == 200
-    assert "No catalog assets matched the current filters." in response.get_data(as_text=True)
-
-
-def test_catalog_page_pagination_is_sane() -> None:
-    def _fetcher(path: str, query: dict[str, str]) -> dict:
-        if path == "/v1/admin/catalog/backfill/latest":
-            assert query == {}
-            return {"extraction_run": None, "preview_run": None}
-        assert path == "/v1/admin/catalog"
-        assert query == {"limit": "50", "offset": "50"}
-        return {
-            "total": 120,
-            "limit": 50,
-            "offset": 50,
-            "items": [
-                {
-                    "relative_path": "2026/04/Job_A/a.jpg",
-                    "sha256_hex": "a" * 64,
-                    "size_bytes": 1,
-                    "media_type": "jpeg",
-                    "preview_capability": "previewable",
-                    "origin_kind": "uploaded",
-                    "last_observed_origin_kind": "uploaded",
-                    "provenance_job_name": None,
-                    "provenance_original_filename": None,
-                    "first_cataloged_at_utc": "2026-04-22T10:00:00+00:00",
-                    "last_cataloged_at_utc": "2026-04-22T10:00:00+00:00",
-                    "extraction_status": "pending",
-                    "extraction_last_attempted_at_utc": None,
-                    "extraction_last_succeeded_at_utc": None,
-                    "extraction_last_failed_at_utc": None,
-                    "extraction_failure_detail": None,
-                    "capture_timestamp_utc": None,
-                    "camera_make": None,
-                    "camera_model": None,
-                    "image_width": None,
-                    "image_height": None,
-                    "orientation": None,
-                    "lens_model": None,
-                    "is_favorite": False,
-                    "is_archived": False,
-                }
-            ],
-        }
-
-    app = create_app(api_fetcher=_fetcher)
-    response = app.test_client().get("/catalog?page=2")
-    assert response.status_code == 200
-    html = response.get_data(as_text=True)
-    assert "Showing 51-51 of 120 cataloged assets." in html
-    assert 'href="/catalog?page=1"' in html
-    assert 'href="/catalog?page=3"' in html
-
-
-def test_catalog_page_filters_pending_assets() -> None:
-    def _fetcher(path: str, query: dict[str, str]) -> dict:
-        if path == "/v1/admin/catalog/backfill/latest":
-            assert query == {}
-            return {"extraction_run": None, "preview_run": None}
-        assert path == "/v1/admin/catalog"
-        assert query == {"limit": "50", "offset": "0", "extraction_status": "pending"}
-        return {
-            "total": 1,
-            "limit": 50,
-            "offset": 0,
-            "items": [
-                {
-                    "relative_path": "2026/04/Job_A/pending.jpg",
-                    "sha256_hex": "a" * 64,
-                    "size_bytes": 100,
-                    "media_type": "jpeg",
-                    "preview_capability": "previewable",
-                    "origin_kind": "indexed",
-                    "last_observed_origin_kind": "indexed",
-                    "provenance_job_name": None,
-                    "provenance_original_filename": None,
-                    "first_cataloged_at_utc": "2026-04-22T10:00:00+00:00",
-                    "last_cataloged_at_utc": "2026-04-22T10:00:00+00:00",
-                    "extraction_status": "pending",
-                    "extraction_last_attempted_at_utc": None,
-                    "extraction_last_succeeded_at_utc": None,
-                    "extraction_last_failed_at_utc": None,
-                    "extraction_failure_detail": None,
-                    "capture_timestamp_utc": None,
-                    "camera_make": None,
-                    "camera_model": None,
-                    "image_width": None,
-                    "image_height": None,
-                    "orientation": None,
-                    "lens_model": None,
-                    "is_favorite": False,
-                    "is_archived": False,
-                }
-            ],
-        }
-
-    app = create_app(api_fetcher=_fetcher)
-    response = app.test_client().get("/catalog?extraction_status=pending")
-    assert response.status_code == 200
-    html = response.get_data(as_text=True)
-    assert "2026/04/Job_A/pending.jpg" in html
-    assert "pending" in html
-
-
-def test_catalog_page_filters_failed_assets_and_shows_failure_detail() -> None:
-    def _fetcher(path: str, query: dict[str, str]) -> dict:
-        if path == "/v1/admin/catalog/backfill/latest":
-            assert query == {}
-            return {"extraction_run": None, "preview_run": None}
-        assert path == "/v1/admin/catalog"
-        assert query == {"limit": "50", "offset": "0", "extraction_status": "failed"}
-        return {
-            "total": 1,
-            "limit": 50,
-            "offset": 0,
-            "items": [
-                {
-                    "relative_path": "2026/04/Job_A/failed.jpg",
-                    "sha256_hex": "b" * 64,
-                    "size_bytes": 100,
-                    "media_type": "jpeg",
-                    "preview_capability": "previewable",
-                    "origin_kind": "uploaded",
-                    "last_observed_origin_kind": "uploaded",
-                    "provenance_job_name": None,
-                    "provenance_original_filename": None,
-                    "first_cataloged_at_utc": "2026-04-22T10:00:00+00:00",
-                    "last_cataloged_at_utc": "2026-04-22T10:00:00+00:00",
-                    "extraction_status": "failed",
-                    "extraction_last_attempted_at_utc": "2026-04-22T10:01:00+00:00",
-                    "extraction_last_succeeded_at_utc": None,
-                    "extraction_last_failed_at_utc": "2026-04-22T10:01:00+00:00",
-                    "extraction_failure_detail": "invalid media content",
-                    "capture_timestamp_utc": None,
-                    "camera_make": None,
-                    "camera_model": None,
-                    "image_width": None,
-                    "image_height": None,
-                    "orientation": None,
-                    "lens_model": None,
-                    "is_favorite": False,
-                    "is_archived": False,
-                }
-            ],
-        }
-
-    app = create_app(api_fetcher=_fetcher)
-    response = app.test_client().get("/catalog?extraction_status=failed")
-    assert response.status_code == 200
-    html = response.get_data(as_text=True)
-    assert "2026/04/Job_A/failed.jpg" in html
-    assert ("b" * 64) not in html
-    assert "Inspect Asset" in html
-
-
-def test_catalog_page_origin_filter_and_filtered_pagination_links() -> None:
-    def _fetcher(path: str, query: dict[str, str]) -> dict:
-        if path == "/v1/admin/catalog/backfill/latest":
-            assert query == {}
-            return {"extraction_run": None, "preview_run": None}
-        assert path == "/v1/admin/catalog"
-        assert query == {
-            "limit": "50",
-            "offset": "50",
-            "extraction_status": "failed",
-            "origin_kind": "uploaded",
-        }
-        return {
-            "total": 120,
-            "limit": 50,
-            "offset": 50,
-            "items": [
-                {
-                    "relative_path": "2026/04/Job_A/failed.jpg",
-                    "sha256_hex": "b" * 64,
-                    "size_bytes": 100,
-                    "media_type": "jpeg",
-                    "preview_capability": "previewable",
-                    "origin_kind": "uploaded",
-                    "last_observed_origin_kind": "uploaded",
-                    "provenance_job_name": None,
-                    "provenance_original_filename": None,
-                    "first_cataloged_at_utc": "2026-04-22T10:00:00+00:00",
-                    "last_cataloged_at_utc": "2026-04-22T10:00:00+00:00",
-                    "extraction_status": "failed",
-                    "extraction_last_attempted_at_utc": "2026-04-22T10:01:00+00:00",
-                    "extraction_last_succeeded_at_utc": None,
-                    "extraction_last_failed_at_utc": "2026-04-22T10:01:00+00:00",
-                    "extraction_failure_detail": "invalid media content",
-                    "capture_timestamp_utc": None,
-                    "camera_make": None,
-                    "camera_model": None,
-                    "image_width": None,
-                    "image_height": None,
-                    "orientation": None,
-                    "lens_model": None,
-                }
-            ],
-        }
-
-    app = create_app(api_fetcher=_fetcher)
-    response = app.test_client().get("/catalog?page=2&extraction_status=failed&origin_kind=uploaded")
-    assert response.status_code == 200
-    html = response.get_data(as_text=True)
-    assert 'href="/catalog?page=1&amp;extraction_status=failed&amp;origin_kind=uploaded"' in html
-    assert 'href="/catalog?page=3&amp;extraction_status=failed&amp;origin_kind=uploaded"' in html
-
-
-def test_catalog_page_forwards_media_type_preview_filters() -> None:
-    def _fetcher(path: str, query: dict[str, str]) -> dict:
-        if path == "/v1/admin/catalog/backfill/latest":
-            assert query == {}
-            return {"extraction_run": None, "preview_run": None}
-        assert path == "/v1/admin/catalog"
-        assert query == {
-            "limit": "50",
-            "offset": "0",
-            "media_type": "raw",
-            "preview_capability": "previewable",
-            "preview_status": "failed",
-        }
-        return {"total": 0, "limit": 50, "offset": 0, "items": []}
+        assert path == "/v1/admin/catalog/backfill/latest"
+        assert query == {}
+        return {"extraction_run": None, "preview_run": None}
 
     app = create_app(api_fetcher=_fetcher)
     response = app.test_client().get(
-        "/catalog?media_type=raw&preview_capability=previewable&preview_status=failed"
+        (
+            "/catalog?origin_kind=indexed&media_type=raw&preview_capability=previewable"
+            "&cataloged_since_utc=2026-04-22T00:00:00%2B00:00"
+        )
     )
     assert response.status_code == 200
     html = response.get_data(as_text=True)
-    assert "No catalog assets matched the current filters." in html
-
-
-def test_catalog_page_forwards_favorite_and_archived_filters() -> None:
-    def _fetcher(path: str, query: dict[str, str]) -> dict:
-        if path == "/v1/admin/catalog/backfill/latest":
-            assert query == {}
-            return {"extraction_run": None, "preview_run": None}
-        assert path == "/v1/admin/catalog"
-        assert query == {
-            "limit": "50",
-            "offset": "0",
-            "is_favorite": "true",
-            "is_archived": "false",
-        }
-        return {"total": 0, "limit": 50, "offset": 0, "items": []}
-
-    app = create_app(api_fetcher=_fetcher)
-    response = app.test_client().get("/catalog?is_favorite=true&is_archived=false")
-    assert response.status_code == 200
+    assert 'option value="indexed" selected' in html
+    assert 'option value="raw" selected' in html
+    assert 'option value="previewable" selected' in html
+    assert "2026-04-22T00:00:00+00:00" in html
 
 
 def test_catalog_page_renders_backfill_controls_and_latest_run_summary() -> None:
     def _fetcher(path: str, query: dict[str, str]) -> dict:
-        if path == "/v1/admin/catalog":
-            assert query == {"limit": "50", "offset": "0"}
-            return {"total": 0, "limit": 50, "offset": 0, "items": []}
         assert path == "/v1/admin/catalog/backfill/latest"
         assert query == {}
         return {
             "extraction_run": {
                 "backfill_kind": "extraction",
-                "requested_statuses": ["pending", "failed"],
+                "requested_statuses": ["pending", "failed", "succeeded"],
                 "limit": 50,
                 "origin_kind": "indexed",
                 "media_type": "jpeg",
@@ -883,7 +583,7 @@ def test_catalog_page_renders_backfill_controls_and_latest_run_summary() -> None
             },
             "preview_run": {
                 "backfill_kind": "preview",
-                "requested_statuses": ["pending", "failed"],
+                "requested_statuses": ["failed", "succeeded"],
                 "limit": 25,
                 "origin_kind": "uploaded",
                 "media_type": "raw",
@@ -907,6 +607,8 @@ def test_catalog_page_renders_backfill_controls_and_latest_run_summary() -> None
     assert "Backfill Operations" in html
     assert "Run Extraction Backfill" in html
     assert "Run Preview Backfill" in html
+    assert "requested pending, failed, succeeded" in html
+    assert "requested failed, succeeded" in html
     assert "remaining pending 3, failed 2" in html
     assert "remaining pending 2, failed 1" in html
     assert "2026-04-22" in html
@@ -917,9 +619,6 @@ def test_catalog_backfill_action_posts_filters_and_shows_outcome_message() -> No
     observed: dict[str, object] = {}
 
     def _fetcher(path: str, query: dict[str, str]) -> dict:
-        if path == "/v1/admin/catalog":
-            observed["query"] = query
-            return {"total": 0, "limit": 50, "offset": 50, "items": []}
         assert path == "/v1/admin/catalog/backfill/latest"
         return {"extraction_run": None, "preview_run": None}
 
@@ -943,10 +642,8 @@ def test_catalog_backfill_action_posts_filters_and_shows_outcome_message() -> No
         data={
             "page": "2",
             "backfill_kind": "preview",
-            "target_statuses": ["pending", "failed"],
+            "target_statuses": ["pending", "failed", "succeeded"],
             "limit": "40",
-            "extraction_status": "failed",
-            "preview_status": "pending",
             "origin_kind": "indexed",
             "media_type": "raw",
             "preview_capability": "previewable",
@@ -957,18 +654,8 @@ def test_catalog_backfill_action_posts_filters_and_shows_outcome_message() -> No
     assert response.status_code == 200
     assert observed["path"] == "/v1/admin/catalog/preview/backfill"
     assert observed["payload"] == {
-        "target_statuses": ["pending", "failed"],
+        "target_statuses": ["pending", "failed", "succeeded"],
         "limit": 40,
-        "origin_kind": "indexed",
-        "media_type": "raw",
-        "preview_capability": "previewable",
-        "cataloged_since_utc": "2026-04-22T00:00:00+00:00",
-    }
-    assert observed["query"] == {
-        "limit": "50",
-        "offset": "50",
-        "extraction_status": "failed",
-        "preview_status": "pending",
         "origin_kind": "indexed",
         "media_type": "raw",
         "preview_capability": "previewable",
@@ -1093,20 +780,12 @@ def test_catalog_asset_detail_renders_preview_status_for_heic_asset() -> None:
 def test_catalog_favorite_action_posts_to_api_and_preserves_filters() -> None:
     observed: dict[str, object] = {}
 
-    def _fetcher(path: str, query: dict[str, str]) -> dict:
-        if path == "/v1/admin/catalog/backfill/latest":
-            assert query == {}
-            return {"extraction_run": None, "preview_run": None}
-        observed["query"] = query
-        assert path == "/v1/admin/catalog"
-        return {"total": 0, "limit": 50, "offset": 0, "items": []}
-
     def _poster(path: str, payload: dict) -> dict:
         observed["path"] = path
         observed["payload"] = payload
         return {"item": {"relative_path": "2026/04/Job_A/a.jpg", "is_favorite": True}}
 
-    app = create_app(api_fetcher=_fetcher, api_poster=_poster)
+    app = create_app(api_fetcher=lambda path, query: {"extraction_run": None, "preview_run": None}, api_poster=_poster)
     response = app.test_client().post(
         "/catalog/actions/favorite/mark",
         data={
@@ -1116,18 +795,16 @@ def test_catalog_favorite_action_posts_to_api_and_preserves_filters() -> None:
             "is_favorite": "true",
             "is_archived": "false",
         },
-        follow_redirects=True,
     )
-    assert response.status_code == 200
+    assert response.status_code == 302
     assert observed["path"] == "/v1/admin/catalog/favorite/mark"
     assert observed["payload"] == {"relative_path": "2026/04/Job_A/a.jpg"}
-    assert observed["query"] == {
-        "limit": "50",
-        "offset": "50",
-        "is_favorite": "true",
-        "is_archived": "false",
-    }
-    assert "Marked favorite: 2026/04/Job_A/a.jpg." in response.get_data(as_text=True)
+    location = response.headers["Location"]
+    assert "/catalog?page=2" in location
+    assert "is_favorite=true" in location
+    assert "is_archived=false" in location
+    assert "action_message=Marked+favorite:" in location
+    assert "2026/04/Job_A/a.jpg." in location
 
 
 def test_catalog_archive_action_redirects_back_to_detail() -> None:
@@ -1291,7 +968,7 @@ def test_library_page_renders_tree_and_grid() -> None:
     assert 'href="/library"' in html
     assert "All folders" in html
     # Thumbnails render with lazy loading and previews proxied via server-UI.
-    assert 'src="/catalog/preview?relative_path=2026/04/Job_A/a.jpg"' in html
+    assert 'src="/catalog/preview?relative_path=2026/04/Job_A/a.jpg&max_long_edge=150"' in html
     assert 'loading="lazy"' in html
     # Lightbox modal shell is present.
     assert 'id="libraryLightbox"' in html
@@ -1825,7 +1502,7 @@ def test_library_rejects_page_renders_rows_and_disabled_delete_button() -> None:
     # Grid renders both filenames with preview URLs.
     assert "a.jpg" in html
     assert "b.jpg" in html
-    assert 'src="/catalog/preview?relative_path=2026/04/Job_A/a.jpg"' in html
+    assert 'src="/catalog/preview?relative_path=2026/04/Job_A/a.jpg&max_long_edge=150"' in html
     # Per-row Restore forms post to the unmark action.
     assert 'action="/library/actions/reject/unmark"' in html
     assert "Restore" in html
@@ -2018,6 +1695,16 @@ def test_library_page_shows_trash_count_pill_nonzero() -> None:
     assert "btn-outline-warning" in html
 
 
+def test_base_navigation_includes_trash_link() -> None:
+    """The shared navigation should expose trash as a first-class destination."""
+    app = create_app(api_fetcher=_make_library_fetcher(reject_count=0, trash_count=0))
+    response = app.test_client().get("/library")
+    assert response.status_code == 200
+    html = response.get_data(as_text=True)
+    assert 'href="/library/trash"' in html
+    assert ">Trash<" in html
+
+
 def test_library_trash_page_renders_rows_and_restore_form() -> None:
     """Trash page lists tombstoned assets with Restore form per row."""
 
@@ -2047,6 +1734,8 @@ def test_library_trash_page_renders_rows_and_restore_form() -> None:
     assert response.status_code == 200
     html = response.get_data(as_text=True)
     assert "2026/04/Job_A/a.jpg" in html
+    assert 'nav-link active' in html
+    assert 'href="/library/trash">Trash<' in html
     # Restore form must target the correct action endpoint.
     assert 'action="/library/actions/trash/restore"' in html
     # "Purge pending" label appears when days_until_purge == 0.

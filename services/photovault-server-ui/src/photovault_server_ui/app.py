@@ -103,7 +103,6 @@ def create_app(*, api_fetcher: ApiFetcher | None = None, api_poster: ApiPoster |
         return render_catalog_page(
             fetcher,
             page=page,
-            page_size=page_size,
             is_hx_request=_is_hx_request(),
             catalog_filters=catalog_filters,
             action_message=action_message,
@@ -786,7 +785,7 @@ def create_app(*, api_fetcher: ApiFetcher | None = None, api_poster: ApiPoster |
         requested_statuses: list[str] = []
         for status in request.form.getlist("target_statuses"):
             normalized = status.strip().lower()
-            if normalized in {"pending", "failed"} and normalized not in requested_statuses:
+            if normalized in {"pending", "failed", "succeeded"} and normalized not in requested_statuses:
                 requested_statuses.append(normalized)
         if not requested_statuses:
             requested_statuses = ["pending", "failed"]
@@ -854,8 +853,12 @@ def create_app(*, api_fetcher: ApiFetcher | None = None, api_poster: ApiPoster |
         relative_path = request.args.get("relative_path", "").strip()
         if not relative_path:
             return Response("missing relative_path", status=400, mimetype="text/plain")
+        raw_max_long_edge = request.args.get("max_long_edge", "").strip()
         base_url = os.getenv("PHOTOVAULT_SERVER_UI_API_BASE_URL", "http://127.0.0.1:9301")
-        query_suffix = urlencode({"relative_path": relative_path})
+        query_params = {"relative_path": relative_path}
+        if raw_max_long_edge:
+            query_params["max_long_edge"] = raw_max_long_edge
+        query_suffix = urlencode(query_params)
         req = Request(url=f"{base_url}/v1/admin/catalog/preview?{query_suffix}", method="GET")
         try:
             with urlopen(req, timeout=10) as response:
@@ -1227,7 +1230,7 @@ def create_app(*, api_fetcher: ApiFetcher | None = None, api_poster: ApiPoster |
             next_url=next_url,
             error_message=error_message,
             action_message=action_message,
-            active_page="library",
+            active_page="trash",
             suppress_layout_alerts=True,
         )
 

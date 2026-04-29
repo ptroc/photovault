@@ -135,7 +135,7 @@
                 {% if asset.preview_status == "succeeded" %}
                   <img
                     loading="lazy"
-                    src="/catalog/preview?relative_path={{ asset.relative_path | urlencode }}"
+                    src="/catalog/preview?relative_path={{ asset.relative_path | urlencode }}&max_long_edge=150"
                     alt="Preview for {{ asset.filename }}"
                   >
                 {% else %}

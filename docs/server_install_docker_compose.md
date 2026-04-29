@@ -5,6 +5,8 @@ This guide runs server-side photovault services in Docker containers with Nginx 
 - `photovault-nginx` on host port `80` (configurable)
 - `photovault-api` on internal Compose port `9301`
 - `photovault-server-ui` on internal Compose port `9401`
+- `photovault-trash-purge` as a cron-style maintenance container that purges
+  trash entries older than 14 days twice daily
 
 Assumptions:
 
@@ -127,6 +129,7 @@ sudo docker compose -f /opt/photovault/deploy/docker/docker-compose.server.yml p
 sudo docker compose -f /opt/photovault/deploy/docker/docker-compose.server.yml logs --tail=100 photovault-api
 sudo docker compose -f /opt/photovault/deploy/docker/docker-compose.server.yml logs --tail=100 photovault-server-ui
 sudo docker compose -f /opt/photovault/deploy/docker/docker-compose.server.yml logs --tail=100 photovault-nginx
+sudo docker compose -f /opt/photovault/deploy/docker/docker-compose.server.yml logs --tail=100 photovault-trash-purge
 ```
 
 Local HTTP verification:
@@ -143,6 +146,8 @@ Expected:
 - Server UI responds on `/` when basic auth credentials are provided
 - `/v1/admin/overview` returns `401` without basic auth
 - Client daemon endpoints under `/v1/client/*` and `/v1/upload/*` stay reachable for token-authenticated client traffic
+- `photovault-trash-purge` stays running and its logs show the purge script's
+  JSON summary lines when the scheduled job fires
 
 Run the explicit M4 smoke check inside the API container:
 
@@ -157,6 +162,26 @@ Expected:
 - output includes `m4-smoke: ok`
 - the deterministic smoke fixture is indexed under `_photovault_smoke/m4/manual-smoke.txt`
 - unauthenticated metadata handshake is rejected with `CLIENT_AUTH_REQUIRED`
+
+The trash purge path is already implemented in application code:
+
+- `/library/trash` shows soft-deleted files and their remaining days until purge
+- the API tombstone endpoint computes item age and purge countdown
+- `scripts/purge_trash.py` deletes tombstones older than 14 days by default
+
+The compose stack schedules that script twice daily at `03:15` and `15:15`
+container time via the `photovault-trash-purge` service.
+
+To verify the cron wiring manually, run a dry-run inside the purge container:
+
+```bash
+sudo docker compose -f /opt/photovault/deploy/docker/docker-compose.server.yml exec photovault-trash-purge \
+  python /opt/photovault/scripts/purge_trash.py \
+  --storage-root "${PHOTOVAULT_API_STORAGE_ROOT:-/var/storage}" \
+  --database-url "${PHOTOVAULT_API_DATABASE_URL}" \
+  --dry-run \
+  --log-json
+```
 
 ## 8. Day-2 operations
 
@@ -190,3 +215,6 @@ sudo docker compose --env-file .env -f docker-compose.server.yml up -d --build -
 - If container health is green but M4 smoke fails, verify the bind-mounted storage path is the
   same path configured in `PHOTOVAULT_API_STORAGE_ROOT` and is writable inside the container.
 - If remote access fails, verify host firewall allows the configured Nginx port (`PHOTOVAULT_NGINX_HTTP_PORT`, default `80`).
+- If trash does not purge as expected, inspect `photovault-trash-purge` logs
+  first; cron output is redirected to the container's stdout/stderr for
+  `docker compose logs` visibility.

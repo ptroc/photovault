@@ -58,6 +58,27 @@ services:
       timeout: 5s
       retries: 5
 
+  photovault-trash-purge:
+    image: photovault/server-base:local
+    pull_policy: never
+    container_name: photovault-trash-purge
+    restart: unless-stopped
+    working_dir: /opt/photovault
+    command: >-
+      sh -c "printf '%s\n' 'SHELL=/bin/sh' 'PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+      '15 3,15 * * * cd /opt/photovault && python /opt/photovault/scripts/purge_trash.py --storage-root \"$PHOTOVAULT_API_STORAGE_ROOT\" --database-url \"$PHOTOVAULT_API_DATABASE_URL\" --log-json >> /proc/1/fd/1 2>> /proc/1/fd/2'
+      | crontab - && exec cron -f"
+    environment:
+      PYTHONUNBUFFERED: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+      PHOTOVAULT_API_DATABASE_URL: "${PHOTOVAULT_API_DATABASE_URL:?set PHOTOVAULT_API_DATABASE_URL in .env}"
+      PHOTOVAULT_API_STORAGE_ROOT: "${PHOTOVAULT_API_STORAGE_ROOT:?set PHOTOVAULT_API_STORAGE_ROOT in .env}"
+    volumes:
+      - ${PHOTOVAULT_STORAGE_HOST_ROOT:-/var/storage}:${PHOTOVAULT_STORAGE_CONTAINER_ROOT:-/var/storage}
+    depends_on:
+      photovault-api:
+        condition: service_healthy
+
   photovault-nginx:
     image: nginx:1.27-alpine
     container_name: photovault-nginx

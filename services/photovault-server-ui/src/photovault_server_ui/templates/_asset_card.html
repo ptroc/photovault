@@ -8,7 +8,7 @@
       <div class="col-lg-auto">
         <div class="preview-frame">
           {% if asset.preview_status == "succeeded" %}
-          <img src="/catalog/preview?relative_path={{ asset.relative_path | urlencode }}" alt="Preview for {{ asset.relative_path }}">
+          <img src="/catalog/preview?relative_path={{ asset.relative_path | urlencode }}&max_long_edge=150" alt="Preview for {{ asset.relative_path }}">
           {% else %}
           <div class="text-center text-secondary small px-3">{{ asset.preview_summary }}</div>
           {% endif %}

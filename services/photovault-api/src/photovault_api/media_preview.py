@@ -130,6 +130,35 @@ def preview_relative_cache_path(
     return filename
 
 
+def ensure_preview_cache_file(
+    *,
+    storage_root_path: Path,
+    preview_cache_root_path: Path,
+    relative_path: str,
+    sha256_hex: str,
+    preview_max_long_edge: int,
+    render_preview_source,
+) -> str:
+    preview_relative_path = preview_relative_cache_path(
+        relative_path=relative_path,
+        sha256_hex=sha256_hex,
+        preview_max_long_edge=preview_max_long_edge,
+    )
+    preview_path = preview_cache_root_path / preview_relative_path
+    preview_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if not preview_path.exists():
+        asset_path = storage_root_path / relative_path
+        with render_preview_source(asset_path) as preview_image:
+            preview_image.thumbnail(
+                (preview_max_long_edge, preview_max_long_edge),
+                Image.Resampling.LANCZOS,
+            )
+            preview_image.save(preview_path, format="JPEG", quality=85, optimize=True)
+
+    return preview_relative_path
+
+
 def attempt_preview_generation(
     *,
     store: UploadStateStore,
@@ -146,7 +175,6 @@ def attempt_preview_generation(
     asset = store.get_media_asset_by_path(relative_path)
     if asset is None:
         return
-    asset_path = storage_root_path / relative_path
     file_suffix = Path(relative_path).suffix.lower()
 
     if file_suffix in preview_passthrough_suffixes:
@@ -175,22 +203,15 @@ def attempt_preview_generation(
         )
         return
 
-    preview_relative_path = preview_relative_cache_path(
-        relative_path=relative_path,
-        sha256_hex=asset.sha256_hex,
-        preview_max_long_edge=preview_max_long_edge,
-    )
-    preview_path = preview_cache_root_path / preview_relative_path
-    preview_path.parent.mkdir(parents=True, exist_ok=True)
-
     try:
-        if not preview_path.exists():
-            with render_preview_source(asset_path) as preview_image:
-                preview_image.thumbnail(
-                    (preview_max_long_edge, preview_max_long_edge),
-                    Image.Resampling.LANCZOS,
-                )
-                preview_image.save(preview_path, format="JPEG", quality=85, optimize=True)
+        preview_relative_path = ensure_preview_cache_file(
+            storage_root_path=storage_root_path,
+            preview_cache_root_path=preview_cache_root_path,
+            relative_path=relative_path,
+            sha256_hex=asset.sha256_hex,
+            preview_max_long_edge=preview_max_long_edge,
+            render_preview_source=render_preview_source,
+        )
     except ValueError as exc:
         store.upsert_media_asset_preview(
             relative_path=relative_path,

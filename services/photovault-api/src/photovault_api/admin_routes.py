@@ -683,7 +683,10 @@ def register_admin_routes(app: FastAPI, helpers: Any) -> None:
         return AdminRetryPreviewResponse(item=_to_admin_catalog_item(updated))
 
     @app.get("/v1/admin/catalog/preview")
-    def admin_catalog_preview_file(relative_path: str = Query(min_length=1)) -> FileResponse:
+    def admin_catalog_preview_file(
+        relative_path: str = Query(min_length=1),
+        max_long_edge: int | None = Query(default=None, ge=1),
+    ) -> FileResponse:
         store: UploadStateStore = app.state.upload_state_store
         storage_root_path = Path(app.state.storage_root)
         preview_cache_root_path = Path(app.state.preview_cache_root)
@@ -692,6 +695,9 @@ def register_admin_routes(app: FastAPI, helpers: Any) -> None:
             raise HTTPException(status_code=404, detail="catalog asset not found")
         if record.preview_status != "succeeded":
             raise HTTPException(status_code=404, detail="preview not available")
+        requested_max_long_edge = (
+            int(max_long_edge) if max_long_edge is not None else int(app.state.preview_max_long_edge)
+        )
 
         if not record.preview_relative_path:
             source_path = (storage_root_path / record.relative_path).resolve()
@@ -704,7 +710,20 @@ def register_admin_routes(app: FastAPI, helpers: Any) -> None:
             media_type = mimetypes.guess_type(str(source_path.name))[0] or "application/octet-stream"
             return FileResponse(source_path, media_type=media_type)
 
-        preview_path = (preview_cache_root_path / record.preview_relative_path).resolve()
+        preview_relative_path = record.preview_relative_path
+        if requested_max_long_edge != int(app.state.preview_max_long_edge):
+            try:
+                preview_relative_path = helpers._ensure_preview_cache_file(
+                    storage_root_path=storage_root_path,
+                    preview_cache_root_path=preview_cache_root_path,
+                    relative_path=record.relative_path,
+                    sha256_hex=record.sha256_hex,
+                    preview_max_long_edge=requested_max_long_edge,
+                )
+            except (OSError, ValueError) as exc:
+                raise HTTPException(status_code=404, detail=f"preview unavailable: {exc}") from exc
+
+        preview_path = (preview_cache_root_path / preview_relative_path).resolve()
         try:
             preview_path.relative_to(preview_cache_root_path)
         except ValueError as exc:
@@ -758,7 +777,7 @@ def register_admin_routes(app: FastAPI, helpers: Any) -> None:
         )
         requested_statuses = _validate_backfill_target_statuses(
             target_statuses=payload.target_statuses,
-            allowed_statuses={"pending", "failed"},
+            allowed_statuses={"pending", "failed", "succeeded"},
         )
 
         store: UploadStateStore = app.state.upload_state_store
@@ -868,7 +887,7 @@ def register_admin_routes(app: FastAPI, helpers: Any) -> None:
         )
         requested_statuses = _validate_backfill_target_statuses(
             target_statuses=payload.target_statuses,
-            allowed_statuses={"pending", "failed"},
+            allowed_statuses={"pending", "failed", "succeeded"},
         )
 
         store: UploadStateStore = app.state.upload_state_store

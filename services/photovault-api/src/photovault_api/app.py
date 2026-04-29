@@ -44,6 +44,7 @@ from .media import (
 from .media_preview import (
     attempt_media_extraction,
     attempt_preview_generation,
+    ensure_preview_cache_file,
     preview_relative_cache_path,
     upsert_storage_and_catalog_record,
 )
@@ -275,6 +276,24 @@ def _attempt_preview_generation(
         preview_passthrough_suffixes=preview_passthrough_suffixes,
         preview_placeholder_suffixes=preview_placeholder_suffixes,
         relative_path=relative_path,
+        render_preview_source=_render_preview_source,
+    )
+
+
+def _ensure_preview_cache_file(
+    *,
+    storage_root_path: Path,
+    preview_cache_root_path: Path,
+    relative_path: str,
+    sha256_hex: str,
+    preview_max_long_edge: int,
+) -> str:
+    return ensure_preview_cache_file(
+        storage_root_path=storage_root_path,
+        preview_cache_root_path=preview_cache_root_path,
+        relative_path=relative_path,
+        sha256_hex=sha256_hex,
+        preview_max_long_edge=preview_max_long_edge,
         render_preview_source=_render_preview_source,
     )
 
