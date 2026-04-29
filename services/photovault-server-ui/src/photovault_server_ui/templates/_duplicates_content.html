@@ -13,7 +13,8 @@
   <section class="page-hero">
     <div class="eyebrow text-uppercase text-secondary fw-semibold small mb-2">Diagnostics</div>
     <h1 class="display-5 fw-semibold mb-2">Duplicate SHA Groups</h1>
-    <p class="lead text-secondary mb-0">Duplicate paths surfaced for operator review without leading with hash-heavy raw data.</p>
+    <p class="lead text-secondary mb-0">Duplicate paths surfaced for operator review without leading with hash-heavy raw
+      data.</p>
   </section>
 
   <section class="card surface-card">
@@ -36,7 +37,8 @@
             <div class="d-flex flex-column flex-lg-row justify-content-between gap-3 mb-3">
               <div>
                 <h2 class="h4 mb-1">{{ group.file_count }} path(s)</h2>
-                <div class="text-secondary d-flex align-items-start gap-2">Last seen {{ timestamp_stack(group.last_seen_at_utc, mono=True) }}</div>
+                <div class="text-secondary d-flex align-items-start gap-2">Last seen {{
+                  timestamp_stack(group.last_seen_at_utc, mono=True) }}</div>
               </div>
               <details>
                 <summary class="small fw-semibold text-primary">Technical detail</summary>
@@ -53,7 +55,8 @@
                   <div class="card-body">
                     <div class="preview-frame preview-frame-duplicate mb-3">
                       {% if asset.preview_status == "succeeded" %}
-                      <img src="/catalog/preview?relative_path={{ asset.relative_path | urlencode }}&max_long_edge=150" alt="Preview for {{ asset.relative_path }}">
+                      <img src="/catalog/preview?relative_path={{ asset.relative_path | urlencode }}&max_long_edge=200"
+                        alt="Preview for {{ asset.relative_path }}">
                       {% else %}
                       <div class="text-center text-secondary small px-3">{{ asset.preview_summary }}</div>
                       {% endif %}
@@ -68,19 +71,22 @@
                     </div>
                     <div class="small text-secondary d-grid gap-2 mb-3">
                       <div><strong>Captured</strong> {{ timestamp_stack(asset.capture_timestamp_utc, mono=True) }}</div>
-                      <div><strong>Cataloged</strong> {{ timestamp_stack(asset.last_cataloged_at_utc, mono=True) }}</div>
+                      <div><strong>Cataloged</strong> {{ timestamp_stack(asset.last_cataloged_at_utc, mono=True) }}
+                      </div>
                     </div>
                     <div class="d-flex flex-wrap gap-2">
-                      <a
-                        class="btn btn-sm btn-primary"
-                        href="/catalog/asset?relative_path={{ asset.relative_path | urlencode }}"
-                      >Inspect</a>
-                      <form method="post" action="/library/actions/reject/toggle" class="inline-form" hx-post="/library/actions/reject/toggle" hx-target="#duplicates-shell" hx-swap="outerHTML" hx-push-url="true">
+                      <a class="btn btn-sm btn-primary"
+                        href="/catalog/asset?relative_path={{ asset.relative_path | urlencode }}">Inspect</a>
+                      <form method="post" action="/library/actions/reject/toggle" class="inline-form"
+                        hx-post="/library/actions/reject/toggle" hx-target="#duplicates-shell" hx-swap="outerHTML"
+                        hx-push-url="true">
                         <input type="hidden" name="relative_path" value="{{ asset.relative_path }}">
-                        <input type="hidden" name="currently_rejected" value="{{ 'true' if asset.is_rejected else 'false' }}">
+                        <input type="hidden" name="currently_rejected"
+                          value="{{ 'true' if asset.is_rejected else 'false' }}">
                         <input type="hidden" name="folder" value="">
                         <input type="hidden" name="return_to" value="duplicates">
-                        <button class="btn btn-sm {{ 'btn-outline-danger' if asset.is_rejected else 'btn-danger' }}" type="submit">
+                        <button class="btn btn-sm {{ 'btn-outline-danger' if asset.is_rejected else 'btn-danger' }}"
+                          type="submit">
                           {{ '↺ Restore' if asset.is_rejected else '✕ Mark for deletion' }}
                         </button>
                       </form>

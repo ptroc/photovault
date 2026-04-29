@@ -908,7 +908,7 @@ Verification: scripts/deploy_rpi.sh; /bin/zsh -lc "ANISBLE_HOST_KEY_CHECKING=Fal
 
 ## 2026-04-29T11:04:37Z — small preview variant for compact server UI surfaces
 
-**Action:** Added an optional `max_long_edge` preview size parameter through the API and server-UI preview proxy, generated size-specific cached JPEG variants on demand, and switched compact catalog/library/rejects/duplicates surfaces to request 150px previews while keeping asset detail and lightbox on the existing larger preview.
+**Action:** Added an optional `max_long_edge` preview size parameter through the API and server-UI preview proxy, generated size-specific cached JPEG variants on demand, and switched compact catalog/library/rejects/duplicates surfaces to request 200px previews while keeping asset detail and lightbox on the existing larger preview.
 
 **Files modified:**
 - `services/photovault-api/src/photovault_api/admin_routes.py`
@@ -961,3 +961,23 @@ Verification: scripts/deploy_rpi.sh; /bin/zsh -lc "ANISBLE_HOST_KEY_CHECKING=Fal
 
 **Verification:**
 - `source /Users/ptroc/IdeaProjects/venv.3.13/bin/activate && pytest services/photovault-api/tests/test_api_app.py -k 'backfill or retry' services/photovault-server-ui/tests/test_server_ui_app.py -k 'catalog'`
+
+## 2026-04-29T11:31:48Z — configuration env example docs
+
+**Action:** Added a canonical `docs/env_examples/` documentation set with example env files for `photovault-api`, `photovault-server-ui`, `photovault-clientd`, `photovault-client-ui`, and Docker Compose server deployment, plus a README documenting each supported option and a required change policy. Updated `AGENTS.md` so future config/env changes must update this docs set, and linked both server install guides to the new config examples.
+
+**Files modified:**
+- `AGENTS.md`
+- `docs/env_examples/README.md`
+- `docs/env_examples/photovault-api.env.example`
+- `docs/env_examples/photovault-server-ui.env.example`
+- `docs/env_examples/photovault-clientd.env.example`
+- `docs/env_examples/photovault-client-ui.env.example`
+- `docs/env_examples/docker-compose.server.env.example`
+- `docs/server_install_generic_linux.md`
+- `docs/server_install_docker_compose.md`
+
+**Verification:**
+- `sed -n '1,260p' docs/env_examples/README.md`
+- `for f in docs/env_examples/*.example; do echo '---' "$f"; sed -n '1,200p' "$f"; done`
+- `sed -n '1,260p' AGENTS.md`

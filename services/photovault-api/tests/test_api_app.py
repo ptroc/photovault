@@ -1741,23 +1741,23 @@ def test_admin_catalog_preview_generates_and_reuses_small_variant(tmp_path: Path
 
     preview_response = client.get(
         "/v1/admin/catalog/preview",
-        params={"relative_path": "2026/04/Job_A/large.jpg", "max_long_edge": 150},
+        params={"relative_path": "2026/04/Job_A/large.jpg", "max_long_edge": 200},
     )
     assert preview_response.status_code == 200
     assert preview_response.headers["content-type"] == "image/jpeg"
 
     small_preview_file = (
-        preview_cache_root / f"2026/04/Job_A/large__{item['sha256_hex'][:12]}__w150.jpg"
+        preview_cache_root / f"2026/04/Job_A/large__{item['sha256_hex'][:12]}__w200.jpg"
     )
     assert small_preview_file.is_file()
     with Image.open(small_preview_file) as preview_image:
-        assert max(preview_image.size) == 150
-        assert preview_image.size == (150, 38)
+        assert max(preview_image.size) == 200
+        assert preview_image.size == (200, 38)
 
     small_preview_mtime = small_preview_file.stat().st_mtime_ns
     second_preview_response = client.get(
         "/v1/admin/catalog/preview",
-        params={"relative_path": "2026/04/Job_A/large.jpg", "max_long_edge": 150},
+        params={"relative_path": "2026/04/Job_A/large.jpg", "max_long_edge": 200},
     )
     assert second_preview_response.status_code == 200
     assert small_preview_file.stat().st_mtime_ns == small_preview_mtime
@@ -1793,7 +1793,7 @@ def test_admin_retry_preview_passthrough_suffix_serves_original_file(tmp_path: P
 
     small_preview_response = client.get(
         "/v1/admin/catalog/preview",
-        params={"relative_path": "2026/04/Job_A/passthrough.jpg", "max_long_edge": 150},
+        params={"relative_path": "2026/04/Job_A/passthrough.jpg", "max_long_edge": 200},
     )
     assert small_preview_response.status_code == 200
     assert small_preview_response.headers["content-type"] == "image/jpeg"

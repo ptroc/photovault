@@ -89,6 +89,8 @@ Notes:
 
 ## 6. Configure service environment files
 
+Reference examples and option descriptions live in `docs/env_examples/`.
+
 Create `/etc/photovault/photovault-api.env`:
 
 ```bash

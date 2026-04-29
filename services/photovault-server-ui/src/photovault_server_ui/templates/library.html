@@ -14,23 +14,17 @@
     <div class="d-flex gap-2 align-items-center">
       <a class="btn btn-outline-secondary btn-sm" href="/catalog">Admin list view</a>
       {#
-        Persistent reject-queue badge. Always links to /library/rejects so
-        reviewers can bounce into the queue mid-triage. Styled as a pill
-        with a muted tone at zero so it's not a scolding red even when
-        nothing's marked.
+      Persistent reject-queue badge. Always links to /library/rejects so
+      reviewers can bounce into the queue mid-triage. Styled as a pill
+      with a muted tone at zero so it's not a scolding red even when
+      nothing's marked.
       #}
-      <a
-        class="btn btn-sm {{ 'btn-danger' if reject_queue_count else 'btn-outline-secondary' }} library-reject-queue-badge"
-        href="/library/rejects"
-        title="Open the reject queue"
-      >
+      <a class="btn btn-sm {{ 'btn-danger' if reject_queue_count else 'btn-outline-secondary' }} library-reject-queue-badge"
+        href="/library/rejects" title="Open the reject queue">
         {{ reject_queue_count }} marked for deletion
       </a>
-      <a
-        class="btn btn-sm {{ 'btn-outline-warning' if trash_count else 'btn-outline-secondary' }} library-trash-badge"
-        href="/library/trash"
-        title="Open the trash"
-      >
+      <a class="btn btn-sm {{ 'btn-outline-warning' if trash_count else 'btn-outline-secondary' }} library-trash-badge"
+        href="/library/trash" title="Open the trash">
         {{ trash_count }} in trash
       </a>
     </div>
@@ -45,44 +39,35 @@
         <div class="d-flex justify-content-between align-items-center mb-2">
           <h2 class="h6 mb-0">Folders</h2>
           {% if selected_folder %}
-            <a class="small" href="/library">Clear</a>
+          <a class="small" href="/library">Clear</a>
           {% endif %}
         </div>
         <ul class="list-unstyled mb-0 folder-tree-list">
           <li>
-            <a
-              class="folder-tree-entry{% if not selected_folder %} is-selected{% endif %}"
-              href="/library"
-            >
+            <a class="folder-tree-entry{% if not selected_folder %} is-selected{% endif %}" href="/library">
               <span class="folder-tree-name">All folders</span>
             </a>
           </li>
           {% for folder in folders %}
-            {# Auto-collapse: only show folder if it's a root entry (depth 1),
-               or on/along the path to the currently selected folder. #}
-            {% set show = (folder.depth == 1)
-                or folder.is_selected
-                or folder.is_ancestor_of_selected
-                or (selected_folder and folder.path.startswith(selected_folder + "/")
-                    and folder.depth == (selected_folder.count("/") + 2)) %}
-            {% if show %}
-              <li
-                class="folder-tree-item depth-{{ folder.depth }}"
-                style="--folder-depth: {{ folder.depth }};"
-              >
-                <a
-                  class="folder-tree-entry{% if folder.is_selected %} is-selected{% endif %}{% if folder.is_ancestor_of_selected %} is-ancestor{% endif %}"
-                  href="/library?folder={{ folder.path | urlencode }}"
-                  title="{{ folder.path }}"
-                >
-                  <span class="folder-tree-name">{{ folder.display_name }}</span>
-                  <span class="folder-tree-count">{{ folder.total_count }}</span>
-                </a>
-              </li>
-            {% endif %}
+          {# Auto-collapse: only show folder if it's a root entry (depth 1),
+          or on/along the path to the currently selected folder. #}
+          {% set show = (folder.depth == 1)
+          or folder.is_selected
+          or folder.is_ancestor_of_selected
+          or (selected_folder and folder.path.startswith(selected_folder + "/")
+          and folder.depth == (selected_folder.count("/") + 2)) %}
+          {% if show %}
+          <li class="folder-tree-item depth-{{ folder.depth }}" style="--folder-depth: {{ folder.depth }};">
+            <a class="folder-tree-entry{% if folder.is_selected %} is-selected{% endif %}{% if folder.is_ancestor_of_selected %} is-ancestor{% endif %}"
+              href="/library?folder={{ folder.path | urlencode }}" title="{{ folder.path }}">
+              <span class="folder-tree-name">{{ folder.display_name }}</span>
+              <span class="folder-tree-count">{{ folder.total_count }}</span>
+            </a>
+          </li>
+          {% endif %}
           {% endfor %}
           {% if not folders %}
-            <li class="text-secondary small fst-italic">No folders yet.</li>
+          <li class="text-secondary small fst-italic">No folders yet.</li>
           {% endif %}
         </ul>
       </div>
@@ -94,110 +79,87 @@
     <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
       <div class="small text-secondary">
         {% if selected_folder %}
-          Folder <code class="text-reset">{{ selected_folder }}</code> —
+        Folder <code class="text-reset">{{ selected_folder }}</code> —
         {% endif %}
         {% if total > 0 %}
-          Showing {{ start_index }}–{{ end_index }} of {{ total }}
+        Showing {{ start_index }}–{{ end_index }} of {{ total }}
         {% else %}
-          No media to display.
+        No media to display.
         {% endif %}
       </div>
       <div class="d-flex gap-2">
         {% if previous_url %}
-          <a class="btn btn-sm btn-outline-secondary" href="{{ previous_url }}">Previous</a>
+        <a class="btn btn-sm btn-outline-secondary" href="{{ previous_url }}">Previous</a>
         {% endif %}
         {% if next_url %}
-          <a class="btn btn-sm btn-outline-secondary" href="{{ next_url }}">Next</a>
+        <a class="btn btn-sm btn-outline-secondary" href="{{ next_url }}">Next</a>
         {% endif %}
       </div>
     </div>
 
     {% if assets %}
-      <div class="library-grid" role="list">
-        {% for asset in assets %}
-          <article
-            class="library-tile{% if asset.is_rejected %} library-tile--rejected{% endif %}"
-            role="listitem"
-            data-relative-path="{{ asset.relative_path }}"
-            tabindex="0"
-          >
-            <a
-              class="library-tile-link"
-              href="#"
-              hx-get="/library/lightbox?relative_path={{ asset.relative_path | urlencode }}&folder={{ selected_folder | urlencode }}&index={{ loop.index0 }}&total={{ assets | length }}"
-              hx-target="#libraryLightboxBody"
-              hx-swap="innerHTML"
-              data-bs-toggle="modal"
-              data-bs-target="#libraryLightbox"
-              aria-label="Open preview for {{ asset.filename }}"
-            >
-              <div class="library-tile-frame">
-                {% if asset.preview_status == "succeeded" %}
-                  <img
-                    loading="lazy"
-                    src="/catalog/preview?relative_path={{ asset.relative_path | urlencode }}&max_long_edge=150"
-                    alt="Preview for {{ asset.filename }}"
-                  >
-                {% else %}
-                  <div class="library-tile-placeholder">
-                    <span class="small">{{ asset.preview_summary }}</span>
-                  </div>
-                {% endif %}
-              </div>
-            </a>
-            <div class="library-tile-caption">
-              <div class="library-tile-name" title="{{ asset.relative_path }}">{{ asset.filename }}</div>
-              <div class="library-tile-badges">
-                {{ status_badge(asset.media_type) }}
-                {% if asset.is_favorite %}{{ status_badge('favorite') }}{% endif %}
-                {% if asset.is_archived %}{{ status_badge('archived') }}{% endif %}
-              </div>
+    <div class="library-grid" role="list">
+      {% for asset in assets %}
+      <article class="library-tile{% if asset.is_rejected %} library-tile--rejected{% endif %}" role="listitem"
+        data-relative-path="{{ asset.relative_path }}" tabindex="0">
+        <a class="library-tile-link" href="#"
+          hx-get="/library/lightbox?relative_path={{ asset.relative_path | urlencode }}&folder={{ selected_folder | urlencode }}&index={{ loop.index0 }}&total={{ assets | length }}"
+          hx-target="#libraryLightboxBody" hx-swap="innerHTML" data-bs-toggle="modal" data-bs-target="#libraryLightbox"
+          aria-label="Open preview for {{ asset.filename }}">
+          <div class="library-tile-frame">
+            {% if asset.preview_status == "succeeded" %}
+            <img loading="lazy"
+              src="/catalog/preview?relative_path={{ asset.relative_path | urlencode }}&max_long_edge=200"
+              alt="Preview for {{ asset.filename }}">
+            {% else %}
+            <div class="library-tile-placeholder">
+              <span class="small">{{ asset.preview_summary }}</span>
             </div>
-            <button
-              class="library-tile-more"
-              type="button"
-              title="Asset details"
-              aria-label="Asset details for {{ asset.filename }}"
-              hx-get="/library/popover?relative_path={{ asset.relative_path | urlencode }}"
-              hx-target="next .library-tile-popover"
-              hx-swap="innerHTML"
-              hx-trigger="click, mouseenter once, focus once"
-            >
-              <span aria-hidden="true">&hellip;</span>
-            </button>
-            <div class="library-tile-popover" role="dialog" aria-label="Asset details"></div>
-          </article>
-        {% endfor %}
-      </div>
-
-      <div class="d-flex justify-content-between align-items-center mt-4 flex-wrap gap-2">
-        <div class="small text-secondary">Page {{ page }}</div>
-        <div class="d-flex gap-2">
-          {% if previous_url %}
-            <a class="btn btn-sm btn-outline-secondary" href="{{ previous_url }}">Previous</a>
-          {% endif %}
-          {% if next_url %}
-            <a class="btn btn-sm btn-outline-secondary" href="{{ next_url }}">Next</a>
-          {% endif %}
+            {% endif %}
+          </div>
+        </a>
+        <div class="library-tile-caption">
+          <div class="library-tile-name" title="{{ asset.relative_path }}">{{ asset.filename }}</div>
+          <div class="library-tile-badges">
+            {{ status_badge(asset.media_type) }}
+            {% if asset.is_favorite %}{{ status_badge('favorite') }}{% endif %}
+            {% if asset.is_archived %}{{ status_badge('archived') }}{% endif %}
+          </div>
         </div>
+        <button class="library-tile-more" type="button" title="Asset details"
+          aria-label="Asset details for {{ asset.filename }}"
+          hx-get="/library/popover?relative_path={{ asset.relative_path | urlencode }}"
+          hx-target="next .library-tile-popover" hx-swap="innerHTML" hx-trigger="click, mouseenter once, focus once">
+          <span aria-hidden="true">&hellip;</span>
+        </button>
+        <div class="library-tile-popover" role="dialog" aria-label="Asset details"></div>
+      </article>
+      {% endfor %}
+    </div>
+
+    <div class="d-flex justify-content-between align-items-center mt-4 flex-wrap gap-2">
+      <div class="small text-secondary">Page {{ page }}</div>
+      <div class="d-flex gap-2">
+        {% if previous_url %}
+        <a class="btn btn-sm btn-outline-secondary" href="{{ previous_url }}">Previous</a>
+        {% endif %}
+        {% if next_url %}
+        <a class="btn btn-sm btn-outline-secondary" href="{{ next_url }}">Next</a>
+        {% endif %}
       </div>
+    </div>
     {% else %}
-      <div class="alert alert-info">
-        No media found
-        {% if selected_folder %}in <code>{{ selected_folder }}</code>{% endif %}.
-      </div>
+    <div class="alert alert-info">
+      No media found
+      {% if selected_folder %}in <code>{{ selected_folder }}</code>{% endif %}.
+    </div>
     {% endif %}
   </section>
 </div>
 
 {# ---- Lightbox modal (body swapped in via HTMX) ---------------------- #}
-<div
-  class="modal fade library-lightbox-modal"
-  id="libraryLightbox"
-  tabindex="-1"
-  aria-labelledby="libraryLightboxLabel"
-  aria-hidden="true"
->
+<div class="modal fade library-lightbox-modal" id="libraryLightbox" tabindex="-1" aria-labelledby="libraryLightboxLabel"
+  aria-hidden="true">
   <div class="modal-dialog modal-xl modal-dialog-centered modal-dialog-scrollable">
     <div class="modal-content">
       <div class="modal-header">
@@ -212,100 +174,100 @@
 </div>
 
 {# ---- Library lightbox navigation (arrow keys + prev/next) ------------
-   This block is intentionally small and dependency-free: we reuse the
-   grid's existing tile links (which already carry the hx-get URL for
-   each asset's lightbox fragment) so there is a single source of truth
-   for ordering. Navigation is done by index into that list. #}
+This block is intentionally small and dependency-free: we reuse the
+grid's existing tile links (which already carry the hx-get URL for
+each asset's lightbox fragment) so there is a single source of truth
+for ordering. Navigation is done by index into that list. #}
 <script>
-(function () {
-  var modal = document.getElementById('libraryLightbox');
-  var body = document.getElementById('libraryLightboxBody');
-  var grid = document.querySelector('.library-grid');
-  if (!modal || !body) { return; }
+  (function () {
+    var modal = document.getElementById('libraryLightbox');
+    var body = document.getElementById('libraryLightboxBody');
+    var grid = document.querySelector('.library-grid');
+    if (!modal || !body) { return; }
 
-  function tileLinkFor(index) {
-    if (!grid) { return null; }
-    var tiles = grid.querySelectorAll('.library-tile-link');
-    if (index < 0 || index >= tiles.length) { return null; }
-    return tiles[index];
-  }
-
-  function navigateTo(index) {
-    var link = tileLinkFor(index);
-    if (!link) { return; }
-    var url = link.getAttribute('hx-get') || link.dataset.hxGet;
-    if (!url || typeof htmx === 'undefined') { return; }
-    htmx.ajax('GET', url, { target: '#libraryLightboxBody', swap: 'innerHTML' });
-  }
-
-  // Prev/next buttons inside the swapped-in lightbox fragment carry a
-  // data-index attribute; handle clicks here rather than in the fragment
-  // so the behavior survives HTMX swaps without needing re-binding.
-  body.addEventListener('click', function (event) {
-    var target = event.target.closest('.library-lightbox-prev, .library-lightbox-next');
-    if (!target) { return; }
-    event.preventDefault();
-    var raw = target.getAttribute('data-index');
-    if (raw === null) { return; }
-    var idx = parseInt(raw, 10);
-    if (!Number.isFinite(idx)) { return; }
-    navigateTo(idx);
-  });
-
-  // Arrow-key navigation while the modal is open. Left/right move between
-  // tiles; Escape is already handled by Bootstrap's dismiss behavior.
-  document.addEventListener('keydown', function (event) {
-    if (!modal.classList.contains('show')) { return; }
-    if (event.defaultPrevented) { return; }
-    // Don't intercept keys when the user is typing in an input.
-    var active = document.activeElement;
-    if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA')) { return; }
-
-    var currentBtn = body.querySelector('.library-lightbox-prev, .library-lightbox-next');
-    // Figure out current index by looking for either the prev or next
-    // button and back-computing. If both exist, the prev's data-index is
-    // (current - 1), so current = prev + 1. If only next is present, we
-    // are at position 0. If only prev is present, we're at the last.
-    var prevBtn = body.querySelector('.library-lightbox-prev');
-    var nextBtn = body.querySelector('.library-lightbox-next');
-    var currentIdx = null;
-    if (prevBtn && prevBtn.getAttribute('data-index') !== null) {
-      currentIdx = parseInt(prevBtn.getAttribute('data-index'), 10) + 1;
-    } else if (nextBtn && nextBtn.getAttribute('data-index') !== null) {
-      currentIdx = parseInt(nextBtn.getAttribute('data-index'), 10) - 1;
+    function tileLinkFor(index) {
+      if (!grid) { return null; }
+      var tiles = grid.querySelectorAll('.library-tile-link');
+      if (index < 0 || index >= tiles.length) { return null; }
+      return tiles[index];
     }
-    if (currentIdx === null || !Number.isFinite(currentIdx)) { return; }
 
-    if (event.key === 'ArrowRight') {
+    function navigateTo(index) {
+      var link = tileLinkFor(index);
+      if (!link) { return; }
+      var url = link.getAttribute('hx-get') || link.dataset.hxGet;
+      if (!url || typeof htmx === 'undefined') { return; }
+      htmx.ajax('GET', url, { target: '#libraryLightboxBody', swap: 'innerHTML' });
+    }
+
+    // Prev/next buttons inside the swapped-in lightbox fragment carry a
+    // data-index attribute; handle clicks here rather than in the fragment
+    // so the behavior survives HTMX swaps without needing re-binding.
+    body.addEventListener('click', function (event) {
+      var target = event.target.closest('.library-lightbox-prev, .library-lightbox-next');
+      if (!target) { return; }
       event.preventDefault();
-      navigateTo(currentIdx + 1);
-    } else if (event.key === 'ArrowLeft') {
-      event.preventDefault();
-      navigateTo(currentIdx - 1);
-    } else if (event.key === 'x' || event.key === 'X') {
-      // Phase 3.B: X toggles the reject queue for the current asset.
-      // We submit the already-rendered in-fragment form so the keyboard
-      // path and the visible button share one code path. The server
-      // response swaps the lightbox body; after a reject (not an
-      // unreject), auto-advance to the next tile so the reviewer keeps
-      // their hands on the keyboard.
-      var rejectForm = body.querySelector('.library-lightbox-reject-form');
-      if (!rejectForm || typeof htmx === 'undefined') { return; }
-      event.preventDefault();
-      var wasRejectedInput = rejectForm.querySelector('input[name="currently_rejected"]');
-      var wasRejected = wasRejectedInput && wasRejectedInput.value === 'true';
-      htmx.trigger(rejectForm, 'submit');
-      if (!wasRejected) {
-        // After the swap completes, move forward one tile. The swap is
-        // asynchronous so we listen for it once on the body target.
-        var advanceOnce = function () {
-          body.removeEventListener('htmx:afterSwap', advanceOnce);
-          navigateTo(currentIdx + 1);
-        };
-        body.addEventListener('htmx:afterSwap', advanceOnce);
+      var raw = target.getAttribute('data-index');
+      if (raw === null) { return; }
+      var idx = parseInt(raw, 10);
+      if (!Number.isFinite(idx)) { return; }
+      navigateTo(idx);
+    });
+
+    // Arrow-key navigation while the modal is open. Left/right move between
+    // tiles; Escape is already handled by Bootstrap's dismiss behavior.
+    document.addEventListener('keydown', function (event) {
+      if (!modal.classList.contains('show')) { return; }
+      if (event.defaultPrevented) { return; }
+      // Don't intercept keys when the user is typing in an input.
+      var active = document.activeElement;
+      if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA')) { return; }
+
+      var currentBtn = body.querySelector('.library-lightbox-prev, .library-lightbox-next');
+      // Figure out current index by looking for either the prev or next
+      // button and back-computing. If both exist, the prev's data-index is
+      // (current - 1), so current = prev + 1. If only next is present, we
+      // are at position 0. If only prev is present, we're at the last.
+      var prevBtn = body.querySelector('.library-lightbox-prev');
+      var nextBtn = body.querySelector('.library-lightbox-next');
+      var currentIdx = null;
+      if (prevBtn && prevBtn.getAttribute('data-index') !== null) {
+        currentIdx = parseInt(prevBtn.getAttribute('data-index'), 10) + 1;
+      } else if (nextBtn && nextBtn.getAttribute('data-index') !== null) {
+        currentIdx = parseInt(nextBtn.getAttribute('data-index'), 10) - 1;
       }
-    }
-  });
-})();
+      if (currentIdx === null || !Number.isFinite(currentIdx)) { return; }
+
+      if (event.key === 'ArrowRight') {
+        event.preventDefault();
+        navigateTo(currentIdx + 1);
+      } else if (event.key === 'ArrowLeft') {
+        event.preventDefault();
+        navigateTo(currentIdx - 1);
+      } else if (event.key === 'x' || event.key === 'X') {
+        // Phase 3.B: X toggles the reject queue for the current asset.
+        // We submit the already-rendered in-fragment form so the keyboard
+        // path and the visible button share one code path. The server
+        // response swaps the lightbox body; after a reject (not an
+        // unreject), auto-advance to the next tile so the reviewer keeps
+        // their hands on the keyboard.
+        var rejectForm = body.querySelector('.library-lightbox-reject-form');
+        if (!rejectForm || typeof htmx === 'undefined') { return; }
+        event.preventDefault();
+        var wasRejectedInput = rejectForm.querySelector('input[name="currently_rejected"]');
+        var wasRejected = wasRejectedInput && wasRejectedInput.value === 'true';
+        htmx.trigger(rejectForm, 'submit');
+        if (!wasRejected) {
+          // After the swap completes, move forward one tile. The swap is
+          // asynchronous so we listen for it once on the body target.
+          var advanceOnce = function () {
+            body.removeEventListener('htmx:afterSwap', advanceOnce);
+            navigateTo(currentIdx + 1);
+          };
+          body.addEventListener('htmx:afterSwap', advanceOnce);
+        }
+      }
+    });
+  })();
 </script>
 {% endblock %}

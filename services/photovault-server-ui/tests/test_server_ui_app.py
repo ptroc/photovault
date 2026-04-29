@@ -430,12 +430,12 @@ def test_catalog_preview_proxy_forwards_optional_max_long_edge(monkeypatch) -> N
 
     app = create_app(api_fetcher=lambda path, query: {"total": 0, "limit": 50, "offset": 0, "items": []})
     response = app.test_client().get(
-        "/catalog/preview?relative_path=2026/04/Job_A/a.jpg&max_long_edge=150"
+        "/catalog/preview?relative_path=2026/04/Job_A/a.jpg&max_long_edge=200"
     )
     assert response.status_code == 200
     assert response.data == b"preview-bytes"
     assert observed["url"].endswith(
-        "/v1/admin/catalog/preview?relative_path=2026%2F04%2FJob_A%2Fa.jpg&max_long_edge=150"
+        "/v1/admin/catalog/preview?relative_path=2026%2F04%2FJob_A%2Fa.jpg&max_long_edge=200"
     )
     assert observed["timeout"] == "10"
 
@@ -968,7 +968,7 @@ def test_library_page_renders_tree_and_grid() -> None:
     assert 'href="/library"' in html
     assert "All folders" in html
     # Thumbnails render with lazy loading and previews proxied via server-UI.
-    assert 'src="/catalog/preview?relative_path=2026/04/Job_A/a.jpg&max_long_edge=150"' in html
+    assert 'src="/catalog/preview?relative_path=2026/04/Job_A/a.jpg&max_long_edge=200"' in html
     assert 'loading="lazy"' in html
     # Lightbox modal shell is present.
     assert 'id="libraryLightbox"' in html
@@ -1502,7 +1502,7 @@ def test_library_rejects_page_renders_rows_and_disabled_delete_button() -> None:
     # Grid renders both filenames with preview URLs.
     assert "a.jpg" in html
     assert "b.jpg" in html
-    assert 'src="/catalog/preview?relative_path=2026/04/Job_A/a.jpg&max_long_edge=150"' in html
+    assert 'src="/catalog/preview?relative_path=2026/04/Job_A/a.jpg&max_long_edge=200"' in html
     # Per-row Restore forms post to the unmark action.
     assert 'action="/library/actions/reject/unmark"' in html
     assert "Restore" in html

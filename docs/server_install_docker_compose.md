@@ -58,6 +58,8 @@ Note: the compose file uses env-based bind mount variables:
 
 ## 4. Configure environment file for external PostgreSQL
 
+Reference examples and option descriptions live in `docs/env_examples/`.
+
 Create `/opt/photovault/deploy/docker/.env`:
 
 ```bash

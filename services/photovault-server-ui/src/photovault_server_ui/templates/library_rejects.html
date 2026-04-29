@@ -3,10 +3,10 @@
 {% set title = "Reject queue" %}
 {% block content %}
 {% if action_message %}
-  <div class="alert alert-success alert-dismissible fade show mb-3" role="alert">
-    {{ action_message }}
-    <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
-  </div>
+<div class="alert alert-success alert-dismissible fade show mb-3" role="alert">
+  {{ action_message }}
+  <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+</div>
 {% endif %}
 <section class="page-hero">
   <div class="d-flex flex-column flex-lg-row justify-content-between gap-3 align-items-lg-end">
@@ -22,13 +22,9 @@
     <div class="d-flex gap-2 align-items-center">
       <a class="btn btn-outline-secondary btn-sm" href="/library">← Back to library</a>
       <form method="post" action="/library/actions/rejects/execute" style="display: inline;">
-        <button
-          class="btn btn-danger btn-sm"
-          type="submit"
-          {% if total == 0 %}disabled{% endif %}
+        <button class="btn btn-danger btn-sm" type="submit" {% if total==0 %}disabled{% endif %}
           aria-disabled="{% if total == 0 %}true{% else %}false{% endif %}"
-          onclick="return confirm('Delete {{ total }} rejected asset(s)? This action cannot be undone.');"
-        >
+          onclick="return confirm('Delete {{ total }} rejected asset(s)? This action cannot be undone.');">
           Delete rejected media ({{ total }})
         </button>
       </form>
@@ -41,87 +37,76 @@
 </p>
 
 {% if total > 0 %}
-  <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
-    <div class="small text-secondary">
-      Showing {{ start_index }}–{{ end_index }} of {{ total }}
-    </div>
-    <div class="d-flex gap-2">
-      {% if previous_url %}
-        <a class="btn btn-sm btn-outline-secondary" href="{{ previous_url }}">Previous</a>
-      {% endif %}
-      {% if next_url %}
-        <a class="btn btn-sm btn-outline-secondary" href="{{ next_url }}">Next</a>
-      {% endif %}
-    </div>
+<div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+  <div class="small text-secondary">
+    Showing {{ start_index }}–{{ end_index }} of {{ total }}
   </div>
+  <div class="d-flex gap-2">
+    {% if previous_url %}
+    <a class="btn btn-sm btn-outline-secondary" href="{{ previous_url }}">Previous</a>
+    {% endif %}
+    {% if next_url %}
+    <a class="btn btn-sm btn-outline-secondary" href="{{ next_url }}">Next</a>
+    {% endif %}
+  </div>
+</div>
 
-  <div class="library-grid" role="list">
-    {% for row in reject_rows %}
-      {% set asset = row.item %}
-      <article
-        class="library-tile library-tile--rejected"
-        role="listitem"
-        data-relative-path="{{ row.relative_path }}"
-      >
-        <div class="library-tile-frame">
-          {% if asset and asset.preview_status == "succeeded" %}
-            <img
-              loading="lazy"
-              src="/catalog/preview?relative_path={{ row.relative_path | urlencode }}&max_long_edge=150"
-              alt="Preview for {{ asset.filename }}"
-            >
-          {% else %}
-            <div class="library-tile-placeholder">
-              <span class="small">{{ (asset.preview_summary if asset else 'Preview unavailable') }}</span>
-            </div>
-          {% endif %}
-        </div>
-        <div class="library-tile-caption">
-          <div class="library-tile-name" title="{{ row.relative_path }}">
-            {{ (asset.filename if asset else row.relative_path) }}
-          </div>
-          <div class="library-tile-badges">
-            {% if asset %}
-              {{ status_badge(asset.media_type) }}
-            {% endif %}
-            <span class="badge rounded-pill text-bg-danger">Rejected</span>
-          </div>
-          <div class="small text-secondary mt-1">
-            Marked {{ timestamp_stack(row.marked_at_utc, mono=True) }}
-            {% if row.marked_reason %} · {{ row.marked_reason }}{% endif %}
-          </div>
-          <form
-            method="post"
-            action="/library/actions/reject/unmark"
-            class="inline-form mt-2"
-          >
-            <input type="hidden" name="relative_path" value="{{ row.relative_path }}">
-            <input type="hidden" name="page" value="{{ page }}">
-            <button class="btn btn-sm btn-outline-secondary" type="submit">
-              ↺ Restore
-            </button>
-          </form>
-        </div>
-      </article>
-    {% endfor %}
-  </div>
-
-  <div class="d-flex justify-content-between align-items-center mt-4 flex-wrap gap-2">
-    <div class="small text-secondary">Page {{ page }}</div>
-    <div class="d-flex gap-2">
-      {% if previous_url %}
-        <a class="btn btn-sm btn-outline-secondary" href="{{ previous_url }}">Previous</a>
-      {% endif %}
-      {% if next_url %}
-        <a class="btn btn-sm btn-outline-secondary" href="{{ next_url }}">Next</a>
+<div class="library-grid" role="list">
+  {% for row in reject_rows %}
+  {% set asset = row.item %}
+  <article class="library-tile library-tile--rejected" role="listitem" data-relative-path="{{ row.relative_path }}">
+    <div class="library-tile-frame">
+      {% if asset and asset.preview_status == "succeeded" %}
+      <img loading="lazy" src="/catalog/preview?relative_path={{ row.relative_path | urlencode }}&max_long_edge=200"
+        alt="Preview for {{ asset.filename }}">
+      {% else %}
+      <div class="library-tile-placeholder">
+        <span class="small">{{ (asset.preview_summary if asset else 'Preview unavailable') }}</span>
+      </div>
       {% endif %}
     </div>
+    <div class="library-tile-caption">
+      <div class="library-tile-name" title="{{ row.relative_path }}">
+        {{ (asset.filename if asset else row.relative_path) }}
+      </div>
+      <div class="library-tile-badges">
+        {% if asset %}
+        {{ status_badge(asset.media_type) }}
+        {% endif %}
+        <span class="badge rounded-pill text-bg-danger">Rejected</span>
+      </div>
+      <div class="small text-secondary mt-1">
+        Marked {{ timestamp_stack(row.marked_at_utc, mono=True) }}
+        {% if row.marked_reason %} · {{ row.marked_reason }}{% endif %}
+      </div>
+      <form method="post" action="/library/actions/reject/unmark" class="inline-form mt-2">
+        <input type="hidden" name="relative_path" value="{{ row.relative_path }}">
+        <input type="hidden" name="page" value="{{ page }}">
+        <button class="btn btn-sm btn-outline-secondary" type="submit">
+          ↺ Restore
+        </button>
+      </form>
+    </div>
+  </article>
+  {% endfor %}
+</div>
+
+<div class="d-flex justify-content-between align-items-center mt-4 flex-wrap gap-2">
+  <div class="small text-secondary">Page {{ page }}</div>
+  <div class="d-flex gap-2">
+    {% if previous_url %}
+    <a class="btn btn-sm btn-outline-secondary" href="{{ previous_url }}">Previous</a>
+    {% endif %}
+    {% if next_url %}
+    <a class="btn btn-sm btn-outline-secondary" href="{{ next_url }}">Next</a>
+    {% endif %}
   </div>
+</div>
 {% else %}
-  <div class="alert alert-info">
-    The reject queue is empty. Open the library, focus an asset in the
-    lightbox, and press <kbd>X</kbd> (or click <strong>Reject</strong>) to
-    add it here.
-  </div>
+<div class="alert alert-info">
+  The reject queue is empty. Open the library, focus an asset in the
+  lightbox, and press <kbd>X</kbd> (or click <strong>Reject</strong>) to
+  add it here.
+</div>
 {% endif %}
 {% endblock %}

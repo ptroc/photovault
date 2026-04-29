@@ -85,3 +85,11 @@ Docs impacted: none | <list>
   - files created/modified (if any)
   - verification commands run (if any)
 - Do not rewrite or delete historical log entries unless explicitly requested by the user.
+
+## Configuration Documentation (Mandatory)
+- Runtime environment-file documentation lives under `docs/env_examples/`.
+- When adding, removing, renaming, or changing any runtime config option or env var, update:
+  - the relevant `*.env.example` file under `docs/env_examples/`
+  - `docs/env_examples/README.md`
+  - any install/deploy docs that reference that option
+- Do not introduce new config options without documenting them in that docs set in the same change.
