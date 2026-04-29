@@ -1,11 +1,13 @@
 import hashlib
 import io
 import logging
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
 import photovault_api.app as app_module
+import photovault_api.media_preview as media_preview_module
 from fastapi.testclient import TestClient
 from photovault_api.app import create_app
 from photovault_api.state_store import InMemoryUploadStateStore
@@ -2893,6 +2895,103 @@ def test_extract_media_metadata_returns_exposure_fields(tmp_path: Path) -> None:
     assert metadata["iso_speed"] == 400
     assert metadata["focal_length_mm"] == 50.0
     assert metadata["focal_length_35mm_mm"] == 75
+
+
+def test_extract_media_metadata_returns_partial_fields_for_raw_preview(monkeypatch, tmp_path: Path) -> None:
+    preview_bytes = _jpeg_with_exif_bytes(
+        width=4416,
+        height=2944,
+        camera_make="FUJIFILM",
+        camera_model="X-T5",
+        orientation=1,
+        capture_timestamp="",
+        capture_offset="",
+        lens_model="",
+    )
+
+    class FakeRawSizes:
+        width = 7752
+        height = 5178
+
+    class FakeThumbnail:
+        format = "jpeg"
+        data = preview_bytes
+
+    class FakeRawReader:
+        sizes = FakeRawSizes()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def extract_thumb(self):
+            return FakeThumbnail()
+
+    class FakeThumbFormat:
+        JPEG = "jpeg"
+
+    class FakeRawPyModule:
+        ThumbFormat = FakeThumbFormat
+        LibRawError = RuntimeError
+
+        @staticmethod
+        def imread(path: str) -> FakeRawReader:
+            assert path.endswith("photo.raf")
+            return FakeRawReader()
+
+    monkeypatch.setitem(sys.modules, "rawpy", FakeRawPyModule())
+
+    file_path = tmp_path / "photo.raf"
+    file_path.write_bytes(b"fake-raw-content")
+
+    metadata = app_module._extract_media_metadata(file_path)
+    assert metadata["camera_make"] == "FUJIFILM"
+    assert metadata["camera_model"] == "X-T5"
+    assert metadata["image_width"] == 7752
+    assert metadata["image_height"] == 5178
+    assert metadata["orientation"] == 1
+    assert metadata["capture_timestamp_utc"] is None
+    assert metadata["f_number"] is None
+    assert metadata["iso_speed"] is None
+
+
+def test_attempt_media_extraction_logs_failure(tmp_path: Path, caplog) -> None:
+    store = InMemoryUploadStateStore()
+    store.initialize()
+    relative_path = "2026/04/Job_A/broken.raf"
+    store.upsert_media_asset(
+        relative_path=relative_path,
+        sha256_hex="a" * 64,
+        size_bytes=123,
+        origin_kind="uploaded",
+        observed_at_utc="2026-04-29T00:00:00+00:00",
+        provenance_job_name="Job_A",
+        provenance_original_filename="broken.raf",
+    )
+    asset_path = tmp_path / relative_path
+    asset_path.parent.mkdir(parents=True, exist_ok=True)
+    asset_path.write_bytes(b"broken")
+
+    caplog.set_level(logging.WARNING, logger="photovault-api.app")
+    media_preview_module.attempt_media_extraction(
+        store=store,
+        storage_root_path=tmp_path,
+        relative_path=relative_path,
+        extract_media_metadata=lambda path: (_ for _ in ()).throw(
+            ValueError("unsupported media format for extraction: .raf")
+        ),
+    )
+
+    assert (
+        f"media metadata extraction failed for {relative_path}: "
+        "unsupported media format for extraction: .raf"
+    ) in caplog.text
+    item = store.get_media_asset_by_path(relative_path)
+    assert item is not None
+    assert item.extraction_status == "failed"
+    assert item.extraction_failure_detail == "unsupported media format for extraction: .raf"
 
 
 def test_upload_verify_populates_exposure_fields_on_catalog(tmp_path: Path) -> None:

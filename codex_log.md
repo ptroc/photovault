@@ -981,3 +981,16 @@ Verification: scripts/deploy_rpi.sh; /bin/zsh -lc "ANISBLE_HOST_KEY_CHECKING=Fal
 - `sed -n '1,260p' docs/env_examples/README.md`
 - `for f in docs/env_examples/*.example; do echo '---' "$f"; sed -n '1,200p' "$f"; done`
 - `sed -n '1,260p' AGENTS.md`
+
+## 2026-04-29T14:33:40Z — RAF EXIF extraction fallback and logging
+
+**Action:** Fixed RAW metadata extraction so `.RAF` and the other supported RAW suffixes no longer fail immediately during catalog extraction. The API now uses `rawpy` to read RAW dimensions and embedded JPEG preview EXIF when available, and logs extraction failures at warning level when extraction still cannot complete.
+
+**Files modified:**
+- `services/photovault-api/src/photovault_api/media.py`
+- `services/photovault-api/src/photovault_api/media_preview.py`
+- `services/photovault-api/tests/test_api_app.py`
+
+**Verification:**
+- `source /Users/ptroc/IdeaProjects/venv.3.13/bin/activate && pytest -q services/photovault-api/tests/test_api_app.py -k "extract_media_metadata or attempt_media_extraction_logs_failure or exposure_fields"`
+- `source /Users/ptroc/IdeaProjects/venv.3.13/bin/activate && python - <<'PY' ... _extract_media_metadata(Path('docs/DSCF9517.RAF')) ... PY`

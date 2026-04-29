@@ -301,8 +301,72 @@ def _extract_capture_timestamp_utc(exif_map: object) -> str | None:
     return parsed.replace(tzinfo=UTC).isoformat()
 
 
+def _metadata_from_dimensions_and_exif(
+    *,
+    width: int,
+    height: int,
+    exif_map: object,
+) -> dict[str, str | int | float | None]:
+    return {
+        "capture_timestamp_utc": _extract_capture_timestamp_utc(exif_map),
+        "camera_make": _normalize_exif_text(exif_map.get(271)),
+        "camera_model": _normalize_exif_text(exif_map.get(272)),
+        "image_width": int(width),
+        "image_height": int(height),
+        "orientation": _normalize_exif_int(exif_map.get(274)),
+        "lens_model": _normalize_exif_text(exif_map.get(42036)),
+        "exposure_time_s": _normalize_exif_rational(exif_map.get(33434)),
+        "f_number": _normalize_exif_rational(exif_map.get(33437)),
+        "iso_speed": _normalize_exif_iso_speed(exif_map.get(34855)),
+        "focal_length_mm": _normalize_exif_rational(exif_map.get(37386)),
+        "focal_length_35mm_mm": _normalize_exif_int(exif_map.get(41989)),
+    }
+
+
+def _extract_raw_media_metadata(path: Path) -> dict[str, str | int | float | None]:
+    try:
+        import rawpy  # type: ignore[import-untyped]
+    except ImportError as exc:
+        raise ValueError(
+            f"RAW metadata extraction unavailable: rawpy is not installed: {exc}"
+        ) from exc
+
+    try:
+        with rawpy.imread(str(path)) as raw:
+            width = int(raw.sizes.width)
+            height = int(raw.sizes.height)
+            exif_map = None
+            try:
+                thumbnail = raw.extract_thumb()
+            except (rawpy.LibRawError, OSError, ValueError):
+                thumbnail = None
+
+            if (
+                thumbnail is not None
+                and thumbnail.format == rawpy.ThumbFormat.JPEG
+                and thumbnail.data
+            ):
+                with Image.open(io.BytesIO(thumbnail.data)) as preview_image:
+                    preview_image.load()
+                    exif_map = preview_image.getexif()
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"invalid RAW media content for extraction: {exc}") from exc
+    except rawpy.LibRawError as exc:
+        raise ValueError(f"invalid RAW media content for extraction: {exc}") from exc
+
+    if exif_map is None:
+        exif_map = {}
+    return _metadata_from_dimensions_and_exif(
+        width=width,
+        height=height,
+        exif_map=exif_map,
+    )
+
+
 def _extract_media_metadata(path: Path) -> dict[str, str | int | float | None]:
     file_suffix = path.suffix.lower()
+    if file_suffix in _PREVIEW_RAW_SUFFIXES:
+        return _extract_raw_media_metadata(path)
     if file_suffix not in {".png", ".jpg", ".jpeg"}:
         raise ValueError(f"unsupported media format for extraction: {file_suffix or 'unknown'}")
 
@@ -318,20 +382,11 @@ def _extract_media_metadata(path: Path) -> dict[str, str | int | float | None]:
     # docs/proposals/server_ui_catalog_improvements.md §9 for rationale
     # (ExposureTime preferred over ShutterSpeedValue; ISOSpeedRatings may
     # be a tuple; 35mm equivalent focal length is a plain integer).
-    return {
-        "capture_timestamp_utc": _extract_capture_timestamp_utc(exif_map),
-        "camera_make": _normalize_exif_text(exif_map.get(271)),
-        "camera_model": _normalize_exif_text(exif_map.get(272)),
-        "image_width": int(width),
-        "image_height": int(height),
-        "orientation": _normalize_exif_int(exif_map.get(274)),
-        "lens_model": _normalize_exif_text(exif_map.get(42036)),
-        "exposure_time_s": _normalize_exif_rational(exif_map.get(33434)),
-        "f_number": _normalize_exif_rational(exif_map.get(33437)),
-        "iso_speed": _normalize_exif_iso_speed(exif_map.get(34855)),
-        "focal_length_mm": _normalize_exif_rational(exif_map.get(37386)),
-        "focal_length_35mm_mm": _normalize_exif_int(exif_map.get(41989)),
-    }
+    return _metadata_from_dimensions_and_exif(
+        width=width,
+        height=height,
+        exif_map=exif_map,
+    )
 
 
 def _media_type_for_relative_path(relative_path: str) -> str:

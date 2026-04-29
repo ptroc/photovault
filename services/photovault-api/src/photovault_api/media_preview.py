@@ -1,11 +1,14 @@
 """Preview and extraction helper implementations for photovault-api."""
 
+import logging
 from datetime import UTC, datetime
 from pathlib import Path
 
 from PIL import Image
 
 from .state_store import UploadStateStore
+
+APP_LOGGER = logging.getLogger("photovault-api.app")
 
 
 def upsert_storage_and_catalog_record(
@@ -51,6 +54,11 @@ def attempt_media_extraction(
     try:
         metadata = extract_media_metadata(asset_path)
     except (OSError, ValueError) as exc:
+        APP_LOGGER.warning(
+            "media metadata extraction failed for %s: %s",
+            relative_path,
+            exc,
+        )
         store.upsert_media_asset_extraction(
             relative_path=relative_path,
             extraction_status="failed",
